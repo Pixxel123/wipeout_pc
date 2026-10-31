@@ -16,7 +16,6 @@ Without a regex, find looks for names of button prompts and controller pictures.
 """
 import argparse
 import hashlib
-import lzma
 from pathlib import Path
 import re
 import struct
@@ -83,7 +82,8 @@ class Archive:
             raw = self.file.read(stored)
             if stored == length:
                 data += raw
-            elif self.compression == b'lzma':
+            elif self.compression == b'lzma':  # imported here: the packaged launcher has no lzma, WipEout uses zlib
+                import lzma
                 data += lzma.LZMADecompressor(lzma.FORMAT_ALONE).decompress(raw)[:length]
             elif raw[:1] == b'\x78':
                 data += zlib.decompress(raw)

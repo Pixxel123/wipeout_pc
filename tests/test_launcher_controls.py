@@ -280,15 +280,20 @@ class ControlMapTest(unittest.TestCase):
         self.assertEqual(launcher.APP_DEFAULTS['glyph_style'], 'off')
         self.assertNotIn('GOW3_GLYPH_STYLE', launcher.game_environment({**launcher.APP_DEFAULTS}))
 
-    def test_no_god_of_war_button_icons(self):
-        # They are drawn into God of War III's R_UI.WAD, which WipEout has not: a saved or inherited
-        # choice never reaches the game.
+    def test_glyph_style_reaches_the_game(self):
+        # WipEout's prompts (scripts/wipeout_glyphs.py): auto, Xbox or Nintendo. Off, an unknown value
+        # or the keyboard (its prompts are a font of gamepad buttons) send nothing, and an inherited
+        # GOW3_GLYPH_STYLE never reaches the game.
         from unittest import mock
 
         with mock.patch.dict(launcher.os.environ, {'GOW3_GLYPH_STYLE': 'xbox'}):
-            for style in ('auto', 'xbox', 'nintendo', 'keyboard', 'off'):
+            for style in ('auto', 'xbox', 'nintendo'):
+                env = launcher.game_environment({**launcher.APP_DEFAULTS, 'glyph_style': style})
+                self.assertEqual(env['GOW3_GLYPH_STYLE'], style)
+            for style in ('off', 'keyboard', 'playstation', None):
                 env = launcher.game_environment({**launcher.APP_DEFAULTS, 'glyph_style': style})
                 self.assertNotIn('GOW3_GLYPH_STYLE', env)
+        self.assertEqual([v for v, _t in launcher.GLYPH_STYLES], ['off', 'auto', 'xbox', 'nintendo'])
 
     def test_settings_keys_kept(self):
         for key in ('game_dir', 'user_dir', 'mods_dir', 'patches_dir', 'language', 'hdr',

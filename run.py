@@ -116,16 +116,19 @@ def find_executable(name):
 
 def glyph_mounts(env, probe, game, out):
     """(probe arguments, style) of the controller glyphs: patched copies of the WADs that hold the
-    game's button icons, mounted over them (scripts/glyphs.py). Opt-in: unless GOW3_GLYPH_STYLE is
-    auto, xbox, nintendo or keyboard nothing is asked, drawn or mounted, and old copies are removed.
-    The keyboard keys follow GOW3_KEY_MAP; auto shows them when no gamepad is connected. The game
-    folder is never written."""
+    game's button icons, mounted over them (scripts/glyphs.py), or for WipEout runtime file patches
+    of the button font and tabs in its archives, added to GOW3_FILE_PATCHES (scripts/wipeout_glyphs.py).
+    Opt-in: unless GOW3_GLYPH_STYLE is auto, xbox, nintendo or keyboard nothing is asked, drawn or
+    mounted, and old copies are removed. The keyboard keys follow GOW3_KEY_MAP; auto shows them when
+    no gamepad is connected. The game folder is never written."""
     choice = env.get('GOW3_GLYPH_STYLE', 'off')
     if choice not in ('auto', 'xbox', 'nintendo', 'keyboard'):
         shutil.rmtree(Path(out) / 'glyphs', ignore_errors=True)
+        shutil.rmtree(Path(out) / 'wipeout_glyphs', ignore_errors=True)
         return [], None
     try:
         import glyphs
+        import wipeout_glyphs
         pad = ''
         if choice == 'auto':
             pad = subprocess.run([str(probe), '--gamepad'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -135,12 +138,22 @@ def glyph_mounts(env, probe, game, out):
     except Exception as error:  # noqa: BLE001  (icons only: whatever fails, the game still starts)
         print(f'Glyphs: {error}; the game keeps its own button icons', flush=True)
         return [], None
-    if not mounts:
+    patches = []
+    try:  # WipEout's: patches of its archives, made apart so a failure leaves the WAD copies alone
+        patches = wipeout_glyphs.build(game, out, style, faces, env.get('GOW3_PAD_MAP', ''))
+        if patches and env.get('GOW3_FILE_PATCHES'):
+            with open(env['GOW3_FILE_PATCHES'], 'a', encoding='utf-8') as f:
+                f.write(''.join(line + '\n' for line in patches))
+    except Exception as error:  # noqa: BLE001
+        print(f'Glyphs: {error}; the game keeps its own button icons', flush=True)
+        patches = []
+    if not mounts and not patches:
         print('Glyphs: a PlayStation controller, the game keeps its own button icons' if style == 'playstation'
+              else 'Glyphs: no button icons for this controller in this game folder' if style == 'keyboard'
               else 'Glyphs: no button icons found in this game folder', flush=True)
         return [], None
-    print(f'Glyphs: {style}{f" ({name})" if name else ""}, on copies in {Path(out) / "glyphs"}; game files untouched',
-          flush=True)
+    where = Path(out) / ('glyphs' if mounts else 'wipeout_glyphs')
+    print(f'Glyphs: {style}{f" ({name})" if name else ""}, on copies in {where}; game files untouched', flush=True)
     return [part for guest, path in mounts.items() for part in ('--mount', f'{guest}={path}')], style
 
 

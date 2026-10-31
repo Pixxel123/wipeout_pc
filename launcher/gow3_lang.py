@@ -1526,6 +1526,21 @@ EXTRA['es'].update({
     'Controller type': 'Tipo de mando',
 })
 
+EXTRA['pt'].update({
+    'In-game button icons': 'Ícones de botões no jogo',
+    "PlayStation (the game's)": 'PlayStation (os do jogo)',
+    'The connected gamepad': 'O controle conectado',
+    "The buttons the game's own prompts show, in its style. Drawn when the game starts (the first time takes a few seconds); the game files are not changed.":
+        'Os botões que as indicações do próprio jogo mostram, no estilo dele. Desenhados ao iniciar o jogo (a primeira vez leva alguns segundos); os arquivos do jogo não são alterados.',
+})
+EXTRA['es'].update({
+    'In-game button icons': 'Iconos de botones en el juego',
+    "PlayStation (the game's)": 'PlayStation (los del juego)',
+    'The connected gamepad': 'El mando conectado',
+    "The buttons the game's own prompts show, in its style. Drawn when the game starts (the first time takes a few seconds); the game files are not changed.":
+        'Los botones que muestran las indicaciones del propio juego, en su estilo. Se dibujan al iniciar el juego (la primera vez tarda unos segundos); los archivos del juego no se modifican.',
+})
+
 EXTRA['es'].update({
     'Allows manual skipping of cinematics any cinematic with the X button. Thanks to illusion0001 aka illusionyy for the PS3 patch which made this very easy.':
         'Permite saltar manualmente cualquier cinemática con el botón X. Gracias a illusion0001, alias illusionyy, por el parche de PS3 que lo hizo muy fácil.',

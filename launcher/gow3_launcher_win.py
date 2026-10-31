@@ -433,6 +433,10 @@ MUSIC_TYPES = ('.mp3', '.ogg', '.oga', '.opus', '.flac', '.wav', '.m4a', '.aac',
 UI_SCALES = [('auto', ('Auto',)), ('1', ('1x',)), ('2', ('2x',))]
 # GOW3_PAD_SCHEME (src/runtime_pad.c apply_scheme): the Vita's "Racer" layout of WipEout 2048 (#99).
 PAD_SCHEMES = [('', ("Standard (the game's)",)), ('racer', ('Racer: R2 accelerate, L2 brake',))]
+# The buttons WipEout's own prompts show (scripts/wipeout_glyphs.py). No keyboard style: the
+# prompts are a font of gamepad buttons.
+GLYPH_STYLES = [('off', ("PlayStation (the game's)",)), ('auto', ('The connected gamepad',)), ('xbox', ('Xbox',)),
+                ('nintendo', ('Nintendo',))]
 GAMEPAD_NUMBERS = [('1', ('First connected',)), ('2', ('Second connected',)), ('3', ('Third connected',)),
                    ('4', ('Fourth connected',))]
 APP_DEFAULTS = {'ui_language': 'en', 'ui_scale': 'auto', 'game_dir': os.environ.get('GOW3_GAME_DIR', str(PORT_DIR.parent / 'CUSA07671') if WINDOWS else ''), 'update_dir': '', 'experimental_upscaler': False, 'ps4_pro': False, 'cheat_events': False, 'cheat_rank': False, 'cheat_ships': False, 'cheat_van_uber': False, 'cheat_vr_ships': False,
@@ -1261,7 +1265,9 @@ def game_environment(s):
         env['GOW3_KEY_MAP'] = value
     if value := control_map(controls, 'pad'):
         env['GOW3_PAD_MAP'] = value
-    env.pop('GOW3_GLYPH_STYLE', None)  # God of War III's button icons (R_UI.WAD): WipEout has none
+    env.pop('GOW3_GLYPH_STYLE', None)  # only the launcher's choice, never an inherited one
+    if s.get('glyph_style') in ('auto', 'xbox', 'nintendo'):
+        env['GOW3_GLYPH_STYLE'] = s['glyph_style']
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
     return env
@@ -2287,8 +2293,7 @@ class Launcher:
             title = _(PS_BUTTON_NAMES[button])
             ttk.Label(table, text=title, width=-14).grid(row=r, column=1, sticky='w', padx=self.px((0, 12)))
 
-        # The device: its section is shown, the other hidden (show_device). No in-game button icons:
-        # scripts/glyphs.py draws them into God of War III's R_UI.WAD, which WipEout does not have.
+        # The device: its section is shown, the other hidden (show_device).
         page = f
         saved_device = self.app.get('controls_device')
         self.device = tk.StringVar(value=saved_device if saved_device in dict(CONTROL_DEVICES) else 'keyboard')
@@ -2345,6 +2350,9 @@ class Launcher:
             ttk.Radiobutton(names, text=PAD_STYLE_NAMES[value], value=value, variable=self.pad_style,
                             command=self.relabel_pad_controls).pack(side='left', padx=self.px((0, 14)))
         self.row(f, _('Controller type'), names)
+        self.row(f, _('In-game button icons'), self.choice(f, 'glyph_style', 'app', GLYPH_STYLES),
+                 _("The buttons the game's own prompts show, in its style. Drawn when the game starts (the "
+                   "first time takes a few seconds); the game files are not changed."), restart=True)
         self.row(f, _('Gamepad'), self.choice(f, 'gamepad_number', 'app', GAMEPAD_NUMBERS),
                  _('With several gamepads connected: the one that plays. Player 2 gets the next free one.'))
         self.row(f, _('Button layout'), self.choice(f, 'pad_scheme', 'app', PAD_SCHEMES),

@@ -242,8 +242,9 @@ def build(game, out, style, faces=None, pad_map=''):
         shutil.rmtree(target, ignore_errors=True)
         return []
     lines = []
+    present = {p.name.lower(): p for p in Path(game).iterdir()} if Path(game).is_dir() else {}
     for archive_name in ARCHIVES:
-        path = next((p for p in Path(game).iterdir() if p.name.lower() == archive_name), None)
+        path = present.get(archive_name)
         if not path:
             continue
         stat = path.stat()

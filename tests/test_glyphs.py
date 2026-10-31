@@ -9,6 +9,7 @@ from unittest import mock
 
 from paths import ROOT
 import glyphs
+import wipeout_glyphs
 
 try:
     from PIL import Image
@@ -319,6 +320,29 @@ class RunGlyphsTest(unittest.TestCase):
             self.assertEqual(run.glyph_mounts({'GOW3_GLYPH_STYLE': 'auto'}, Path('probe'), Path('game'), self.out), ([], None))
         with mock.patch.object(glyphs, 'build', side_effect=ValueError('bad WAD')):
             self.assertEqual(run.glyph_mounts({'GOW3_GLYPH_STYLE': 'xbox'}, Path('probe'), Path('game'), self.out), ([], None))
+
+    def test_wipeout_patches_are_added_to_the_file_patches(self):
+        patches = self.out / 'file_patches.txt'
+        patches.write_text('/app0/data09.psarc 10 aa bb\n')  # menu_patches.py's, written first
+        line = '/app0/data00.psarc 1a9c 100100 325652619ac7818d @/out/wipeout_glyphs/ps_buttons.gnf'
+        env = {'GOW3_GLYPH_STYLE': 'xbox', 'GOW3_FILE_PATCHES': str(patches), 'GOW3_PAD_MAP': 'cross=b'}
+        with mock.patch.object(glyphs, 'build', return_value={}), \
+                mock.patch.object(wipeout_glyphs, 'build', return_value=[line]) as build:
+            self.assertEqual(run.glyph_mounts(env, Path('probe'), Path('game'), self.out), ([], 'xbox'))
+        self.assertEqual(build.call_args.args[2:], ('xbox', None, 'cross=b'))
+        self.assertEqual(patches.read_text(), '/app0/data09.psarc 10 aa bb\n' + line + '\n')
+
+    def test_a_wipeout_failure_keeps_the_wad_copies(self):
+        copies = {'/app0/EXEC/WAD/PS4_LE/R_UI.WAD': self.out / 'glyphs/R_UI.WAD'}
+        with mock.patch.object(glyphs, 'build', return_value=copies), \
+                mock.patch.object(wipeout_glyphs, 'build', side_effect=ValueError('bad archive')):
+            arguments, style = run.glyph_mounts({'GOW3_GLYPH_STYLE': 'xbox'}, Path('probe'), Path('game'), self.out)
+        self.assertEqual((len(arguments), style), (2, 'xbox'))
+
+    def test_off_removes_wipeout_copies_too(self):
+        (self.out / 'wipeout_glyphs').mkdir()
+        run.glyph_mounts({}, Path('probe'), Path('game'), self.out)
+        self.assertFalse((self.out / 'wipeout_glyphs').exists())
 
 
 if __name__ == '__main__':
