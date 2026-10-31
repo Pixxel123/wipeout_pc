@@ -5,7 +5,8 @@ PSARC (big-endian): a 32-byte header (PSAR, version, compression zlib or lzma, T
 entry size, entry count, block size, flags), then the TOC: per entry the MD5 of its name, its
 first block, its size (5 bytes) and its offset (5 bytes); then one stored size per block, as wide
 as the block size needs (0 = a full block). A block whose stored size is its full size is not
-compressed. Entry 0 is the manifest: the names of entries 1..n, one per line.
+compressed. Entry 0 is the manifest: the names of entries 1..n, one per line or (WipEout's
+archives) separated by NUL bytes.
 
 Usage:
   python3 scripts/psarc.py list <archive>                        # every entry: size, stored or compressed, name
@@ -42,7 +43,7 @@ class Archive:
         width = 2 if self.block <= 0x10000 else 3 if self.block <= 0x1000000 else 4
         sizes = toc[count * entry_size:]
         self.sizes = [int.from_bytes(sizes[i:i + width], 'big') for i in range(0, len(sizes) - width + 1, width)]
-        names = self.read(0).decode('utf-8', 'replace').replace('\r', '').split('\n') if count else []
+        names = re.split(r'[\r\n\0]+', self.read(0).decode('utf-8', 'replace')) if count else []
         self.names = {}
         for i, name in enumerate((n for n in names if n), 1):
             if i < count:

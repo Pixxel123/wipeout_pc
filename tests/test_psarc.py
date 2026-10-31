@@ -13,11 +13,11 @@ import psarc
 BLOCK = 16
 
 
-def archive(path, files):
+def archive(path, files, separator='\n'):
     """A PSARC 1.4 archive with 16-byte zlib blocks: the manifest, then `files` (name -> bytes).
     Blocks that do not shrink are stored, as the game's archives do."""
     names = list(files)
-    contents = ['\n'.join(names).encode()] + [files[n] for n in names]
+    contents = [separator.join(names).encode()] + [files[n] for n in names]
     hashes = [bytes(16)] + [hashlib.md5(n.upper().encode()).digest() for n in names]
     entry_size, sizes, body, entries = 30, [], b'', []
     blocks = sum((len(c) + BLOCK - 1) // BLOCK for c in contents)
@@ -49,6 +49,14 @@ class PsarcTests(unittest.TestCase):
                 self.assertEqual(a.read(i), FILES[e['name']])
             self.assertTrue(a.compressed(1))
             self.assertFalse(a.compressed(2))
+
+    def test_a_manifest_separated_by_nul_bytes(self):
+        # WipEout's archives separate the names of their manifest by NUL bytes, not newlines.
+        with tempfile.TemporaryDirectory() as folder:
+            archive(Path(folder) / 'data00.psarc', FILES, separator='\0')
+            a = psarc.Archive(Path(folder) / 'data00.psarc')
+            self.assertEqual([e['name'] for _i, e in a.named()], list(FILES))
+            self.assertEqual(a.read(2), FILES['data/ui/menu.xml'])
 
     def test_find_and_extract_from_the_command_line(self):
         with tempfile.TemporaryDirectory() as folder:
