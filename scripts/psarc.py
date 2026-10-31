@@ -15,6 +15,7 @@ Usage:
 Without a regex, find looks for names of button prompts and controller pictures.
 """
 import argparse
+import hashlib
 import lzma
 from pathlib import Path
 import re
@@ -44,11 +45,23 @@ class Archive:
         sizes = toc[count * entry_size:]
         self.sizes = [int.from_bytes(sizes[i:i + width], 'big') for i in range(0, len(sizes) - width + 1, width)]
         names = re.split(r'[\r\n\0]+', self.read(0).decode('utf-8', 'replace')) if count else []
+        names = [n for n in names if n]
+        # The TOC is in the order of the MD5s of the names, not of the manifest: a name goes to the entry
+        # with its MD5 (of the name as written, in upper case or with a leading slash, as the archive
+        # hashed it). Only an archive none of whose MD5s match a name is read in the manifest's order.
+        by_md5 = {e['md5']: i for i, e in enumerate(self.entries) if i}
+        found = {}
+        for name in names:
+            i = next((by_md5[m] for m in map(md5, variants(name)) if m in by_md5), None)
+            if i is not None:
+                found.setdefault(i, name)
+        if not found:
+            found = {i: name for i, name in enumerate(names[:count - 1], 1)}
+        self.unmatched = len(names) - len(found)
         self.names = {}
-        for i, name in enumerate((n for n in names if n), 1):
-            if i < count:
-                self.entries[i]['name'] = name
-                self.names[name.lower()] = i
+        for i, name in found.items():
+            self.entries[i]['name'] = name
+            self.names[name.lower()] = i
 
     def blocks(self, i):
         """(stored size, uncompressed size) of each block of entry i."""
@@ -82,6 +95,16 @@ class Archive:
         return [(i, e) for i, e in enumerate(self.entries) if 'name' in e]
 
 
+def md5(name):
+    return hashlib.md5(name.encode('utf-8')).digest()
+
+
+def variants(name):
+    """The spellings of a name an archive may have hashed: as written, upper case, with a leading slash."""
+    bare = name.lstrip('/')
+    return (name, name.upper(), bare, bare.upper(), '/' + bare, ('/' + bare).upper(), bare.lower(), '/' + bare.lower())
+
+
 def archives(game):
     return sorted(p for p in Path(game).iterdir() if p.suffix.lower() == '.psarc')
 
@@ -110,7 +133,7 @@ def main():
     if args.command == 'list':
         a = Archive(args.archive)
         print(f'{a.path.name}: PSARC {a.major}.{a.minor}, {a.compression.decode()}, {len(a.entries)} entries, '
-              f'{a.block} byte blocks, flags {a.flags:#x}')
+              f'{a.block} byte blocks, flags {a.flags:#x}, {a.unmatched} names without an entry')
         for i, _e in a.named():
             print(describe(a, i))
         return 0
@@ -124,7 +147,8 @@ def main():
                 ext = Path(e['name']).suffix.lower() or '(none)'
                 kinds[ext] = kinds.get(ext, 0) + 1
             top = ', '.join(f'{k} {v}' for k, v in sorted(kinds.items(), key=lambda kv: -kv[1])[:8])
-            print(f'== {path.name}: {len(a.entries)} entries ({top}); {len(found)} match')
+            print(f'== {path.name}: {len(a.entries)} entries ({top}); {len(found)} match'
+                  + (f'; {a.unmatched} names without an entry' if a.unmatched else ''))
             for i, _e in found:
                 line = describe(a, i)
                 if args.magic:
