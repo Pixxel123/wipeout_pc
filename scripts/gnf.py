@@ -9,19 +9,20 @@ pitch, the elements of a tile in Morton order (x0 y0 x1 y1 x2 y2). Each mip leve
 own (width, height and pitch halved, at least one tile) and follows the one before.
 
 Formats: 1 = 8-bit (one channel), 38 = BC4 (one channel), 41 = BC7 (RGBA). The BC7 encoder writes
-mode 6 only (one RGBA line per block, 4-bit indices): plenty for menu icons. Needs Pillow and numpy.
+mode 6 only (one RGBA line per block, 4-bit indices): plenty for menu icons. Pillow decodes BC4 and
+BC7; the encoders are plain Python (the packaged launcher has Pillow, not numpy), quick on blocks of
+one colour, which most of a menu texture is.
 """
 import io
 from pathlib import Path
 import struct
 
-import numpy as np
 from PIL import Image
 
 HEADER = 0x100
 FORMATS = {1: ('L', 1, 1), 38: ('L', 4, 8), 41: ('RGBA', 4, 16)}  # dfmt -> (mode, block side, bytes)
 DXGI = {38: 80, 41: 98}  # what Pillow's DDS reader decodes them as
-BC7_WEIGHTS = np.array([0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64], np.int32)
+BC7_WEIGHTS = (0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64)
 
 
 class Texture:
@@ -53,19 +54,21 @@ class Texture:
             raise ValueError(f'GNF size {len(self.data)}, its levels need {at}')
 
     def _order(self, level):
-        """Element index in the tiled data of each element of the level, row by row."""
+        """(element index in the tiled data of each element of the level row by row, columns, rows)."""
         _at, w, h, pe, _he = self.levels[level]
         ew, eh = -(-w // self.side), -(-h // self.side)
-        y, x = np.mgrid[0:eh, 0:ew]
-        morton = (x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3
-        return ((y // 8) * (pe // 8) + x // 8) * 64 + morton, ew, eh
+        morton = [(x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3
+                  for y in range(8) for x in range(8)]
+        tiles = pe // 8
+        order = [((y >> 3) * tiles + (x >> 3)) * 64 + morton[(y & 7) * 8 + (x & 7)] for y in range(eh) for x in range(ew)]
+        return order, ew, eh
 
     def image(self, level=0):
         """The level's pixels: an L image (8-bit, BC4) or RGBA (BC7)."""
-        at, w, h, pe, he = self.levels[level]
+        at, w, h, _pe, _he = self.levels[level]
         order, ew, eh = self._order(level)
-        tiled = np.frombuffer(self.data, np.uint8, pe * he * self.block, at).reshape(-1, self.block)
-        linear = tiled[order.ravel()].tobytes()
+        b, data = self.block, self.data
+        linear = b''.join(data[at + i * b:at + i * b + b] for i in order)
         if self.format == 1:
             return Image.frombytes('L', (ew, eh), linear).crop((0, 0, w, h))
         image = Image.open(io.BytesIO(dds(ew * 4, eh * 4, DXGI[self.format], linear)))
@@ -77,21 +80,37 @@ class Texture:
         if image.size != (self.width, self.height):
             raise ValueError(f'image {image.size}, texture {self.width}x{self.height}')
         out = bytearray(self.data)
-        for level, (at, w, h, pe, he) in enumerate(self.levels):
-            pixels = reduce(image.convert(self.mode), w, h)
+        source = image.convert(self.mode)
+        for level, (at, w, h, _pe, _he) in enumerate(self.levels):
             order, ew, eh = self._order(level)
-            grid = np.zeros((eh * self.side, ew * self.side, len(self.mode)), np.uint8)
-            grid[:h, :w] = np.asarray(pixels).reshape(h, w, len(self.mode))
-            grid[:h, w:] = grid[:h, w - 1:w]  # edges repeated, so the last blocks encode cleanly
-            grid[h:] = grid[h - 1:h]
+            side = self.side
+            grid = Image.new(self.mode, (ew * side, eh * side))
+            pixels = reduce(source, w, h)
+            grid.paste(pixels, (0, 0))
+            if grid.width > w:  # edges repeated, so the last blocks encode cleanly
+                grid.paste(pixels.crop((w - 1, 0, w, h)).resize((grid.width - w, h)), (w, 0))
+            if grid.height > h:
+                grid.paste(grid.crop((0, h - 1, grid.width, h)).resize((grid.width, grid.height - h)), (0, h))
+            raw = grid.tobytes()
+            b = self.block
             if self.format == 1:
-                elements = grid.reshape(-1, 1)
+                elements = [raw[i:i + 1] for i in range(len(raw))]
             else:
-                blocks = grid.reshape(eh, 4, ew, 4, -1).swapaxes(1, 2).reshape(eh * ew, 16, -1)
-                elements = bc4(blocks[:, :, 0]) if self.format == 38 else bc7(blocks)
-            tiled = np.frombuffer(self.data, np.uint8, pe * he * self.block, at).reshape(-1, self.block).copy()
-            tiled[order.ravel()] = elements
-            out[at:at + tiled.size] = tiled.tobytes()
+                channels = len(self.mode)
+                row = grid.width * channels
+                encode = bc4 if self.format == 38 else bc7
+                elements = []
+                for by in range(eh):
+                    for bx in range(ew):
+                        block = []
+                        for y in range(4):
+                            start = (by * 4 + y) * row + bx * 4 * channels
+                            line = raw[start:start + 4 * channels]
+                            block += [line[i] for i in range(4)] if channels == 1 else \
+                                [tuple(line[i:i + 4]) for i in range(0, 16, 4)]
+                        elements.append(encode(block))
+            for i, element in zip(order, elements):
+                out[at + i * b:at + i * b + b] = element
         return bytes(out)
 
 
@@ -110,72 +129,62 @@ def dds(width, height, dxgi, payload):
             + struct.pack('<5I', dxgi, 3, 0, 1, 0) + payload)
 
 
-def bits(fields, count):
-    """Blocks of `count` bits, least significant first: fields = [(values per block, width)...]."""
-    out = np.zeros((len(fields[0][0]), count), np.uint8)
-    at = 0
-    for values, width in fields:
-        values = np.asarray(values, np.int64).reshape(len(out), -1)
-        for column in range(values.shape[1]):
-            for bit in range(width):
-                out[:, at] = (values[:, column] >> bit) & 1
-                at += 1
-    assert at == count
-    return np.packbits(out, axis=1, bitorder='little')
-
-
 def bc4(values):
-    """BC4 blocks (8 bytes) of (n, 16) values: endpoints the block's largest and smallest value."""
-    values = values.astype(np.int32)
-    hi, lo = values.max(1), values.min(1)
-    flat = hi == lo
-    lo = np.where(flat, np.maximum(hi - 1, 0), lo)
-    hi = np.where(flat & (hi == 0), 1, hi)
-    i = np.arange(8)
-    palette = np.where(i == 0, hi[:, None], np.where(i == 1, lo[:, None],
-                       ((8 - i) * hi[:, None] + (i - 1) * lo[:, None] + 3) // 7))
-    index = np.abs(values[:, :, None] - palette[:, None, :]).argmin(2)
-    return bits([(hi, 8), (lo, 8), (index, 3)], 64)
+    """A BC4 block (8 bytes) of 16 values: endpoints the block's largest and smallest value."""
+    hi, lo = max(values), min(values)
+    if hi == lo:  # one value: both endpoints, every index 0
+        return bytes((hi, lo)) + bytes(6)
+    palette = [hi, lo] + [((8 - i) * hi + (i - 1) * lo + 3) // 7 for i in range(2, 8)]
+    bits = 0
+    for n, v in enumerate(values):
+        bits |= min(range(8), key=lambda i: abs(palette[i] - v)) << (3 * n)
+    return bytes((hi, lo)) + bits.to_bytes(6, 'little')
 
 
 def bc7(pixels):
-    """BC7 mode 6 blocks (16 bytes) of (n, 16, 4) RGBA pixels: the endpoints on the block's main axis."""
-    p = pixels.astype(np.float64)
-    mean = p.mean(1, keepdims=True)
-    centred = p - mean
-    axis = np.ones((len(p), 4)) / 2
-    cov = np.einsum('nki,nkj->nij', centred, centred)
-    for _ in range(8):
-        axis = np.einsum('nij,nj->ni', cov, axis)
-        axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-9)
-    t = np.einsum('nki,ni->nk', centred, axis)
-    ends = [np.clip(mean[:, 0] + t.min(1, keepdims=True) * axis, 0, 255),
-            np.clip(mean[:, 0] + t.max(1, keepdims=True) * axis, 0, 255)]
+    """A BC7 mode 6 block (16 bytes) of 16 RGBA pixels: the endpoints on the block's main axis."""
+    if all(p == pixels[0] for p in pixels):
+        ends = [list(pixels[0]), list(pixels[0])]
+    else:
+        mean = [sum(p[c] for p in pixels) / 16 for c in range(4)]
+        centred = [[p[c] - mean[c] for c in range(4)] for p in pixels]
+        cov = [[sum(q[i] * q[j] for q in centred) for j in range(4)] for i in range(4)]
+        axis = [0.5, 0.5, 0.5, 0.5]
+        for _ in range(8):
+            axis = [sum(cov[i][j] * axis[j] for j in range(4)) for i in range(4)]
+            norm = sum(a * a for a in axis) ** 0.5 or 1e-9
+            axis = [a / norm for a in axis]
+        t = [sum(q[c] * axis[c] for c in range(4)) for q in centred]
+        ends = [[min(255.0, max(0.0, mean[c] + end * axis[c])) for c in range(4)] for end in (min(t), max(t))]
     quantized, pbits = [], []
     for end in ends:  # 7 bits a channel and one shared bit: the 8-bit value is (c << 1) | p
         best = None
         for pbit in (0, 1):
-            c = np.clip(np.rint((end - pbit) / 2), 0, 127).astype(np.int32)
-            error = (((c << 1) | pbit) - end) ** 2
-            best = (c, np.full(len(p), pbit), error.sum(1)) if best is None else best
-            take = error.sum(1) < best[2]
-            best = (np.where(take[:, None], c, best[0]), np.where(take, pbit, best[1]), np.minimum(error.sum(1), best[2]))
+            c = [min(127, max(0, round((v - pbit) / 2))) for v in end]
+            error = sum((((x << 1) | pbit) - v) ** 2 for x, v in zip(c, end))
+            if best is None or error < best[2]:
+                best = (c, pbit, error)
         quantized.append(best[0])
         pbits.append(best[1])
-    e0 = (quantized[0] << 1) | pbits[0][:, None]
-    e1 = (quantized[1] << 1) | pbits[1][:, None]
-    palette = (e0[:, None, :] * (64 - BC7_WEIGHTS[None, :, None]) + e1[:, None, :] * BC7_WEIGHTS[None, :, None] + 32) >> 6
-    index = ((pixels[:, :, None, :].astype(np.int32) - palette[:, None, :, :]) ** 2).sum(3).argmin(2)
-    swap = index[:, 0] >= 8  # the first index has 3 bits: its top bit must be 0
-    index = np.where(swap[:, None], 15 - index, index)
-    q0 = np.where(swap[:, None], quantized[1], quantized[0])
-    q1 = np.where(swap[:, None], quantized[0], quantized[1])
-    p0, p1 = np.where(swap, pbits[1], pbits[0]), np.where(swap, pbits[0], pbits[1])
-    fields = [(np.full(len(p), 1 << 6), 7)]
-    for channel in range(4):
-        fields += [(q0[:, channel], 7), (q1[:, channel], 7)]
-    fields += [(p0, 1), (p1, 1), (index[:, 0], 3), (index[:, 1:], 4)]
-    return bits(fields, 128)
+    e0 = [(c << 1) | pbits[0] for c in quantized[0]]
+    e1 = [(c << 1) | pbits[1] for c in quantized[1]]
+    palette = [[(a * (64 - w) + b * w + 32) >> 6 for a, b in zip(e0, e1)] for w in BC7_WEIGHTS]
+    index = [min(range(16), key=lambda i: sum((palette[i][c] - p[c]) ** 2 for c in range(4))) for p in pixels]
+    if index[0] >= 8:  # the first index has 3 bits: its top bit must be 0
+        index = [15 - i for i in index]
+        quantized.reverse()
+        pbits.reverse()
+    bits, at = 1 << 6, 7
+    for c in range(4):
+        for end in quantized:
+            bits |= end[c] << at
+            at += 7
+    bits |= pbits[0] << at | pbits[1] << (at + 1)
+    at += 2
+    for n, i in enumerate(index):
+        bits |= i << at
+        at += 3 if n == 0 else 4
+    return bits.to_bytes(16, 'little')
 
 
 def main():
