@@ -1,5 +1,7 @@
+import io
 import struct
 import unittest
+from unittest import mock
 
 from PIL import Image, ImageChops, ImageStat
 
@@ -60,6 +62,28 @@ class GnfTests(unittest.TestCase):
             t = gnf.Texture(gnf.Texture(texture(41, 8, 8, 8, 1)).replaced(image))
             self.assertEqual(t.image().getpixel((0, 0)), first)
             self.assertEqual(t.image().getpixel((1, 0)), rest)
+
+    def test_a_block_seen_before_is_not_encoded_again(self):
+        image = Image.new('RGBA', (64, 64), (255, 255, 255, 0))
+        for x in range(0, 64, 8):  # the same outline in every tile: one block of it to encode
+            image.paste((20, 20, 20, 255), (x, 4, x + 2, 8))
+        gnf.ENCODED.clear()
+        with mock.patch.object(gnf, 'bc7', wraps=gnf.bc7) as encode:
+            first = gnf.Texture(texture(41, 64, 64, 64, 1)).replaced(image)
+            calls = encode.call_count
+            again = gnf.Texture(texture(41, 64, 64, 64, 1)).replaced(image)
+        self.assertLess(calls, 8)  # 256 blocks, a few distinct
+        self.assertEqual(encode.call_count, calls)  # the second texture: all of them known
+        self.assertEqual(first, again)
+
+    def test_the_nearest_entry_is_found_along_the_line(self):
+        # A block near its line (as a menu's outlines are): every pixel decodes to its nearest entry,
+        # as a search of all 16 finds it.
+        pixels = [(16 * i, 255 - 16 * i, 8 * i, 255) for i in range(16)]
+        image = Image.open(io.BytesIO(gnf.dds(4, 4, 98, gnf.bc7(pixels))))
+        image.load()
+        got = image.convert('RGBA').tobytes()
+        self.assertLess(max(abs(got[n * 4 + c] - p[c]) for n, p in enumerate(pixels) for c in range(4)), 6)
 
     def test_unsupported_formats_are_refused(self):
         good = texture(1, 16, 16, 16, 1)

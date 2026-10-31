@@ -10,8 +10,9 @@ own (width, height and pitch halved, at least one tile) and follows the one befo
 
 Formats: 1 = 8-bit (one channel), 38 = BC4 (one channel), 41 = BC7 (RGBA). The BC7 encoder writes
 mode 6 only (one RGBA line per block, 4-bit indices): plenty for menu icons. Pillow decodes BC4 and
-BC7; the encoders are plain Python (the packaged launcher has Pillow, not numpy), quick on blocks of
-one colour, which most of a menu texture is.
+BC7; the encoders are plain Python (the packaged launcher has Pillow, not numpy). A block already
+encoded is not encoded again (ENCODED), so a menu texture, mostly blocks of one colour and repeated
+outlines, takes a few seconds.
 """
 import io
 from pathlib import Path
@@ -23,6 +24,11 @@ HEADER = 0x100
 FORMATS = {1: ('L', 1, 1), 38: ('L', 4, 8), 41: ('RGBA', 4, 16)}  # dfmt -> (mode, block side, bytes)
 DXGI = {38: 80, 41: 98}  # what Pillow's DDS reader decodes them as
 BC7_WEIGHTS = (0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64)
+# The index whose weight is nearest each position 0..64 along a block's line.
+BC7_NEAREST = [min(range(16), key=lambda i: abs(BC7_WEIGHTS[i] - t)) for t in range(65)]
+# Blocks already encoded, by format and pixels: a menu texture repeats many (its outlines, and every
+# texture of one picture its whole first level), and a block costs most of the time.
+ENCODED = {}
 
 
 class Texture:
@@ -99,6 +105,7 @@ class Texture:
                 channels = len(self.mode)
                 row = grid.width * channels
                 encode = bc4 if self.format == 38 else bc7
+                known = ENCODED.setdefault(self.format, {})
                 elements = []
                 for by in range(eh):
                     for bx in range(ew):
@@ -108,7 +115,11 @@ class Texture:
                             line = raw[start:start + 4 * channels]
                             block += [line[i] for i in range(4)] if channels == 1 else \
                                 [tuple(line[i:i + 4]) for i in range(0, 16, 4)]
-                        elements.append(encode(block))
+                        key = tuple(block)
+                        element = known.get(key)
+                        if element is None:
+                            element = known[key] = encode(block)
+                        elements.append(element)
             for i, element in zip(order, elements):
                 out[at + i * b:at + i * b + b] = element
         return bytes(out)
@@ -169,7 +180,16 @@ def bc7(pixels):
     e0 = [(c << 1) | pbits[0] for c in quantized[0]]
     e1 = [(c << 1) | pbits[1] for c in quantized[1]]
     palette = [[(a * (64 - w) + b * w + 32) >> 6 for a, b in zip(e0, e1)] for w in BC7_WEIGHTS]
-    index = [min(range(16), key=lambda i: sum((palette[i][c] - p[c]) ** 2 for c in range(4))) for p in pixels]
+    # The palette lies along the line from e0 to e1: a pixel's nearest entry is the one at its
+    # position along that line, or (the entries are rounded) one of the few beside it. Three either
+    # side find the nearest of all 16 for line art, and nearly always for noise.
+    line = [b - a for a, b in zip(e0, e1)]
+    length = sum(v * v for v in line) or 1
+    index = []
+    for p in pixels:
+        near = BC7_NEAREST[min(64, max(0, round(64 * sum((p[c] - e0[c]) * line[c] for c in range(4)) / length)))]
+        index.append(min(range(max(0, near - 3), min(16, near + 4)),
+                         key=lambda i: sum((palette[i][c] - p[c]) ** 2 for c in range(4))))
     if index[0] >= 8:  # the first index has 3 bits: its top bit must be 0
         index = [15 - i for i in index]
         quantized.reverse()
