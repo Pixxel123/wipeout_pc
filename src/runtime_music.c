@@ -135,7 +135,8 @@ static void convert(SwrContext *swr, const AVFrame *frame) {
         out=grown; cap=need;
     }
     uint8_t *planes[1]={(uint8_t *)out};
-    int n=swr_convert(swr,planes,cap,frame ? (const uint8_t *const *)frame->extended_data : NULL,frame ? frame->nb_samples : 0);
+    /* FFmpeg 6 (Ubuntu 24.04) takes const uint8_t **, FFmpeg 7 const uint8_t *const *: this cast builds with both. */
+    int n=swr_convert(swr,planes,cap,frame ? (const uint8_t **)frame->extended_data : NULL,frame ? frame->nb_samples : 0);
     if (n>0) push(out,n);
 }
 static void announce(const AVFormatContext *format, const AVStream *stream, size_t file) {
