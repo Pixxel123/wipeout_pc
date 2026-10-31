@@ -86,10 +86,13 @@ void runtime_file_unmount(const char *guest) {
     pthread_mutex_unlock(&lock);
 }
 /* GOW3_FILE_PATCHES=<file>: same-length byte changes the game reads in its own files, the files
- * on disk untouched (scripts/menu_patches.py writes them: "guest-path offset original new" per
- * line, hex). A change applies once the file is found to hold its original bytes. */
-typedef struct { char guest[128]; int64_t offset; size_t length; unsigned char original[512], data[512]; int state; } FilePatch;
-static FilePatch file_patches[8];
+ * on disk untouched. One per line, hex numbers:
+ *   "guest-path offset original new"            (scripts/menu_patches.py: up to 512 bytes inline)
+ *   "guest-path offset length fnv @host-file"   (scripts/wipeout_glyphs.py: `length` bytes of
+ *                                                host-file; fnv = FNV-1a 64 of the original bytes)
+ * A change applies once the file is found to hold its original bytes. */
+typedef struct { char guest[128]; int64_t offset; size_t length; unsigned char *original, *data; uint64_t fnv; int state; } FilePatch;
+static FilePatch file_patches[32];
 static size_t file_patch_count;
 static int hex_bytes(const char *hex,unsigned char *out,size_t max) {
     size_t n=strlen(hex);
@@ -97,21 +100,65 @@ static int hex_bytes(const char *hex,unsigned char *out,size_t max) {
     for (size_t i=0;i<n/2;++i) { unsigned v; if (sscanf(hex+2*i,"%2x",&v)!=1) return -1; out[i]=(unsigned char)v; }
     return (int)(n/2);
 }
+static uint64_t fnv1a(uint64_t h,const unsigned char *p,size_t n) {
+    for (size_t i=0;i<n;++i) { h^=p[i]; h*=0x100000001b3ull; }
+    return h;
+}
+#define FNV_START 0xcbf29ce484222325ull
+/* `length` bytes of a host file, exactly; NULL otherwise. */
+static unsigned char *read_patch_data(const char *path,size_t length) {
+    FILE *f=fopen(path,"rb");
+    if (!f) return NULL;
+    unsigned char *data=malloc(length+1);
+    size_t got=data ? fread(data,1,length+1,f) : 0;
+    fclose(f);
+    if (got==length) return data;
+    free(data);
+    return NULL;
+}
 static void load_file_patches(void) {
     const char *path=getenv("GOW3_FILE_PATCHES");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (!f) return;
-    char line[2200], guest[128], original[1100], data[1100]; long long offset;
+    char line[2200], guest[128], original[1100], data[1100]; long long offset; unsigned long long length, fnv; int at=0;
     while (file_patch_count<sizeof(file_patches)/sizeof(*file_patches) && fgets(line,sizeof(line),f)) {
         FilePatch *p=&file_patches[file_patch_count];
-        if (sscanf(line,"%127s %llx %1099s %1099s",guest,&offset,original,data)!=4) continue;
-        int a=hex_bytes(original,p->original,sizeof(p->original)), b=hex_bytes(data,p->data,sizeof(p->data));
-        if (a<=0 || a!=b || offset<0) continue;
+        *p=(FilePatch){0};
+        at=0;
+        if (sscanf(line,"%127s %llx %llx %llx @%n",guest,&offset,&length,&fnv,&at)==4 && at) {
+            line[strcspn(line,"\r\n")]=0;
+            if (offset<0 || !length || length>(64ull<<20)) continue;
+            if (!(p->data=read_patch_data(line+at,(size_t)length))) {
+                printf("Runtime: file patch %s @0x%llx skipped (%s: not %llu bytes)\n",guest,offset,line+at,length);
+                continue;
+            }
+            p->length=(size_t)length; p->fnv=fnv;
+        } else {
+            if (sscanf(line,"%127s %llx %1099s %1099s",guest,&offset,original,data)!=4 || offset<0) continue;
+            unsigned char a_bytes[512], b_bytes[512];
+            int a=hex_bytes(original,a_bytes,sizeof(a_bytes)), b=hex_bytes(data,b_bytes,sizeof(b_bytes));
+            if (a<=0 || a!=b || !(p->original=malloc((size_t)a)) || !(p->data=malloc((size_t)a))) { free(p->original); continue; }
+            memcpy(p->original,a_bytes,(size_t)a); memcpy(p->data,b_bytes,(size_t)a);
+            p->length=(size_t)a;
+        }
         snprintf(p->guest,sizeof(p->guest),"%s",guest);
-        p->offset=offset; p->length=(size_t)a; p->state=0;
+        p->offset=offset;
         ++file_patch_count;
     }
     fclose(f);
+}
+/* Whether the host file holds the patch's original bytes: as given, or with the given FNV-1a. */
+static int file_patch_original(const FilePatch *p,int host) {
+    unsigned char chunk[65536];
+    uint64_t h=FNV_START;
+    for (size_t done=0;done<p->length;) {
+        size_t want=p->length-done<sizeof(chunk) ? p->length-done : sizeof(chunk);
+        if (pread(host,chunk,want,p->offset+(int64_t)done)!=(ssize_t)want) return 0;
+        if (p->original ? memcmp(chunk,p->original+done,want) : 0) return 0;
+        h=fnv1a(h,chunk,want);
+        done+=want;
+    }
+    return p->original || h==p->fnv;
 }
 /* At open: whether the guest file has a change that applies (its original bytes are there). */
 static int file_patches_check(const char *guest,int host) {
@@ -120,9 +167,9 @@ static int file_patches_check(const char *guest,int host) {
         FilePatch *p=&file_patches[i];
         if (strcasecmp(p->guest,guest)) continue;
         if (!p->state) {
-            unsigned char now[512];
-            p->state=pread(host,now,p->length,p->offset)==(ssize_t)p->length && !memcmp(now,p->original,p->length) ? 1 : -1;
-            printf("Runtime: file patch %s @0x%llx %s\n",guest,(long long)p->offset,p->state>0 ? "applies" : "skipped (other bytes)");
+            p->state=file_patch_original(p,host) ? 1 : -1;
+            printf("Runtime: file patch %s @0x%llx, %zu bytes, %s\n",guest,(long long)p->offset,p->length,
+                   p->state>0 ? "applies" : "skipped (other bytes)");
         }
         found|=p->state>0;
     }

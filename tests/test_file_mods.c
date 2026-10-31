@@ -20,7 +20,42 @@ int main(void) {
     assert(!mkdir(game,0755));
     FILE *f=fopen(source,"w"); assert(f); assert(fputs("modded",f)>=0); assert(!fclose(f));
     assert(!symlink(source,link));
+    /* File patches: an archive whose bytes 70000..170000 come from a side file (a path with a
+       space), bytes 10..12 from an inline change; one more change expects other original bytes. */
+    enum { ARCHIVE=200000, AT=70000, LENGTH=100000 };
+    static unsigned char archive[ARCHIVE], side[LENGTH];
+    for (int i=0;i<ARCHIVE;++i) archive[i]=(unsigned char)(i*7);
+    for (int i=0;i<LENGTH;++i) side[i]=(unsigned char)(i*13+1);
+    char archive_path[600], side_path[600], patches[600];
+    snprintf(archive_path,sizeof(archive_path),"%s/data00.psarc",game);
+    snprintf(side_path,sizeof(side_path),"%s/side file.bin",root);
+    snprintf(patches,sizeof(patches),"%s/file_patches.txt",root);
+    f=fopen(archive_path,"wb"); assert(f && fwrite(archive,1,ARCHIVE,f)==ARCHIVE && !fclose(f));
+    f=fopen(side_path,"wb"); assert(f && fwrite(side,1,LENGTH,f)==LENGTH && !fclose(f));
+    f=fopen(patches,"w"); assert(f);
+    fprintf(f,"/app0/data00.psarc %x %x %llx @%s\n",AT,LENGTH,(unsigned long long)fnv1a(FNV_START,archive+AT,LENGTH),side_path);
+    fprintf(f,"/app0/data00.psarc a %02x%02x %02x%02x\n",archive[10],archive[11],0xab,0xcd);
+    fprintf(f,"/app0/data00.psarc 0 %x %llx @%s\n",LENGTH,(unsigned long long)fnv1a(FNV_START,side,LENGTH),side_path);
+    fprintf(f,"/app0/data00.psarc 0 10 0 @%s\n",side_path);  /* the side file is not 16 bytes: not loaded */
+    assert(!fclose(f));
+    assert(!setenv("GOW3_FILE_PATCHES",patches,1));
     runtime_file_configure(game,user);
+    assert(file_patch_count==3);
+    {
+        static unsigned char want[ARCHIVE], got[ARCHIVE];
+        memcpy(want,archive,ARCHIVE);
+        memcpy(want+AT,side,LENGTH);
+        want[10]=0xab; want[11]=0xcd;
+        int fd=(int)do_open("/app0/data00.psarc",0,0); assert(fd>=3);
+        for (int64_t at=0;at<ARCHIVE;) {  /* reads of 4093 bytes: no read lines up with a patch */
+            int64_t n=do_read(fd,got+at,4093); assert(n>0); at+=n;
+        }
+        assert(!memcmp(got,want,ARCHIVE));
+        unsigned char edge[8];
+        assert(do_pread(fd,edge,8,AT+LENGTH-4)==8 && !memcmp(edge,want+AT+LENGTH-4,8));
+        assert(!do_close(fd));
+        assert(file_patches[0].state==1 && file_patches[1].state==1 && file_patches[2].state==-1);
+    }
     for (int i=0;i<3;++i) {
         const char *path=i==0 ? "/app0/asset.dcx" : i==1 ? "/hostapp/asset.dcx" : "asset.dcx";
         int fd=(int)do_open(path,0,0); assert(fd>=3);
@@ -62,9 +97,10 @@ int main(void) {
     int save=(int)do_open("/data/test-save",0x202,0644); assert(save>=3);
     assert(do_write(save,"save",4)==4 && !do_close(save));
     assert(!path_op("/data/test-save",2,0));
+    assert(!unlink(archive_path) && !unlink(side_path) && !unlink(patches));
     assert(!unlink(link) && !unlink(other) && !unlink(source) && !unlink(replacement) && !rmdir(game));
     const char *dirs[]={"temp0","download0","data"};
     for (int i=0;i<3;++i) { char p[1024]; snprintf(p,sizeof(p),"%s/%s",user,dirs[i]); assert(!rmdir(p)); }
     assert(!rmdir(user) && !rmdir(root));
-    puts("Guest mod files: reads, stat, merged listing, readonly assets and writable saves PASS");
+    puts("Guest mod files: reads, stat, merged listing, readonly assets, writable saves and file patches PASS");
 }
