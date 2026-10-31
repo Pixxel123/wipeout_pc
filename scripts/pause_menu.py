@@ -32,8 +32,6 @@ from pathlib import Path
 import shutil
 import struct
 
-from glyphs import entries
-
 VERSION = 6  # of the patch: a change rebuilds the cached copy
 WAD = 'EXEC/WAD/PS4_LE/R_UI.WAD'
 LABEL = b'Exit to Desktop'
@@ -54,6 +52,19 @@ SHOW_PREFIX = bytes.fromhex('01 00000002 130047') + b'\x07' + LOCAL + b'\x43'
 YES_PREFIX = b'\x03' + LOCAL + b'\x01' + MARK.to_bytes(4, "big") + bytes.fromhex('3f 170005') + EXIT_CALL + b'\x49'
 # Bytes taken by each opcode with its operands (the interpreter's handlers, image 0x1d5a4e).
 LENGTH = {op: 5 if op in (0x00, 0x01, 0x47, 0x4a) else 3 if 0x02 <= op <= 0x18 else 1 for op in range(0x4c)}
+
+
+def entries(data):
+    """(offset, size, name) of each WAD entry; stops at the first one that does not fit.
+    WAD (little-endian): entries of a 0x40 header (u16 tag, u16 flags, u32 size, name[56]) and
+    `size` bytes padded to 16."""
+    offset = 0
+    while offset + 0x40 <= len(data):
+        size = struct.unpack_from('<I', data, offset + 4)[0]
+        if offset + 0x40 + size > len(data):
+            return
+        yield offset, size, bytes(data[offset + 8:offset + 0x40]).split(b'\0')[0].decode('latin1')
+        offset += 0x40 + ((size + 15) & ~15)
 
 
 def be(value, size=4):
@@ -386,11 +397,10 @@ def patch(data):
     data[:] = work
 
 
-def build(game, out, source=None):
-    """{guest path: patched copy} for run.py to mount, from `source` (another patched copy) or the
-    game's own R_UI.WAD; {} when the script is not the one this patch knows. The copy in
-    out/pause_menu is kept until the source changes."""
-    source = Path(source or Path(game) / WAD)
+def build(game, out):
+    """{guest path: patched copy} for run.py to mount, from the game's own R_UI.WAD; {} when the
+    script is not the one this patch knows. The copy in out/pause_menu is kept until the WAD changes."""
+    source = Path(game) / WAD
     target = Path(out) / 'pause_menu'
     copy = target / Path(WAD).name
     if not source.is_file():

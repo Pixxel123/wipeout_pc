@@ -88,11 +88,11 @@ void runtime_file_unmount(const char *guest) {
 /* GOW3_FILE_PATCHES=<file>: same-length byte changes the game reads in its own files, the files
  * on disk untouched. One per line, hex numbers:
  *   "guest-path offset original new"            (scripts/menu_patches.py: up to 512 bytes inline)
- *   "guest-path offset length fnv @host-file"   (scripts/wipeout_glyphs.py: `length` bytes of
+ *   "guest-path offset length fnv @host-file"   (scripts/psarc.py patch_lines: `length` bytes of
  *                                                host-file; fnv = FNV-1a 64 of the original bytes)
  * A change applies once the file is found to hold its original bytes. */
 typedef struct { char guest[128]; int64_t offset; size_t length; unsigned char *original, *data; uint64_t fnv; int state; } FilePatch;
-static FilePatch file_patches[32];
+static FilePatch file_patches[64];
 static size_t file_patch_count;
 static int hex_bytes(const char *hex,unsigned char *out,size_t max) {
     size_t n=strlen(hex);
@@ -149,16 +149,19 @@ static void load_file_patches(void) {
 }
 /* Whether the host file holds the patch's original bytes: as given, or with the given FNV-1a. */
 static int file_patch_original(const FilePatch *p,int host) {
-    unsigned char chunk[65536];
+    enum { CHUNK=65536 };  /* on the heap: guest threads open files on small stacks */
+    unsigned char *chunk=malloc(CHUNK);
     uint64_t h=FNV_START;
-    for (size_t done=0;done<p->length;) {
-        size_t want=p->length-done<sizeof(chunk) ? p->length-done : sizeof(chunk);
-        if (pread(host,chunk,want,p->offset+(int64_t)done)!=(ssize_t)want) return 0;
-        if (p->original ? memcmp(chunk,p->original+done,want) : 0) return 0;
+    size_t done=0;
+    while (chunk && done<p->length) {
+        size_t want=p->length-done<CHUNK ? p->length-done : CHUNK;
+        if (pread(host,chunk,want,p->offset+(int64_t)done)!=(ssize_t)want) break;
+        if (p->original && memcmp(chunk,p->original+done,want)) break;
         h=fnv1a(h,chunk,want);
         done+=want;
     }
-    return p->original || h==p->fnv;
+    free(chunk);
+    return done==p->length && (p->original || h==p->fnv);
 }
 /* At open: whether the guest file has a change that applies (its original bytes are there). */
 static int file_patches_check(const char *guest,int host) {

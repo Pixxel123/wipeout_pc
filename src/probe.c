@@ -999,7 +999,7 @@ static void menu_quit(void) {
     _exit(0);
 }
 /* The row comes with the hook: its copy of R_UI.WAD (scripts/pause_menu.py) is mounted over the
- * game's, and over the glyphs' copy it was made from, only once the hook is in. */
+ * game's only once the hook is in. */
 static void install_menu_exit(Segment *segments, uint64_t count, uint64_t size, const char *wad) {
     const uint64_t at = gow3_signature_find(image, size, &gow3_menu_site);
     if (at == UINT64_MAX || !mapped(segments, count, at, GOW3_MENU_HOOK_LENGTH) ||

@@ -433,10 +433,6 @@ MUSIC_TYPES = ('.mp3', '.ogg', '.oga', '.opus', '.flac', '.wav', '.m4a', '.aac',
 UI_SCALES = [('auto', ('Auto',)), ('1', ('1x',)), ('2', ('2x',))]
 # GOW3_PAD_SCHEME (src/runtime_pad.c apply_scheme): the Vita's "Racer" layout of WipEout 2048 (#99).
 PAD_SCHEMES = [('', ("Standard (the game's)",)), ('racer', ('Racer: R2 accelerate, L2 brake',))]
-# The buttons WipEout's own prompts show (scripts/wipeout_glyphs.py). No keyboard style: the
-# prompts are a font of gamepad buttons.
-GLYPH_STYLES = [('off', ("PlayStation (the game's)",)), ('auto', ('The connected gamepad',)), ('xbox', ('Xbox',)),
-                ('nintendo', ('Nintendo',))]
 GAMEPAD_NUMBERS = [('1', ('First connected',)), ('2', ('Second connected',)), ('3', ('Third connected',)),
                    ('4', ('Fourth connected',))]
 APP_DEFAULTS = {'ui_language': 'en', 'ui_scale': 'auto', 'game_dir': os.environ.get('GOW3_GAME_DIR', str(PORT_DIR.parent / 'CUSA07671') if WINDOWS else ''), 'update_dir': '', 'experimental_upscaler': False, 'ps4_pro': False, 'cheat_events': False, 'cheat_rank': False, 'cheat_ships': False, 'cheat_van_uber': False, 'cheat_vr_ships': False,
@@ -448,7 +444,7 @@ APP_DEFAULTS = {'ui_language': 'en', 'ui_scale': 'auto', 'game_dir': os.environ.
                 'vk_validation': False, 'close_on_play': False, 'discord_rpc': False,
                 'update_popup': True, 'game_patches': {}, 'controls': {}, 'pad_style': 'playstation', 'gamepad_number': '1', 'pad_scheme': '',
                 'controls_layout': 2,
-                'glyph_style': 'off', 'eliminator_limit': '2000'}
+                'eliminator_limit': '2000'}
 
 # PS4 button, default key, default gamepad button (SDL names; src/runtime_pad.c). L2/R2 come
 # from the analog triggers and the left touchpad click (photo mode) from L1 + the right click's
@@ -463,23 +459,14 @@ PS_BUTTON_NAMES = {'cross': 'Cross', 'circle': 'Circle', 'square': 'Square', 'tr
                    'l1': 'L1', 'r1': 'R1', 'l2': 'L2', 'r2': 'R2', 'l3': 'L3', 'r3': 'R3',
                    'options': 'Options', 'touchpad_left': 'Touchpad left', 'touchpad_right': 'Touchpad right',
                    'up': 'D-pad up', 'down': 'D-pad down', 'left': 'D-pad left', 'right': 'D-pad right'}
-# Gamepad buttons by SDL name, labelled as on a PlayStation or an Xbox controller.
-PAD_STYLES = {
-    'playstation': {'a': 'Cross', 'b': 'Circle', 'x': 'Square', 'y': 'Triangle', 'leftshoulder': 'L1',
-                    'rightshoulder': 'R1', 'leftstick': 'L3', 'rightstick': 'R3', 'start': 'Options',
-                    'back': 'Share / Create', 'touchpad': 'Touchpad click', 'guide': 'PS button',
-                    'dpup': 'D-pad up', 'dpdown': 'D-pad down', 'dpleft': 'D-pad left',
-                    'dpright': 'D-pad right', 'misc1': 'Mute button'},
-    'xbox': {'a': 'A', 'b': 'B', 'x': 'X', 'y': 'Y', 'leftshoulder': 'LB', 'rightshoulder': 'RB',
-             'leftstick': 'LS (left stick click)', 'rightstick': 'RS (right stick click)', 'start': 'Menu',
-             'back': 'View', 'touchpad': 'Touchpad click', 'guide': 'Xbox button', 'dpup': 'D-pad up',
-             'dpdown': 'D-pad down', 'dpleft': 'D-pad left', 'dpright': 'D-pad right', 'misc1': 'Share'},
-    # By position, as printed on a Nintendo controller: the south button is B, the east one A.
-    'nintendo': {'a': 'B', 'b': 'A', 'x': 'Y', 'y': 'X', 'leftshoulder': 'L', 'rightshoulder': 'R',
-                 'leftstick': 'Left stick click', 'rightstick': 'Right stick click', 'start': 'Plus (+)',
-                 'back': 'Minus (−)', 'touchpad': 'Touchpad click', 'guide': 'Home button', 'dpup': 'D-pad up',
-                 'dpdown': 'D-pad down', 'dpleft': 'D-pad left', 'dpright': 'D-pad right', 'misc1': 'Capture'},
-}
+# The SDL button whose PlayStation icon shows each game button: its default gamepad button, except
+# the triggers and the touchpad (the right click's default is Share, the left one is not remapped).
+OWN_ICON = {'l2': 'lefttrigger', 'r2': 'righttrigger', 'touchpad_left': 'touchpad', 'touchpad_right': 'touchpad'}
+GAME_BUTTONS = {button: OWN_ICON.get(button, pad) for button, _key, pad in CONTROLS}
+ICON_PX = 28  # the Controls page's button icons, before scaling
+# Gamepad buttons by SDL name, as the gamepad boxes name them in each controller style.
+PAD_STYLES = {style: {sdl: name for sdl, (_icon, name) in table.items() if name}
+              for style, table in button_icons.STYLES.items()}
 PAD_STYLE_NAMES = {'playstation': 'PlayStation', 'xbox': 'Xbox', 'nintendo': 'Nintendo'}
 # The device whose table the Controls page shows; both keep working in the game.
 CONTROL_DEVICES = (('keyboard', 'Keyboard & mouse'), ('gamepad', 'Gamepad'))
@@ -1265,9 +1252,9 @@ def game_environment(s):
         env['GOW3_KEY_MAP'] = value
     if value := control_map(controls, 'pad'):
         env['GOW3_PAD_MAP'] = value
-    env.pop('GOW3_GLYPH_STYLE', None)  # only the launcher's choice, never an inherited one
-    if s.get('glyph_style') in ('auto', 'xbox', 'nintendo'):
-        env['GOW3_GLYPH_STYLE'] = s['glyph_style']
+    env.pop('GOW3_PAD_STYLE', None)
+    if (style := s.get('pad_style')) in PAD_STYLES:  # the in-game menu names the buttons the same way
+        env['GOW3_PAD_STYLE'] = style
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
     return env
@@ -2273,7 +2260,7 @@ class Launcher:
         self.pad_style = tk.StringVar(value=style)
         self.control_vars, self.pad_boxes, self.pad_icons = {'key': {}, 'pad': {}}, {}, {}
         self.capturing_key = self.capture_wheel = None  # the key box waiting for an input
-        size = self.px(28)
+        size = self.px(ICON_PX)
         labels = pad_labels(style)
 
         def icon_canvas(parent):
@@ -2288,8 +2275,7 @@ class Launcher:
         def game_button(table, r, button):
             game_icon = icon_canvas(table)
             game_icon.grid(row=r, column=0, sticky='w', pady=self.px(3))
-            if button in button_icons.GAME_BUTTONS:
-                button_icons.draw(game_icon, button_icons.GAME_BUTTONS[button], 'playstation', size)
+            button_icons.draw(game_icon, GAME_BUTTONS[button], 'playstation', size, UI_FONT)
             title = _(PS_BUTTON_NAMES[button])
             ttk.Label(table, text=title, width=-14).grid(row=r, column=1, sticky='w', padx=self.px((0, 12)))
 
@@ -2349,10 +2335,10 @@ class Launcher:
         for value in PAD_STYLES:
             ttk.Radiobutton(names, text=PAD_STYLE_NAMES[value], value=value, variable=self.pad_style,
                             command=self.relabel_pad_controls).pack(side='left', padx=self.px((0, 14)))
-        self.row(f, _('Controller type'), names)
-        self.row(f, _('In-game button icons'), self.choice(f, 'glyph_style', 'app', GLYPH_STYLES),
-                 _("The buttons the game's own prompts show, in its style. Drawn when the game starts (the "
-                   "first time takes a few seconds); the game files are not changed."), restart=True)
+        self.row(f, _('Controller type'), names,
+                 _("How buttons are named here, in the port's menu and in the game's own prompts (drawn "
+                   "when the game starts; the first time takes a few seconds). Xbox also shows an Xbox "
+                   "controller on the game's Controls screen. The game files are not changed."), restart=True)
         self.row(f, _('Gamepad'), self.choice(f, 'gamepad_number', 'app', GAMEPAD_NUMBERS),
                  _('With several gamepads connected: the one that plays. Player 2 gets the next free one.'))
         self.row(f, _('Button layout'), self.choice(f, 'pad_scheme', 'app', PAD_SCHEMES),
@@ -2376,7 +2362,7 @@ class Launcher:
                 box.set(labels.get(pad_name, pad_name))
 
                 def chosen(_e, b=box, v=pad_var, n=button):
-                    v.set(self.pad_name(b.get()))
+                    v.set(list(PAD_STYLES[self.pad_style.get()])[b.current()])  # the boxes list them in this order
                     self.draw_pad_icon(n)
                 box.bind('<<ComboboxSelected>>', chosen)
                 self.pad_boxes[button] = box
@@ -2475,12 +2461,8 @@ class Launcher:
 
     def draw_pad_icon(self, button):
         """The gamepad column's icon of a game button, in the chosen style (L2/R2: the triggers)."""
-        name = self.control_vars['pad'][button].get() or button_icons.GAME_BUTTONS[button]
-        button_icons.draw(self.pad_icons[button], name, self.pad_style.get(), self.px(28))
-
-    def pad_name(self, label):
-        """SDL gamepad button name of a label in the current naming style."""
-        return next((n for n, l in pad_labels(self.pad_style.get()).items() if l == label), label)
+        name = self.control_vars['pad'][button].get() or GAME_BUTTONS[button]
+        button_icons.draw(self.pad_icons[button], name, self.pad_style.get(), self.px(ICON_PX), UI_FONT)
 
     def relabel_pad_controls(self):
         labels = pad_labels(self.pad_style.get())

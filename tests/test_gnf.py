@@ -5,20 +5,7 @@ from PIL import Image, ImageChops, ImageStat
 
 from paths import ROOT  # noqa: F401  (scripts on the path)
 import gnf
-
-
-def texture(fmt, width, height, pitch, mips):
-    """A GNF file as the game's are: 1D thin tiling, every level padded to whole 8x8-element tiles."""
-    side, block = gnf.FORMATS[fmt][1:]
-    size = 0
-    for m in range(mips):
-        pe = -(-(-(-max(1, pitch >> m) // side)) // 8) * 8
-        he = -(-(-(-max(1, height >> m) // side)) // 8) * 8
-        size += pe * he * block
-    words = [0, fmt << 20 | 8, (width - 1) | (height - 1) << 14 | 0x70000000, 13 << 20 | (mips - 1) << 16 | 0x96000000,
-             (pitch - 1) << 13, 0, 0, size >> 8]
-    head = b'GNF ' + struct.pack('<I', 0xf8) + bytes([2, 1, 8, 0]) + struct.pack('<I', size + 0x100)
-    return (head + struct.pack('<8I', *words)).ljust(0x100, b'\0') + bytes(size)
+from psarc_fixtures import texture
 
 
 def seen(image):

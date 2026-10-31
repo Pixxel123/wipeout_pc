@@ -1,42 +1,18 @@
-import hashlib
-import struct
 import subprocess
 import sys
 import tempfile
 import unittest
-import zlib
 from pathlib import Path
 
 from paths import ROOT
 import psarc
+from psarc_fixtures import archive as fixture
 
-BLOCK = 16
 
 
 def archive(path, files, separator='\n', md5_order=False):
-    """A PSARC 1.4 archive with 16-byte zlib blocks: the manifest, then `files` (name -> bytes).
-    Blocks that do not shrink are stored, as the game's archives do. md5_order: the TOC in the order of
-    the MD5s of the names (as WipEout's archives are), not of the manifest."""
-    names = list(files)
-    contents = [separator.join(names).encode()] + [files[n] for n in names]
-    hashes = [bytes(16)] + [hashlib.md5(n.upper().encode()).digest() for n in names]
-    if md5_order:
-        order = [0] + sorted(range(1, len(contents)), key=lambda i: hashes[i])
-        contents, hashes = [contents[i] for i in order], [hashes[i] for i in order]
-    entry_size, sizes, body, entries = 30, [], b'', []
-    blocks = sum((len(c) + BLOCK - 1) // BLOCK for c in contents)
-    toc_len = 32 + entry_size * len(contents) + 2 * blocks
-    for md5, data in zip(hashes, contents):
-        entries.append(md5 + struct.pack('>I', len(sizes)) + len(data).to_bytes(5, 'big')
-                       + (toc_len + len(body)).to_bytes(5, 'big'))
-        for at in range(0, len(data), BLOCK):
-            raw = data[at:at + BLOCK]
-            packed = zlib.compress(raw, 9)
-            stored = packed if len(packed) < len(raw) else raw
-            sizes.append(len(stored) % 0x10000)
-            body += stored
-    head = struct.pack('>4sHH4sIIIII', b'PSAR', 1, 4, b'zlib', toc_len, entry_size, len(contents), BLOCK, 0)
-    path.write_bytes(head + b''.join(entries) + b''.join(struct.pack('>H', s) for s in sizes) + body)
+    """16-byte blocks, names as written: every block of a short file is its own."""
+    fixture(path, files, block=16, separator=separator.encode(), prefix='', md5_order=md5_order)
 
 
 FILES = {'data/ui/buttons/cross.tex': b'\0' * 40 + b'X',
@@ -84,6 +60,72 @@ class PsarcTests(unittest.TestCase):
             subprocess.run([sys.executable, script, 'extract', str(Path(folder) / 'data09.psarc'), r'\.xml$', str(out)],
                            capture_output=True, check=True)
             self.assertEqual((out / 'data/ui/menu.xml').read_bytes(), FILES['data/ui/menu.xml'])
+
+
+class RepackTests(unittest.TestCase):
+    """Entry changes packed into the bytes the original takes (Archive.repack)."""
+
+    def changed(self, path, changes):
+        data = bytearray(path.read_bytes())
+        for offset, original, new in changes:
+            self.assertEqual(bytes(data[offset:offset + len(original)]), original)
+            data[offset:offset + len(new)] = new
+        path.write_bytes(data)
+        return psarc.Archive(path)
+
+    def test_a_changed_entry_reads_back_compressed_or_raw(self):
+        content = b'<Screen>' + b' pad ' * 30000 + b'</Screen>'
+        for packed in (True, False):
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'data09.psarc'
+                fixture(path, {'data/a.xml': content, 'data/b.bin': bytes(range(256)) * 4}, packed=packed)
+                a = psarc.Archive(path)
+                self.assertEqual(a.read(a.find('DATA/A.XML')), content)
+                new = content.replace(b' pad ', b' PAD ')
+                again = self.changed(path, a.repack(a.find('data/a.xml'), new))
+                self.assertEqual(again.read(again.find('/data/a.xml')), new)
+                self.assertEqual(again.read(again.find('data/b.bin')), bytes(range(256)) * 4)
+
+    def test_what_does_not_fit_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'data09.psarc'
+            fixture(path, {'data/a.bin': bytes(100000)})
+            a = psarc.Archive(path)
+            noise = bytes((i * 7919 + i // 3) % 251 for i in range(100000))
+            self.assertIsNone(a.repack(a.find('data/a.bin'), noise))
+            with self.assertRaises(ValueError):
+                a.repack(a.find('data/a.bin'), bytes(10))
+
+    def test_lzma_and_other_name_separators(self):
+        for compression, separator in ((b'lzma', b'\n'), (b'zlib', b'\r'), (b'zlib', b'\r\n')):
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'data00.psarc'
+                fixture(path, FILES, block=64, compression=compression, separator=separator, md5_order=True)
+                a = psarc.Archive(path)
+                self.assertEqual({e['name'].lstrip('/'): a.read(i) for i, e in a.named()}, FILES, (compression, separator))
+
+    def test_patch_lines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            small = (16, b'ab', b'cd')
+            large = (4096, bytes(600), bytes(range(256)) * 2 + bytes(88))
+            lines = psarc.patch_lines('data08.psarc', [small, large], folder)
+            self.assertEqual(lines[0], '/app0/data08.psarc 10 6162 6364\n')
+            guest, offset, length, fnv, side = lines[1].rstrip('\n').split(' ', 4)
+            self.assertEqual((guest, offset, length, int(fnv, 16)), ('/app0/data08.psarc', '1000', '258', psarc.fnv1a(bytes(600))))
+            self.assertEqual(Path(side[1:]).read_bytes(), large[2])
+
+    def test_cached_lines_are_made_once_per_key(self):
+        made = []
+
+        def make(folder):
+            made.append(folder)
+            return ['line\n']
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'cache'
+            self.assertEqual(psarc.cached_lines(target, [1], make), ['line\n'])
+            self.assertEqual(psarc.cached_lines(target, [1], make), ['line\n'])
+            psarc.cached_lines(target, [2], make)
+            self.assertEqual(len(made), 2)
 
 
 if __name__ == '__main__':

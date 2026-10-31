@@ -29,7 +29,8 @@ install -m644 launcher/OFL-RussoOne.txt "$share/launcher/OFL-RussoOne.txt"
 # Windows: the standard modules those scripts import come along as hidden imports.
 # iced-x86 (pip install iced-x86==1.21.0): scripts/isa_rewrite.py, CPUs without MOVBE/BMI1/LZCNT.
 hidden=()
-for module in argparse base64 collections hashlib json re shutil struct tempfile xml.etree.ElementTree \
+for module in argparse base64 collections hashlib json lzma re shutil struct tempfile xml.etree.ElementTree \
+              PIL.DdsImagePlugin PIL.ImageChops PIL.ImageDraw PIL.ImageFont \
               urllib.request iced_x86; do
     hidden+=(--hidden-import "$module")
 done

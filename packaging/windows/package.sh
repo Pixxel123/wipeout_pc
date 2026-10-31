@@ -28,7 +28,8 @@ fi
 out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow iced-x86==1.21.0
 # The scripts run inside WipEout.exe (--script): the standard modules they import come along.
 hidden=()
-for module in argparse base64 collections hashlib json re shutil socket struct tempfile threading uuid \
+for module in argparse base64 collections hashlib json lzma re shutil socket struct tempfile threading uuid \
+              PIL.DdsImagePlugin PIL.ImageChops PIL.ImageDraw PIL.ImageFont \
               xml.etree.ElementTree urllib.request ctypes.wintypes iced_x86; do
     hidden+=(--hidden-import "$module")
 done

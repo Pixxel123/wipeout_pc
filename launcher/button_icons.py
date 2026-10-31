@@ -4,31 +4,13 @@
 Buttons are named as SDL gamepad buttons ('a', 'leftshoulder', 'dpup', ...); the style chooses
 PlayStation, Xbox or Nintendo symbols, colors and labels."""
 
-# PlayStation symbols and Xbox letters of the face buttons, with their colors.
-FACE = {
-    'playstation': {'a': ('cross', '#6b9ae8'), 'b': ('circle', '#e5555e'),
-                    'x': ('square', '#d683d6'), 'y': ('triangle', '#45c4a2')},
-    'xbox': {'a': ('A', '#3fae49'), 'b': ('B', '#d9372f'), 'x': ('X', '#2f6fd9'), 'y': ('Y', '#e5b521')},
-    'nintendo': {'a': ('B', '#cfcfcf'), 'b': ('A', '#cfcfcf'), 'x': ('Y', '#cfcfcf'), 'y': ('X', '#cfcfcf')},
+from pad_styles import DPAD, STYLES  # noqa: F401  (scripts/, on the launcher's path)
+
+FACE_COLORS = {
+    'playstation': {'a': '#6b9ae8', 'b': '#e5555e', 'x': '#d683d6', 'y': '#45c4a2'},
+    'xbox': {'a': '#3fae49', 'b': '#d9372f', 'x': '#2f6fd9', 'y': '#e5b521'},
+    'nintendo': dict.fromkeys('abxy', '#cfcfcf'),
 }
-LABELS = {
-    'playstation': {'leftshoulder': 'L1', 'rightshoulder': 'R1', 'lefttrigger': 'L2', 'righttrigger': 'R2',
-                    'leftstick': 'L3', 'rightstick': 'R3', 'start': 'OPTIONS', 'back': 'SHARE',
-                    'touchpad': 'TOUCH', 'guide': 'PS', 'misc1': 'MUTE'},
-    'xbox': {'leftshoulder': 'LB', 'rightshoulder': 'RB', 'lefttrigger': 'LT', 'righttrigger': 'RT',
-             'leftstick': 'LS', 'rightstick': 'RS', 'start': 'MENU', 'back': 'VIEW',
-             'touchpad': 'TOUCH', 'guide': 'XBOX', 'misc1': 'SHARE'},
-    'nintendo': {'leftshoulder': 'L', 'rightshoulder': 'R', 'lefttrigger': 'ZL', 'righttrigger': 'ZR',
-                 'leftstick': 'LS', 'rightstick': 'RS', 'start': '+', 'back': '−',
-                 'touchpad': 'TOUCH', 'guide': 'HOME', 'misc1': 'CAPT'},
-}
-DPAD = {'dpup': 'up', 'dpdown': 'down', 'dpleft': 'left', 'dpright': 'right'}
-# The game's PS4 buttons (launcher CONTROLS) as SDL buttons, for their PlayStation icon.
-GAME_BUTTONS = {'cross': 'a', 'circle': 'b', 'square': 'x', 'triangle': 'y', 'l1': 'leftshoulder',
-                'r1': 'rightshoulder', 'l2': 'lefttrigger', 'r2': 'righttrigger', 'l3': 'leftstick',
-                'r3': 'rightstick', 'options': 'start', 'touchpad_left': 'touchpad',
-                'touchpad_right': 'touchpad', 'up': 'dpup', 'down': 'dpdown', 'left': 'dpleft',
-                'right': 'dpright'}
 
 INK, DIM, BODY = '#e6e0d8', '#5a5250', '#262020'
 
@@ -38,32 +20,29 @@ def spec(button, style):
     'label:<text>' is a small pill with that text (actions such as L3+R3)."""
     if button.startswith('label:'):
         return 'pill', button[len('label:'):], INK
-    if button in FACE.get(style, {}):
-        text, color = FACE[style][button]
-        return ('symbol' if style == 'playstation' else 'letter'), text, color
-    if button in DPAD:
-        return 'dpad', DPAD[button], INK
-    label = LABELS.get(style, {}).get(button)
-    if not label:
+    text = STYLES.get(style, {}).get(button, (None,))[0]
+    if not text:
         return None
-    kind = ('bumper' if button.endswith('shoulder') else 'trigger' if button.endswith('trigger')
-            else 'stick' if button.endswith('stick') else 'pill')
-    return kind, label, INK
+    if button in FACE_COLORS[style]:
+        return ('symbol' if style == 'playstation' else 'letter'), text, FACE_COLORS[style][button]
+    kind = ('dpad' if button in DPAD else 'bumper' if button.endswith('shoulder')
+            else 'trigger' if button.endswith('trigger') else 'stick' if button.endswith('stick') else 'pill')
+    return kind, text, INK
 
 
-def draw(canvas, button, style, size):
-    """Draws the icon of `button` filling a size × size canvas (cleared first)."""
+def draw(canvas, button, style, size, font='Segoe UI'):
+    """Draws the icon of `button` filling a size × size canvas (cleared first), its text in the
+    `font` family."""
     canvas.delete('all')
     found = spec(button, style)
     if not found:
         return
     kind, text, color = found
     s, m = size, size / 2
-    font = ('Segoe UI', max(6, int(s * 0.28)), 'bold')
     if kind in ('symbol', 'letter'):
         canvas.create_oval(1, 1, s - 1, s - 1, fill=BODY if kind == 'symbol' else color, outline='')
         if kind == 'letter':
-            canvas.create_text(m, m, text=text, fill='#101010', font=('Segoe UI', max(7, int(s * 0.42)), 'bold'))
+            canvas.create_text(m, m, text=text, fill='#101010', font=(font, max(7, int(s * 0.42)), 'bold'))
             return
         w, r = max(2, s // 11), s * 0.24
         if text == 'cross':
@@ -84,7 +63,7 @@ def draw(canvas, button, style, size):
             canvas.create_rectangle(*box, fill=INK if name == text else DIM, outline='')
     elif kind == 'stick':
         canvas.create_oval(1, 1, s - 1, s - 1, fill=BODY, outline=DIM, width=max(1, s // 14))
-        canvas.create_text(m, m, text=text, fill=color, font=font)
+        canvas.create_text(m, m, text=text, fill=color, font=(font, max(6, int(s * 0.28)), 'bold'))
     else:
         # Bumpers: a flat bar; triggers: taller with a rounded top; the rest: a small pill.
         top, bottom = {'bumper': (s * 0.28, s * 0.72), 'trigger': (s * 0.12, s * 0.88)}.get(kind, (s * 0.3, s * 0.7))
@@ -94,5 +73,5 @@ def draw(canvas, button, style, size):
         canvas.create_oval(x1 - 2 * r, top, x1, top + 2 * r, fill=BODY, outline='')
         canvas.create_rectangle(x0 + r, top, x1 - r, bottom, fill=BODY, outline='')
         canvas.create_rectangle(x0, top + r, x1, bottom, fill=BODY, outline='')
-        small = ('Segoe UI', max(5, int(s * (0.2 if len(text) > 3 else 0.3))), 'bold')
+        small = (font, max(5, int(s * (0.2 if len(text) > 3 else 0.3))), 'bold')
         canvas.create_text(m, (top + bottom) / 2, text=text, fill=color, font=small)

@@ -3,30 +3,36 @@
 
 WipEout writes its button prompts with a font of PlayStation buttons (fe/fonts/ps_buttons: the
 .fnt maps a character to a rectangle of the .gnf atlas) and shows the L1/R1 tabs of its menus as
-pictures (fe/images/but_l1_hd, but_r1_hd). They are entries of data00.psarc and data08.psarc,
-stored uncompressed. build() redraws them with the buttons of an Xbox or Nintendo controller:
-each glyph keeps its own outline (ring, box, trigger shield, oval, pill) and only its symbol or
-label changes, white on black as the game draws them, or black on a filled shape. The labels
-follow GOW3_PAD_MAP and the controller's letters, as scripts/glyphs.py does for God of War III.
-
-The archives are never written: build() writes the new entries to out/wipeout_glyphs/ and returns
-runtime file patches (src/runtime_file.c), "guest offset length fnv @host-file", which apply only
-while the archive still holds the bytes they were made from.
+pictures (fe/images/but_l1_hd, but_r1_hd), entries of data00.psarc and data08.psarc. build()
+redraws them with the buttons of an Xbox or Nintendo controller (scripts/pad_styles.py): each
+glyph keeps its own outline (ring, box, trigger shield, oval, pill) and only its symbol or label
+changes, white on black as the game draws them, or black on a filled shape. The labels follow
+GOW3_PAD_MAP. The archives are never written: the entries are packed into the bytes the originals
+take and applied as runtime file patches (scripts/psarc.py).
 """
+import argparse
 import struct
 from pathlib import Path
 
-import glyphs
 import gnf
+import pad_styles
 import psarc
 
-VERSION = 1  # of the drawing: a change redraws the cached entries
-ARCHIVES = ('data00.psarc', 'data08.psarc')
+VERSION = 2  # of the drawing: a change redraws the cached entries
 FONT_MAP = 'data/fe/fonts/ps_buttons.fnt'
 FONT_ATLAS = 'data/fe/fonts/ps_buttons.gnf'
 TABS = {'data/fe/images/but_l1_hd.gnf': 'l1', 'data/fe/images/but_r1_hd.gnf': 'r1'}
 SCALE = 4  # labels drawn this many times larger, then reduced
 RING_LETTER = 0.5  # a face button's letter: this share of the inside of its ring
+FONT = Path(__file__).resolve().parent.parent / 'launcher' / 'RussoOne-Regular.ttf'
+# The gamepad button that presses each game button by default (src/runtime_pad.c pad_map); L2/R2
+# stay on the triggers.
+DEFAULT_PAD = {'cross': 'a', 'circle': 'b', 'square': 'x', 'triangle': 'y', 'l1': 'leftshoulder',
+               'r1': 'rightshoulder', 'l2': 'lefttrigger', 'r2': 'righttrigger', 'l3': 'leftstick',
+               'r3': 'rightstick', 'options': 'start', 'touchpad_right': 'back'}
+# Buttons drawn as a symbol rather than their label; the d-pad's as an arrow head.
+SYMBOLS = {'start': {'xbox': 'menu', 'nintendo': 'plus'}, 'back': {'xbox': 'view', 'nintendo': 'minus'}}
+ICONS = {'menu', 'view', 'plus', 'minus', *pad_styles.DPAD}
 
 # The characters of ps_buttons and the game button each shows. Face buttons come in sets of
 # triangle, circle, square, cross: rings (four sizes), a thin ring and the bare symbols.
@@ -57,12 +63,49 @@ def font_map(data):
     return rects
 
 
-def label(button, style, faces, pad_map):
-    """The label (a letter, a word or a glyphs.ICONS name) of a game button on this controller."""
-    host = glyphs.pad_buttons(pad_map).get(button)
-    if not host:
-        return None
-    return glyphs.glyph(host, style, faces)[1]
+def pad_buttons(pad_map):
+    """Game button -> gamepad button, with a GOW3_PAD_MAP value ('cross=b,circle=a') applied; L2/R2
+    stay on the triggers, as in the runtime."""
+    buttons = dict(DEFAULT_PAD)
+    for entry in (pad_map or '').split(','):
+        game, _, host = (part.strip().casefold() for part in entry.partition('='))
+        if game in buttons and host and game not in ('l2', 'r2'):
+            buttons[game] = host
+    return buttons
+
+
+def label(button, style, pad_map):
+    """The label (letters, or an ICONS name) of a game button on this controller."""
+    host = pad_buttons(pad_map).get(button)
+    if host in SYMBOLS:
+        return SYMBOLS[host][style]
+    if host in pad_styles.DPAD:
+        return host
+    return pad_styles.STYLES[style].get(host, (None,))[0]
+
+
+def draw_icon(image, box, name, color):
+    """An ICONS shape centred in box: Menu's three bars, Plus, Minus, View's two windows, or a
+    d-pad direction's arrow head."""
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(image)
+    x0, y0, x1, y1 = box
+    cx, cy, r = (x0 + x1) / 2, (y0 + y1) / 2, min(x1 - x0, y1 - y0) / 2
+    t = max(1, r * 0.26)
+    if name in ('plus', 'minus', 'menu'):
+        for row in ((-0.55, 0, 0.55) if name == 'menu' else (0,)):
+            draw.rounded_rectangle((cx - r * 0.8, cy + row * r - t / 2, cx + r * 0.8, cy + row * r + t / 2), t / 3, fill=color)
+        if name == 'plus':
+            draw.rounded_rectangle((cx - t / 2, cy - r * 0.8, cx + t / 2, cy + r * 0.8), t / 3, fill=color)
+    elif name == 'view':
+        for dx, dy in ((-0.25, -0.2), (0.25, 0.2)):
+            draw.rectangle((cx + (dx - 0.55) * r, cy + (dy - 0.45) * r, cx + (dx + 0.55) * r, cy + (dy + 0.45) * r),
+                           outline=color, width=int(t * 0.7))
+    else:
+        ax, ay = {'dpup': (0, -1), 'dpdown': (0, 1), 'dpleft': (-1, 0), 'dpright': (1, 0)}[name]
+        draw.polygon([(cx + ax * r * 0.8, cy + ay * r * 0.8),
+                      (cx - ax * r * 0.5 - ay * r * 0.7, cy - ay * r * 0.5 - ax * r * 0.7),
+                      (cx - ax * r * 0.5 + ay * r * 0.7, cy - ay * r * 0.5 + ax * r * 0.7)], fill=color)
 
 
 def regions(mask, width, height):
@@ -107,19 +150,19 @@ def bounds(cells, width):
 
 def draw_text(size, box, text, scale=SCALE):
     """An L mask of `text` filling box (its capitals as tall as the box, narrower if it must be), or
-    of a glyphs.ICONS shape in it; drawn large and reduced."""
+    of an ICONS shape in it; drawn large and reduced."""
     from PIL import Image, ImageDraw, ImageFont
     w, h = size
     layer = Image.new('RGBA', (w * scale, h * scale), (0, 0, 0, 0))
     x0, y0, x1, y1 = (v * scale for v in box)
-    if text in glyphs.ICONS:
-        glyphs.draw_label(layer, (x0, y0, x1, y1), text, (255, 255, 255))
+    if text in ICONS:
+        draw_icon(layer, (x0, y0, x1, y1), text, (255, 255, 255))
         return layer.getchannel('A').resize((w, h), Image.LANCZOS)
     draw = ImageDraw.Draw(layer)
     size_px = max(6, int((y1 - y0) * 1.5))
     while True:
         try:
-            font = ImageFont.truetype(str(glyphs.FONT), size_px)
+            font = ImageFont.truetype(str(FONT), size_px)
         except OSError:  # the launcher's font is missing: Pillow's own
             font = ImageFont.load_default(size_px)
         left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
@@ -184,13 +227,13 @@ def relabel(glyph, text, kind='auto'):
     return ImageChops.lighter(base, ImageChops.multiply(text_mask, region))
 
 
-def redraw_atlas(atlas, rects, style, faces, pad_map):
+def redraw_atlas(atlas, rects, style, pad_map):
     """The ps_buttons atlas with every glyph of a known game button relabelled."""
     out = atlas.copy()
     for char, button in CHARACTERS.items():
         if char not in rects:
             continue
-        text = label(button, style, faces, pad_map)
+        text = label(button, style, pad_map)
         if not text:
             continue
         kind = 'bare' if char in BARE else 'captioned' if char in CAPTIONED else 'redrawn' if char in REDRAWN else 'auto'
@@ -211,84 +254,70 @@ def redraw_tab(image, text):
     return white
 
 
-def fnv1a(data):
-    h = 0xcbf29ce484222325
-    for b in data:
-        h = ((h ^ b) * 0x100000001b3) & 0xffffffffffffffff
-    return h
+def redrawn(name, original, style, pad_map, font):
+    """The new bytes of an entry this module redraws, or None when it has nothing to change."""
+    if name == FONT_ATLAS:
+        if font is None:
+            return None
+        texture = gnf.Texture(original)
+        return texture.replaced(redraw_atlas(texture.image(), font_map(font), style, pad_map))
+    text = label(TABS[name], style, pad_map)
+    if not text:
+        return None
+    texture = gnf.Texture(original)
+    return texture.replaced(redraw_tab(texture.image(), text))
 
 
-def entries(path):
-    """{name (lower case): (offset, bytes)} of the stored entries build() changes in one archive."""
-    archive = psarc.Archive(path)
-    found = {}
-    for name in (FONT_MAP, FONT_ATLAS, *TABS):
-        i = archive.names.get(name)
-        if i is None or archive.compressed(i):
-            continue
-        found[name] = (archive.entries[i]['offset'], archive.read(i))
-    return found
+def build(game, out, style, pad_map='', given=None):
+    """Runtime file patch lines that show `style`'s buttons in WipEout's prompts; given: the
+    archives as psarc.archives takes them. An entry whose new bytes do not fit is left as it is."""
+    found = psarc.archives(game, given)
+
+    def make(folder):
+        lines = []
+        for name, path in found:
+            with psarc.Archive(path) as archive:
+                font = archive.find(FONT_MAP)
+                font = archive.read(font) if font else None
+                for entry in (FONT_ATLAS, *TABS):
+                    i = archive.find(entry)
+                    new = i and redrawn(entry, archive.read(i), style, pad_map, font)
+                    if not new:
+                        continue
+                    changes = archive.repack(i, new)
+                    if changes is None:
+                        print(f'Glyphs: {name} {entry}: no room for the new picture, left as it is', flush=True)
+                        continue
+                    lines += psarc.patch_lines(name, changes, folder)
+        return lines
+    key = [VERSION, style, pad_map, [name for name, _path in found], psarc.stamp(p for _n, p in found)]
+    return psarc.cached_lines(Path(out) / 'wipeout_glyphs', key, make)
 
 
-def build(game, out, style, faces=None, pad_map=''):
-    """Runtime file patch lines that show `style`'s buttons in WipEout's prompts; [] when there is
-    nothing to change (a PlayStation controller, the keyboard, or no archive with the font)."""
-    import io
-    import json
-    from PIL import Image
-    target = Path(out) / 'wipeout_glyphs'
-    if style not in ('xbox', 'nintendo'):
-        import shutil
-        shutil.rmtree(target, ignore_errors=True)
-        return []
-    lines = []
-    present = {p.name.lower(): p for p in Path(game).iterdir()} if Path(game).is_dir() else {}
-    for archive_name in ARCHIVES:
-        path = present.get(archive_name)
-        if not path:
-            continue
-        stat = path.stat()
-        key = {'version': VERSION, 'style': style, 'faces': faces, 'pad_map': pad_map,
-               'archive': [stat.st_size, int(stat.st_mtime)]}
-        folder = target / archive_name
-        cache = folder / 'patches.json'
-        try:
-            cached = json.loads(cache.read_text())
-            if cached['key'] == key and all(Path(p).is_file() for *_x, p in cached['patches']):
-                lines += [f'/app0/{archive_name} {o:x} {n:x} {h:x} @{p}' for o, n, h, p in cached['patches']]
-                continue
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-        found = entries(path)
-        changed = {}
-        if FONT_MAP in found and FONT_ATLAS in found:
-            texture = gnf.Texture(found[FONT_ATLAS][1])
-            atlas = redraw_atlas(texture.image(), font_map(found[FONT_MAP][1]), style, faces, pad_map)
-            changed[FONT_ATLAS] = texture.replaced(atlas)
-        for name, button in TABS.items():
-            text = label(button, style, faces, pad_map)
-            if name in found and text:
-                texture = gnf.Texture(found[name][1])
-                changed[name] = texture.replaced(redraw_tab(texture.image(), text))
-        folder.mkdir(parents=True, exist_ok=True)
-        patches = []
-        for name, data in changed.items():
-            offset, original = found[name]
-            file = folder / Path(name).name
-            file.write_bytes(data)
-            patches.append((offset, len(data), fnv1a(original), str(file.resolve())))
-        cache.write_text(json.dumps({'key': key, 'patches': patches}))
-        lines += [f'/app0/{archive_name} {o:x} {n:x} {h:x} @{p}' for o, n, h, p in patches]
-    return lines
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('game', type=Path)
+    parser.add_argument('--out', type=Path, required=True, help='adds its changes to OUT/file_patches.txt')
+    parser.add_argument('--style', choices=('xbox', 'nintendo'), required=True)
+    parser.add_argument('--pad-map', default='', help='GOW3_PAD_MAP')
+    psarc.add_archive_option(parser)
+    args = parser.parse_args()
+    try:
+        lines = build(args.game, args.out, args.style, args.pad_map, args.archive)
+    except Exception as error:  # noqa: BLE001  (icons only: whatever fails, the game starts)
+        print(f'Glyphs: {error}; the game keeps its own button icons', flush=True)
+        return
+    with open(args.out / 'file_patches.txt', 'a') as f:
+        f.writelines(lines)
+    print(f'Glyphs: {args.style} buttons in the game\'s prompts ({len(lines)} changes; game files untouched)'
+          if lines else 'Glyphs: no button font found in the game\'s archives', flush=True)
 
 
 def preview(fnt, gnf_file, out_png, style='xbox'):
     """The redrawn atlas of a ps_buttons.fnt and .gnf pair, as a PNG (for a look without the game)."""
-    from pathlib import Path as P
-    texture = gnf.Texture(P(gnf_file).read_bytes())
-    redraw_atlas(texture.image(), font_map(P(fnt).read_bytes()), style, None, '').save(out_png)
+    texture = gnf.Texture(Path(gnf_file).read_bytes())
+    redraw_atlas(texture.image(), font_map(Path(fnt).read_bytes()), style, '').save(out_png)
 
 
 if __name__ == '__main__':
-    import sys
-    preview(*sys.argv[1:])
+    main()

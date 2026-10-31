@@ -1,0 +1,32 @@
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from paths import ROOT
+
+sys.path.insert(0, str(ROOT))
+import run
+
+
+class RunArchiveTests(unittest.TestCase):
+    def test_archives_kept_out_of_the_view_are_passed_by_their_game_names(self):
+        with tempfile.TemporaryDirectory() as folder:
+            view, base = Path(folder) / 'view', Path(folder) / 'base'
+            for directory in (view, base, view / 'sub'):
+                directory.mkdir()
+            for path in (view / 'data09.psarc', view / 'eboot.bin', base / 'data08.psarc', base / 'other.psarc'):
+                path.write_bytes(b'')
+            unlinked = {str(view / 'data08.psarc'): base / 'data08.psarc',
+                        str(view / 'sub' / 'other.psarc'): base / 'other.psarc',  # not in the game folder itself
+                        str(view / 'movie.mp4'): base / 'movie.mp4'}
+            self.assertEqual(run.archive_args(view, unlinked, view),
+                             ['--archive', 'data08.psarc', str(base / 'data08.psarc'),
+                              '--archive', 'data09.psarc', str(view / 'data09.psarc')])
+            self.assertEqual(run.archive_args(base, {}, None),
+                             ['--archive', 'data08.psarc', str(base / 'data08.psarc'),
+                              '--archive', 'other.psarc', str(base / 'other.psarc')])
+
+
+if __name__ == '__main__':
+    unittest.main()

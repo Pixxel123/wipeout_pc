@@ -1518,27 +1518,16 @@ EXTRA['pt'].update({
     'Keyboard & mouse': 'Teclado e mouse',
     'Gamepad': 'Controle',
     'Controller type': 'Tipo de controle',
+    "How buttons are named here, in the port's menu and in the game's own prompts (drawn when the game starts; the first time takes a few seconds). Xbox also shows an Xbox controller on the game's Controls screen. The game files are not changed.":
+        'Como os botões são chamados aqui, no menu do port e nas indicações do próprio jogo (desenhadas ao iniciar o jogo; a primeira vez leva alguns segundos). Xbox também mostra um controle de Xbox na tela Controles do jogo. Os arquivos do jogo não são alterados.',
 })
 EXTRA['es'].update({
     'Device': 'Dispositivo',
     'Keyboard & mouse': 'Teclado y ratón',
     'Gamepad': 'Mando',
     'Controller type': 'Tipo de mando',
-})
-
-EXTRA['pt'].update({
-    'In-game button icons': 'Ícones de botões no jogo',
-    "PlayStation (the game's)": 'PlayStation (os do jogo)',
-    'The connected gamepad': 'O controle conectado',
-    "The buttons the game's own prompts show, in its style. Drawn when the game starts (the first time takes a few seconds); the game files are not changed.":
-        'Os botões que as indicações do próprio jogo mostram, no estilo dele. Desenhados ao iniciar o jogo (a primeira vez leva alguns segundos); os arquivos do jogo não são alterados.',
-})
-EXTRA['es'].update({
-    'In-game button icons': 'Iconos de botones en el juego',
-    "PlayStation (the game's)": 'PlayStation (los del juego)',
-    'The connected gamepad': 'El mando conectado',
-    "The buttons the game's own prompts show, in its style. Drawn when the game starts (the first time takes a few seconds); the game files are not changed.":
-        'Los botones que muestran las indicaciones del propio juego, en su estilo. Se dibujan al iniciar el juego (la primera vez tarda unos segundos); los archivos del juego no se modifican.',
+    "How buttons are named here, in the port's menu and in the game's own prompts (drawn when the game starts; the first time takes a few seconds). Xbox also shows an Xbox controller on the game's Controls screen. The game files are not changed.":
+        'Cómo se llaman los botones aquí, en el menú del port y en las indicaciones del propio juego (se dibujan al iniciar el juego; la primera vez tarda unos segundos). Xbox también muestra un mando de Xbox en la pantalla Controles del juego. Los archivos del juego no se modifican.',
 })
 
 EXTRA['es'].update({

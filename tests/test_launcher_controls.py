@@ -114,9 +114,12 @@ class ControlMapTest(unittest.TestCase):
         self.assertEqual(launcher.control_values({'pad': {'touchpad': 'misc1'}}, 'pad'), {})  # no gamepad box for it
 
     def test_both_styles_name_every_default_gamepad_button(self):
+        boxes = ['a', 'b', 'x', 'y', 'leftshoulder', 'rightshoulder', 'leftstick', 'rightstick', 'start', 'back',
+                 'touchpad', 'guide', 'dpup', 'dpdown', 'dpleft', 'dpright', 'misc1']  # no triggers: L2/R2 are fixed
         for labels in launcher.PAD_STYLES.values():
+            self.assertEqual(list(labels), boxes)
             self.assertTrue(all(p in labels for _b, _k, p in launcher.CONTROLS if p))
-            self.assertEqual(len(set(labels.values())), len(labels))
+            self.assertEqual(len(set(labels.values())), len(labels))  # a box's choice maps back to one button
 
     def test_pressed_keys_become_sdl_names(self):
         self.assertEqual(launcher.sdl_key_name('q'), 'Q')
@@ -276,31 +279,13 @@ class ControlMapTest(unittest.TestCase):
             env = launcher.game_environment({**launcher.APP_DEFAULTS, 'experimental_upscaler': saved})
             self.assertEqual(env['GOW3_EXPERIMENTAL_UPSCALER'], value)
 
-    def test_glyph_style_is_off_by_default(self):
-        self.assertEqual(launcher.APP_DEFAULTS['glyph_style'], 'off')
-        self.assertNotIn('GOW3_GLYPH_STYLE', launcher.game_environment({**launcher.APP_DEFAULTS}))
-
-    def test_glyph_style_reaches_the_game(self):
-        # WipEout's prompts (scripts/wipeout_glyphs.py): auto, Xbox or Nintendo. Off, an unknown value
-        # or the keyboard (its prompts are a font of gamepad buttons) send nothing, and an inherited
-        # GOW3_GLYPH_STYLE never reaches the game.
-        from unittest import mock
-
-        with mock.patch.dict(launcher.os.environ, {'GOW3_GLYPH_STYLE': 'xbox'}):
-            for style in ('auto', 'xbox', 'nintendo'):
-                env = launcher.game_environment({**launcher.APP_DEFAULTS, 'glyph_style': style})
-                self.assertEqual(env['GOW3_GLYPH_STYLE'], style)
-            for style in ('off', 'keyboard', 'playstation', None):
-                env = launcher.game_environment({**launcher.APP_DEFAULTS, 'glyph_style': style})
-                self.assertNotIn('GOW3_GLYPH_STYLE', env)
-        self.assertEqual([v for v, _t in launcher.GLYPH_STYLES], ['off', 'auto', 'xbox', 'nintendo'])
-
     def test_settings_keys_kept(self):
         for key in ('game_dir', 'user_dir', 'mods_dir', 'patches_dir', 'language', 'hdr',
-                    'draw_pipe', 'readbacks', 'background_warmup', 'parallel_warmup', 'controls', 'pad_style', 'glyph_style'):
+                    'draw_pipe', 'readbacks', 'background_warmup', 'parallel_warmup', 'controls', 'pad_style'):
             self.assertIn(key, launcher.APP_DEFAULTS)
         # The player name option is gone: an old settings.json value is ignored.
         self.assertNotIn('player_name', launcher.APP_DEFAULTS)
+        self.assertNotIn('glyph_style', launcher.APP_DEFAULTS)  # In-game button icons: Controller type now
         env = launcher.game_environment({**launcher.APP_DEFAULTS, 'player_name': ' Kratos '})
         self.assertNotIn('GOW3_USER_NAME', env)
         for key in ('display_mode', 'fps_limit', 'render_resolution', 'engine_fps'):
@@ -881,6 +866,15 @@ if __name__ == '__main__':
 
 class PadStyleTest(unittest.TestCase):
     """Gamepad names: PlayStation, Xbox, Nintendo (by position) or Keyboard (no gamepad table)."""
+
+    def test_controller_type_reaches_the_game(self):
+        # The in-game menu (gow3_overlay.cpp Pad) names the buttons as the Controls page does.
+        for style in ('playstation', 'xbox', 'nintendo'):
+            env = launcher.game_environment({**launcher.APP_DEFAULTS, 'pad_style': style})
+            self.assertEqual(env['GOW3_PAD_STYLE'], style)
+        for style in ('keyboard', '', None):  # an old or edited settings.json
+            env = launcher.game_environment({**launcher.APP_DEFAULTS, 'pad_style': style})
+            self.assertNotIn('GOW3_PAD_STYLE', env)
 
     def test_nintendo_names_follow_the_button_positions(self):
         names = launcher.pad_labels('nintendo')

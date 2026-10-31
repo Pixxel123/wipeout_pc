@@ -1,7 +1,8 @@
-import hashlib
 import struct
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw
@@ -10,34 +11,7 @@ from paths import ROOT  # noqa: F401  (scripts on the path)
 import gnf
 import psarc
 import wipeout_glyphs
-from test_gnf import texture
-
-
-def stored_archive(path, files, compressed=()):
-    """A PSARC 1.4 archive as WipEout's are: a NUL-separated manifest, the TOC in the order of the
-    MD5s of the names (upper case, with a leading slash), entries stored (zlib for `compressed`)."""
-    import zlib
-    names = list(files)
-    contents = ['\0'.join(names).encode()] + [files[n] for n in names]
-    packed = [False] + [n in compressed for n in names]
-    hashes = [bytes(16)] + [hashlib.md5(('/' + n).upper().encode()).digest() for n in names]
-    order = [0] + sorted(range(1, len(contents)), key=lambda i: hashes[i])
-    block = 65536
-    stored_blocks, entries, sizes = [], [], []
-    for i in order:
-        data = contents[i]
-        pieces = [data[at:at + block] for at in range(0, max(1, len(data)), block)]
-        stored_blocks.append([zlib.compress(p, 9) if packed[i] else p for p in pieces])
-    toc_len = 32 + 30 * len(contents) + 2 * sum(len(b) for b in stored_blocks)
-    body = b''
-    for i, blocks in zip(order, stored_blocks):
-        entries.append(hashes[i] + struct.pack('>I', len(sizes)) + len(contents[i]).to_bytes(5, 'big')
-                       + (toc_len + len(body)).to_bytes(5, 'big'))
-        for piece in blocks:
-            sizes.append(len(piece) % 0x10000)
-            body += piece
-    head = struct.pack('>4sHH4sIIIII', b'PSAR', 1, 4, b'zlib', toc_len, 30, len(contents), block, 0xd)
-    Path(path).write_bytes(head + b''.join(entries) + b''.join(struct.pack('>H', s) for s in sizes) + body)
+from psarc_fixtures import apply, archive, texture
 
 
 def ring(size=96):
@@ -74,10 +48,13 @@ class WipeoutGlyphTests(unittest.TestCase):
     def test_every_face_button_set_is_complete(self):
         faces = [c for c, b in wipeout_glyphs.CHARACTERS.items() if b in wipeout_glyphs.FACES]
         self.assertEqual(len(faces) % 4, 0)
-        self.assertEqual(wipeout_glyphs.label('cross', 'xbox', None, ''), 'A')
-        self.assertEqual(wipeout_glyphs.label('l2', 'xbox', None, ''), 'LT')
-        self.assertEqual(wipeout_glyphs.label('cross', 'xbox', None, 'cross=b'), 'B')  # GOW3_PAD_MAP
-        self.assertEqual(wipeout_glyphs.label('cross', 'nintendo', None, ''), 'B')  # the south button
+        self.assertEqual(wipeout_glyphs.label('cross', 'xbox', ''), 'A')
+        self.assertEqual(wipeout_glyphs.label('l2', 'xbox', ''), 'LT')
+        self.assertEqual(wipeout_glyphs.label('cross', 'xbox', 'cross=b'), 'B')  # GOW3_PAD_MAP
+        self.assertEqual(wipeout_glyphs.label('cross', 'nintendo', ''), 'B')  # the south button
+        self.assertEqual(wipeout_glyphs.label('options', 'xbox', ''), 'menu')  # drawn as a symbol
+        self.assertEqual(wipeout_glyphs.label('touchpad_right', 'nintendo', ''), 'minus')
+        self.assertEqual(wipeout_glyphs.label('cross', 'xbox', 'cross=dpup'), 'dpup')  # an arrow head
 
     def test_a_ring_keeps_its_ring_and_gets_a_letter(self):
         glyph = ring()
@@ -121,35 +98,33 @@ class WipeoutGlyphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             game, out = Path(folder) / 'game', Path(folder) / 'out'
             game.mkdir()
-            stored_archive(game / 'data00.psarc', {'Data/fe/fonts/ps_buttons.fnt': fnt,
-                                                   'Data/fe/fonts/ps_buttons.gnf': gnf_file,
-                                                   'Data/fe/images/but_l1_hd.gnf': tab_file,
-                                                   'Data/fe/images/but_r1_hd.gnf': tab_file},
-                           compressed={'Data/fe/images/but_r1_hd.gnf'})
-            lines = wipeout_glyphs.build(game, out, 'xbox')
-            self.assertEqual(len(lines), 2)  # the atlas and the L1 tab; R1 is compressed: left alone
-            original = bytearray((game / 'data00.psarc').read_bytes())
-            patched = bytearray(original)
-            for line in lines:
-                guest, offset, length, fnv, path = line.split(' ', 4)
-                self.assertEqual(guest, '/app0/data00.psarc')
-                offset, length = int(offset, 16), int(length, 16)
-                self.assertEqual(wipeout_glyphs.fnv1a(original[offset:offset + length]), int(fnv, 16))
-                new = Path(path[1:]).read_bytes()
-                self.assertEqual(len(new), length)
-                patched[offset:offset + length] = new
+            # As WipEout's: a NUL-separated manifest, the TOC in the order of the MD5s of the names
+            # (upper case, with a leading slash), the entries stored but for one.
+            archive(game / 'data00.psarc', {'Data/fe/fonts/ps_buttons.fnt': fnt,
+                                            'Data/fe/fonts/ps_buttons.gnf': gnf_file,
+                                            'Data/fe/images/but_l1_hd.gnf': tab_file,
+                                            'Data/fe/images/but_r1_hd.gnf': tab_file},
+                    separator=b'\0', prefix='', hashed=lambda n: ('/' + n).upper(), md5_order=True,
+                    packed={'Data/fe/images/but_r1_hd.gnf'})
+            # The atlas and the stored L1 tab change, each repacked in its own place. The compressed R1
+            # tab is almost empty and packs smaller than its new picture can: it stays as it is.
+            with redirect_stdout(StringIO()) as printed:
+                lines = wipeout_glyphs.build(game, out, 'xbox')
+            self.assertIn('but_r1_hd.gnf: no room for the new picture, left as it is', printed.getvalue())
+            self.assertTrue(all(line.startswith('/app0/data00.psarc ') for line in lines))
+            patched = apply((game / 'data00.psarc').read_bytes(), lines)
             (Path(folder) / 'patched.psarc').write_bytes(patched)
             a = psarc.Archive(Path(folder) / 'patched.psarc')
-            drawn = gnf.Texture(a.read(a.names['data/fe/fonts/ps_buttons.gnf'])).image()
+            self.addCleanup(a.close)
+            drawn = gnf.Texture(a.read(a.find('data/fe/fonts/ps_buttons.gnf'))).image()
             self.assertNotEqual(ImageChops.difference(drawn, atlas).getbbox(), None)
-            self.assertEqual(a.read(a.names['data/fe/fonts/ps_buttons.fnt']), fnt)
+            self.assertEqual(a.read(a.find('data/fe/fonts/ps_buttons.fnt')), fnt)
+            self.assertNotEqual(a.read(a.find('data/fe/images/but_l1_hd.gnf')), tab_file)
+            self.assertEqual(a.read(a.find('data/fe/images/but_r1_hd.gnf')), tab_file)
             # Cached: the same lines; another mapping draws again.
             self.assertEqual(wipeout_glyphs.build(game, out, 'xbox'), lines)
-            remapped = wipeout_glyphs.build(game, out, 'xbox', None, 'triangle=a')
-            self.assertNotEqual(Path(remapped[0].split('@', 1)[1]).read_bytes(), None)
-            # No glyphs for the keyboard or a PlayStation controller; old copies removed.
-            self.assertEqual(wipeout_glyphs.build(game, out, 'keyboard'), [])
-            self.assertFalse((out / 'wipeout_glyphs').exists())
+            remapped = wipeout_glyphs.build(game, out, 'xbox', 'triangle=a')
+            self.assertNotEqual(remapped, lines)
 
     def test_no_archive_no_patches(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -23,8 +23,16 @@ class FakeCanvas:
 class ButtonIconTest(unittest.TestCase):
     def test_every_game_button_has_a_playstation_icon(self):
         for button, _key, _pad in launcher.CONTROLS:
-            sdl = button_icons.GAME_BUTTONS[button]
+            sdl = launcher.GAME_BUTTONS[button]
             self.assertIsNotNone(button_icons.spec(sdl, 'playstation'), button)
+        # The touchpad shows its own icon, though its right click is on Share by default.
+        self.assertEqual(launcher.GAME_BUTTONS['touchpad_right'], 'touchpad')
+
+    def test_every_style_names_the_same_buttons(self):
+        styles = list(button_icons.STYLES.values())
+        for table in styles[1:]:
+            self.assertEqual(list(table), list(styles[0]))
+        self.assertEqual(set(button_icons.FACE_COLORS), set(button_icons.STYLES))
 
     def test_every_gamepad_button_has_an_icon_in_both_styles(self):
         for style, labels in launcher.PAD_STYLES.items():
@@ -45,10 +53,12 @@ class ButtonIconTest(unittest.TestCase):
 
     def test_draw_fills_and_clears_the_canvas(self):
         canvas = FakeCanvas()
-        for sdl in list(button_icons.LABELS['xbox']) + ['a', 'b', 'x', 'y', 'dpup', 'dpright']:
+        for sdl in button_icons.STYLES['xbox']:
             for style in ('playstation', 'xbox'):
-                button_icons.draw(canvas, sdl, style, 28)
+                button_icons.draw(canvas, sdl, style, 28, 'DejaVu Sans')
                 self.assertTrue(canvas.items, (style, sdl))
+                fonts = {kw['font'][0] for _name, _args, kw in canvas.items if 'font' in kw}
+                self.assertLessEqual(fonts, {'DejaVu Sans'}, (style, sdl))
         button_icons.draw(canvas, 'nonsense', 'xbox', 28)
         self.assertEqual(canvas.items, [])
 

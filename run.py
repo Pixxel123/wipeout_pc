@@ -92,6 +92,15 @@ def run_script(name, *args, capture=False, check=True):
     return None
 
 
+def optional_script(name, *args):
+    """Runs a script whose failure must not stop the game (pictures, icons): its output is shown,
+    and a failure is reported."""
+    code, output = run_script(name, *args, capture=True, check=False)
+    print(output, end='', flush=True)
+    if code:
+        print(f'{name} failed ({code}); the game starts without it', flush=True)
+
+
 def launch_prefix(env):
     """Linux integrations chosen in the launcher: MangoHud is its Vulkan layer (an environment
     variable), GameMode a command that starts the game."""
@@ -114,62 +123,27 @@ def find_executable(name):
     return None
 
 
-def glyph_mounts(env, probe, game, out):
-    """(probe arguments, style) of the controller glyphs: patched copies of the WADs that hold the
-    game's button icons, mounted over them (scripts/glyphs.py), or for WipEout runtime file patches
-    of the button font and tabs in its archives, added to GOW3_FILE_PATCHES (scripts/wipeout_glyphs.py).
-    Opt-in: unless GOW3_GLYPH_STYLE is auto, xbox, nintendo or keyboard nothing is asked, drawn or
-    mounted, and old copies are removed. The keyboard keys follow GOW3_KEY_MAP; auto shows them when
-    no gamepad is connected. The game folder is never written."""
-    choice = env.get('GOW3_GLYPH_STYLE', 'off')
-    if choice not in ('auto', 'xbox', 'nintendo', 'keyboard'):
-        shutil.rmtree(Path(out) / 'glyphs', ignore_errors=True)
-        shutil.rmtree(Path(out) / 'wipeout_glyphs', ignore_errors=True)
-        return [], None
-    try:
-        import glyphs
-        import wipeout_glyphs
-        pad = ''
-        if choice == 'auto':
-            pad = subprocess.run([str(probe), '--gamepad'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 text=True, timeout=15, creationflags=no_console()).stdout
-        style, faces, name = glyphs.resolve(choice, pad)
-        mounts = glyphs.build(game, out, style, faces, env.get('GOW3_PAD_MAP', ''), env.get('GOW3_KEY_MAP', ''))
-    except Exception as error:  # noqa: BLE001  (icons only: whatever fails, the game still starts)
-        print(f'Glyphs: {error}; the game keeps its own button icons', flush=True)
-        return [], None
-    patches = []
-    try:  # WipEout's: patches of its archives, made apart so a failure leaves the WAD copies alone
-        patches = wipeout_glyphs.build(game, out, style, faces, env.get('GOW3_PAD_MAP', ''))
-        if patches and env.get('GOW3_FILE_PATCHES'):
-            with open(env['GOW3_FILE_PATCHES'], 'a', encoding='utf-8') as f:
-                f.write(''.join(line + '\n' for line in patches))
-    except Exception as error:  # noqa: BLE001
-        print(f'Glyphs: {error}; the game keeps its own button icons', flush=True)
-        patches = []
-    if not mounts and not patches:
-        print('Glyphs: a PlayStation controller, the game keeps its own button icons' if style == 'playstation'
-              else 'Glyphs: no button icons for this controller in this game folder' if style == 'keyboard'
-              else 'Glyphs: no button icons found in this game folder', flush=True)
-        return [], None
-    where = Path(out) / ('glyphs' if mounts else 'wipeout_glyphs')
-    print(f'Glyphs: {style}{f" ({name})" if name else ""}, on copies in {where}; game files untouched', flush=True)
-    return [part for guest, path in mounts.items() for part in ('--mount', f'{guest}={path}')], style
-
-
-def pause_menu_args(game, out, mounts):
+def pause_menu_args(game, out):
     """Probe arguments for the copy of R_UI.WAD with the pause menu's Exit to Desktop row
-    (scripts/pause_menu.py), made from the glyphs' copy when `mounts` has one. The probe mounts it
-    over both once its hook is in (src/menu_hook.h). The game folder is never written."""
+    (scripts/pause_menu.py). The probe mounts it once its hook is in (src/menu_hook.h). The game
+    folder is never written."""
     import pause_menu
-    guest = '/app0/' + pause_menu.WAD
-    source = next((part.split('=', 1)[1] for part in mounts if part.startswith(guest + '=')), None)
     try:
-        made = pause_menu.build(game, out, source)
+        made = pause_menu.build(game, out)
     except OSError as error:
         print(f'Pause menu: {error}; no Exit to Desktop row', flush=True)
         return []
     return [part for path in made.values() for part in ('--pause-menu', str(path))]
+
+
+def archive_args(game, unlinked, view):
+    """--archive NAME FILE for each .psarc the game reads, for scripts/menu_patches.py and
+    scripts/xbox_controls.py: the game folder's, and those a drive without links kept out of the
+    update view (unlinked: view path -> file), which the game reads in place as /app0/NAME."""
+    found = {p.name: p for p in Path(game).iterdir() if p.suffix.lower() == '.psarc' and p.is_file()}
+    found.update({Path(link).name: Path(target) for link, target in unlinked.items()
+                  if Path(link).parent == Path(view) and Path(link).suffix.lower() == '.psarc'})
+    return [part for name, path in sorted(found.items()) for part in ('--archive', name, str(path))]
 
 
 def main():
@@ -183,6 +157,8 @@ def main():
     data = Path(env.get('GOW3_DATA_DIR', PORT))
     out = data / 'out'
     out.mkdir(parents=True, exist_ok=True)
+    # ponytail: the cache of the removed controller glyphs (God of War III only); drop after 0.2.50.
+    shutil.rmtree(out / 'glyphs', ignore_errors=True)
     env.setdefault('GOW3_CONFIG', str(data / 'gow3.ini'))
     # Values this script derived on the previous start ("Apply and restart" inherits them) are
     # derived again from the new options.
@@ -279,8 +255,16 @@ def main():
             if code == 0:
                 isa_args = ['--isa-rewrite', str(out / 'isa-rewrite.bin')]
         run_script('content_profile.py', game, '--out', out, '--sku', env.get('GOW3_CONTENT_SKU', 'full'))
-        run_script('menu_patches.py', game, '--out', out,  # Eliminator target slider limit (#89)
+        psarcs = archive_args(game, unlinked, update_view)
+        run_script('menu_patches.py', game, '--out', out, *psarcs,  # Eliminator target slider limit (#89)
                    '--limit', env.get('GOW3_ELIMINATOR_LIMIT', '2000'))
+        # WipEout's own prompts and its Controls screen show the controller type's buttons.
+        style = env.get('GOW3_PAD_STYLE')
+        if style in ('xbox', 'nintendo') and profile['name'] == 'WipEout Omega Collection' and psarcs:
+            optional_script('wipeout_glyphs.py', game, '--out', out, '--style', style,
+                            '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
+            if style == 'xbox':
+                optional_script('xbox_controls.py', game, '--out', out, *psarcs)
         env['GOW3_FILE_PATCHES'] = str(out / 'file_patches.txt')
 
         from patches import game_profile_for, patch_requirements, patch_status, selected_patches
@@ -352,11 +336,7 @@ def main():
         print(f'Engine frame rate: {engine_fps} FPS'
               + ('' if engine_fps > 60 or graphics['engine_fps'] == '60' else
                  ' (the frame rate patch was not found in this eboot.bin)'), flush=True)
-        glyph_args, glyph_style = glyph_mounts(env, probe, game, out)
-        if glyph_style:  # the in-game menu names the buttons the same way
-            env['GOW3_GLYPHS'] = glyph_style
-            derived.append('GOW3_GLYPHS')
-        mount_args = glyph_args + pause_menu_args(game, out, glyph_args)
+        mount_args = pause_menu_args(game, out)
         for link, target in unlinked.items():
             mount_args += ['--mount', f'/app0/{Path(link).relative_to(update_view).as_posix()}={target}']
         env['GOW3_DERIVED'] = ','.join(derived)

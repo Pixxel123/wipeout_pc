@@ -34,9 +34,10 @@ class Refusals(unittest.TestCase):
 
     def test_build_leaves_no_copy(self):
         with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder) / 'R_UI.WAD'
+            source = Path(folder) / pause_menu.WAD
+            source.parent.mkdir(parents=True)
             source.write_bytes(wad('TXRX_R_UI', b'x' * 8))
-            self.assertEqual(pause_menu.build(folder, folder, source), {})
+            self.assertEqual(pause_menu.build(folder, folder), {})
             self.assertFalse((Path(folder) / 'pause_menu' / 'R_UI.WAD').exists())
 
 
