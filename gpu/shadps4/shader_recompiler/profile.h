@@ -57,6 +57,10 @@ struct Profile {
     /// gow3: GOW3_LIGHTING_TEST=dref (vk_lighting_test.h): depth comparisons return the result
     /// in all four channels instead of (v, 0, 0, 0).
     bool dref_broadcast{};
+    /// gow3: GOW3_FAST_SHADER_MATH=1 (backend/spirv/fast_math.h): no inf/NaN preserve mode, and
+    /// pixel and compute shaders may contract float operations. Part of the cache profile, so
+    /// switching it rebuilds the shader cache instead of reusing shaders built the other way.
+    bool fast_shader_math{};
 
     bool operator==(const Profile&) const = default;
 };

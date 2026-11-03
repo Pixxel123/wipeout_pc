@@ -390,7 +390,15 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
         .dref_broadcast = LightingTest::Current().dref,
+        .fast_shader_math = [] {
+            const char* env = std::getenv("GOW3_FAST_SHADER_MATH");
+            return env && env[0] == '1';
+        }(),
     };
+    if (profile.fast_shader_math) {
+        std::printf("Shaders: fast float math (GOW3_FAST_SHADER_MATH=1): no inf/NaN preserve, "
+                    "pixel and compute shaders may contract\n");
+    }
 
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
