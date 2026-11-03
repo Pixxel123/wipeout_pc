@@ -406,6 +406,10 @@ target_link_libraries(depth-stencil-state-test PRIVATE Vulkan::Headers fmt::fmt 
 add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
 target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(ui-composition-test PRIVATE ..)
+add_executable(fast-shader-math-test EXCLUDE_FROM_ALL ../tests/test_fast_shader_math.cpp)
+target_compile_options(fast-shader-math-test PRIVATE -UNDEBUG)
+target_include_directories(fast-shader-math-test PRIVATE shim shadps4 third_party/gcn/include)
+target_link_libraries(fast-shader-math-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)

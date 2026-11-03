@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/fast_math.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 
 namespace Shader::Backend::SPIRV {
 
 Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
-    ctx.Decorate(op, spv::Decoration::NoContraction);
+    // gow3: GOW3_FAST_SHADER_MATH lets pixel and compute shaders contract (fast_math.h).
+    if (!AllowsContraction(ctx.profile.fast_shader_math, ctx.sw_stage)) {
+        ctx.Decorate(op, spv::Decoration::NoContraction);
+    }
     return op;
 }
 
