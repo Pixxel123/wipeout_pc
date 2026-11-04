@@ -1,6 +1,7 @@
 # Steam Deck performance
 
 Where a WipEout race's frame time goes on a Steam Deck (LCD, 1280x800 panel, 4 cores / 8 threads,
+The full working log, with every race window and profile table: [steam-deck-measurements-2026-11-03.md](steam-deck-measurements-2026-11-03.md).
 CPU and GPU sharing one power budget), and the changes that moved it. Measured 2026-11-02/03.
 
 ## Method
