@@ -529,6 +529,12 @@ void VideoOutDriver::Flip(const Request& req) {
                             double(Gow3Stats::eos_gds.exchange(0)) / frames,
                             double(Gow3Stats::download_waits.exchange(0)) / frames,
                             double(Gow3Stats::download_waits_skipped.exchange(0)) / frames);
+                std::printf("Frame end: per frame GPU thread %.0f us, recording thread task %.0f "
+                            "us (%.0f us before GPU idle), guest waited for GPU idle %.0f us\n",
+                            Gow3Stats::frame_end_a_ns.exchange(0) / (frames * 1e3),
+                            Gow3Stats::frame_end_b_ns.exchange(0) / (frames * 1e3),
+                            Gow3Stats::frame_end_b_idle_ns.exchange(0) / (frames * 1e3),
+                            Gow3Stats::gpu_idle_wait_ns.exchange(0) / (frames * 1e3));
             }
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();

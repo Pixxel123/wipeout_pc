@@ -166,7 +166,12 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
+        // gow3 (GOW3_FRAME_STATS): this thread's time from the frame end to its next wait.
+        std::chrono::steady_clock::time_point frame_end_start{};
         if (submit_done) {
+            if (Gow3Stats::enabled) {
+                frame_end_start = std::chrono::steady_clock::now();
+            }
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
@@ -193,6 +198,12 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        if (frame_end_start != std::chrono::steady_clock::time_point{}) {
+            Gow3Stats::frame_end_a_ns.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - frame_end_start).count(),
+                std::memory_order_relaxed);
+        }
     }
 }
 
