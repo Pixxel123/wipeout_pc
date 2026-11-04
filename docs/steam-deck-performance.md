@@ -66,8 +66,8 @@ With `GOW3_PREP_WORKERS=4` the memo's texture sets hit 94 % at the Vineta K race
 B 92.2 %) and 98.5 % in photo mode (98.4 %, 98.6 %), 2026-11-04, one bench pair (the log's counters
 are per interval and flushed in batches, so the spans are approximate). Misses, pooled over both
 runs, are mostly "other key": at the race start other key 95 %, generation 3 %, image check 3 %; in
-photo mode 89 %, 2 %, 9 %. The texture-set memo is fed at 0 workers only if the GPU thread hashes
-the T#s itself; the 94 % clears the 40 % bar, so it is worth it.
+photo mode 89 %, 2 %, 9 %. That hit share is why the GPU thread now hashes the T#s itself at 0 workers
+(see Stage B changes below).
 
 ### The CPU bench
 
@@ -112,21 +112,23 @@ costs and the countdown FPS are the metrics.
 
 ## Stage B changes (bench)
 
-Each row: 4 + 4 runs against the installed baseline (GitHub build of f0826ef), bench dir
-`~/diag/bench/20261104-125251` on the Deck. Medians, ranges in brackets. Judged against the A/A
+Each row: 4 + 4 runs, A is the baseline, B the change. Row 1: A is the bench build (GitHub build
+of 74a3036, run 41817132158), bench dir `~/diag/bench/20261104-125251` on the Deck. Row 2: A is the memo build
+(`stage-b`), bench dir `~/diag/bench/20261104-133650`. Medians, ranges in brackets. Judged against the A/A
 spread: 0.9 % photo, 4.0 % countdown.
 
 | change | photo stage B µs/draw | countdown stage B µs/draw | countdown FPS | texture-set hits | screenshot same | kept |
 |---|---|---|---|---|---|---|
-| texture-set memo at 0 workers (eebe72c) | A 4.33 (4.30-4.35), B 4.10 (4.06-4.12), -5.3 % | A 4.48 (4.38-4.53), B 4.37 (4.33-4.43), -2.5 % | A 49.59 (48.82-50.60), B 49.68 (49.05-50.70), +0.2 % | race start 92.7 %, photo 98.4 % (B runs pooled, spans approximate) | yes | yes |
-| four per-draw fixes: no per-draw vector copy, signature built in place, initial-exec thread-locals, inline LRU touch (34dcacd) | A 4.14 (4.13-4.15), B 3.87 (3.83-3.89), -6.6 % | A 4.39 (4.37-4.44), B 4.15 (4.14-4.27), -5.4 % | A 49.24 (49.13-49.68), B 50.34 (49.32-51.03), +2.2 % | n/a (not measured; the memo is unchanged) | yes | yes |
+| texture-set memo at 0 workers (ac96967) | A 4.33 (4.30-4.35), B 4.10 (4.06-4.12), -5.3 % | A 4.48 (4.38-4.53), B 4.37 (4.33-4.43), -2.5 % | A 49.59 (48.82-50.60), B 49.68 (49.05-50.70), +0.2 % | race start 92.6 %, photo 98.35 % (pooled over the 4 B runs, spans approximate) | yes | yes |
+| four per-draw fixes: no per-draw vector copy, signature built in place, initial-exec thread-locals, inline LRU touch (d8e3439) | A 4.14 (4.13-4.15), B 3.87 (3.83-3.89), -6.6 % | A 4.39 (4.37-4.44), B 4.15 (4.14-4.27), -5.4 % | A 49.24 (49.13-49.68), B 50.34 (49.32-51.03), +2.2 % | n/a (not measured; the memo is unchanged) | yes | yes |
 
 The photo gain is far above the 0.9 % spread and the ranges do not overlap; the countdown is not
 worse (it is lower, inside its 4.0 % spread). Hit shares at 0 workers match the 94 % / 98.5 % seen
-with 4 workers. Photo FPS is at the cap (+0.2 %), as expected.
+with 4 workers. Photo FPS stays at the 60 FPS cap in the memo bench (A 59.73, B 59.82).
 
 The four fixes: bench dir `~/diag/bench/20261104-133650` (4 + 4 runs, all `ok`), A is the GitHub build of
-eebe72c (the texture-set memo, installed as `stage-b`), B is the GitHub build of 34dcacd (`stage-b2`). The
+ac96967 (the texture-set memo, run 41830579779, installed as `stage-b`), B is the GitHub build of d8e3439
+(run 41836863954, `stage-b2`); both runs, like row 1's, built these trees before the branch was rewritten. The
 photo gain is far above the 0.9 % spread and the ranges do not overlap; the countdown is lower, not
 higher. The artifact's `libgow3gpu.so` has `STATIC_TLS` in its `FLAGS`, and the game starts with the
 initial-exec thread-locals (warm-up pair `ok`, no static TLS error in the game log). Stage A µs/draw is
