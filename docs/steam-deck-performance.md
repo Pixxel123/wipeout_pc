@@ -109,3 +109,17 @@ costs and the countdown FPS are the metrics.
 
 `perf` works on the Deck as the deck user (user-space samples):
 `perf record -e cpu-clock:u -F 999 -g -p $(pgrep -x gow3-probe) -- sleep 20`.
+
+## Stage B changes (bench)
+
+Each row: 4 + 4 runs against the installed baseline (GitHub build of f0826ef), bench dir
+`~/diag/bench/20261104-125251` on the Deck. Medians, ranges in brackets. Judged against the A/A
+spread: 0.9 % photo, 4.0 % countdown.
+
+| change | photo stage B µs/draw | countdown stage B µs/draw | countdown FPS | texture-set hits | screenshot same | kept |
+|---|---|---|---|---|---|---|
+| texture-set memo at 0 workers (eebe72c) | A 4.33 (4.30-4.35), B 4.10 (4.06-4.12), -5.3 % | A 4.48 (4.38-4.53), B 4.37 (4.33-4.43), -2.5 % | A 49.59 (48.82-50.60), B 49.68 (49.05-50.70), +0.2 % | race start 92.7 %, photo 98.4 % (B runs pooled, spans approximate) | yes | yes |
+
+The photo gain is far above the 0.9 % spread and the ranges do not overlap; the countdown is not
+worse (it is lower, inside its 4.0 % spread). Hit shares at 0 workers match the 94 % / 98.5 % seen
+with 4 workers. Photo FPS is at the cap (+0.2 %), as expected.
