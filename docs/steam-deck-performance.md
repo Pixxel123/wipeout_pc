@@ -119,7 +119,16 @@ spread: 0.9 % photo, 4.0 % countdown.
 | change | photo stage B µs/draw | countdown stage B µs/draw | countdown FPS | texture-set hits | screenshot same | kept |
 |---|---|---|---|---|---|---|
 | texture-set memo at 0 workers (eebe72c) | A 4.33 (4.30-4.35), B 4.10 (4.06-4.12), -5.3 % | A 4.48 (4.38-4.53), B 4.37 (4.33-4.43), -2.5 % | A 49.59 (48.82-50.60), B 49.68 (49.05-50.70), +0.2 % | race start 92.7 %, photo 98.4 % (B runs pooled, spans approximate) | yes | yes |
+| four per-draw fixes: no per-draw vector copy, signature built in place, initial-exec thread-locals, inline LRU touch (34dcacd) | A 4.14 (4.13-4.15), B 3.87 (3.83-3.89), -6.6 % | A 4.39 (4.37-4.44), B 4.15 (4.14-4.27), -5.4 % | A 49.24 (49.13-49.68), B 50.34 (49.32-51.03), +2.2 % | n/a (not measured; the memo is unchanged) | yes | yes |
 
 The photo gain is far above the 0.9 % spread and the ranges do not overlap; the countdown is not
 worse (it is lower, inside its 4.0 % spread). Hit shares at 0 workers match the 94 % / 98.5 % seen
 with 4 workers. Photo FPS is at the cap (+0.2 %), as expected.
+
+The four fixes: bench dir `~/diag/bench/20261104-133650` (4 + 4 runs, all `ok`), A is the GitHub build of
+eebe72c (the texture-set memo, installed as `stage-b`), B is the GitHub build of 34dcacd (`stage-b2`). The
+photo gain is far above the 0.9 % spread and the ranges do not overlap; the countdown is lower, not
+higher. The artifact's `libgow3gpu.so` has `STATIC_TLS` in its `FLAGS`, and the game starts with the
+initial-exec thread-locals (warm-up pair `ok`, no static TLS error in the game log). Stage A µs/draw is
+about the same (photo 4.75 -> 4.71, -0.8 %, countdown 4.77 -> 4.69). The photo-mode screenshots show the
+same scene; only the ship's hover pose differs, as it does between two A runs.
