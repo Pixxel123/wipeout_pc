@@ -62,6 +62,12 @@ a screenshot every second has a 70 ms hitch every second. `exp-run.sh` takes one
 `GOW3_GPU_PROFILE` reports almost nothing while the GPU is saturated (it skips frames whose results
 are not ready), so it is no guide on the Deck.
 
+With `GOW3_PREP_WORKERS=4` the memo's texture sets hit 94 % at the Vineta K race start (A 94.2 %,
+B 92.2 %) and 98.5 % in photo mode (98.4 %, 98.6 %), 2026-11-04, one bench pair (the log's counters
+are per interval and flushed in batches, so the spans are approximate); the misses are mostly "other
+key" (92 %; generation 5 %, image check 3 %). The texture-set memo is fed at 0 workers only if the
+GPU thread hashes the T#s itself; worth it when hits >= 40 %, so it is worth it.
+
 ### The CPU bench
 
 Hands-off, same route every run. Record the pad route once: on the Deck run
