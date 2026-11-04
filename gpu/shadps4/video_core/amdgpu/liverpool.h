@@ -273,6 +273,9 @@ private:
     /// decrements num_submits once it has decoded a submission, before that). Under
     /// submit_mutex with num_submits.
     std::atomic<bool> work_retired{true};
+    /// gow3: counts submissions (under submit_mutex), so that work retired later on another
+    /// thread is known to be all the work there is.
+    u64 submit_generation{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;

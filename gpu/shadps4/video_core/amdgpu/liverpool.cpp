@@ -1764,6 +1764,7 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
 
     std::scoped_lock lk{submit_mutex};
     ++num_submits;
+    ++submit_generation;
     work_retired = false;
     submit_cv.notify_one();
 }
@@ -1782,6 +1783,7 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     std::scoped_lock lk{submit_mutex};
     num_mapped_queues = std::max(num_mapped_queues, gnm_vqid + 1);
     ++num_submits;
+    ++submit_generation;
     work_retired = false;
     submit_cv.notify_one();
 }
