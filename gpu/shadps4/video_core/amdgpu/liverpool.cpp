@@ -168,11 +168,26 @@ void Liverpool::Process(std::stop_token stoken) {
 
         // gow3 (GOW3_FRAME_STATS): this thread's time from the frame end to its next wait.
         std::chrono::steady_clock::time_point frame_end_start{};
+        const auto count_frame_end = [&frame_end_start] {
+            if (frame_end_start != std::chrono::steady_clock::time_point{}) {
+                Gow3Stats::frame_end_a_ns.fetch_add(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - frame_end_start).count(),
+                    std::memory_order_relaxed);
+            }
+        };
         if (submit_done) {
             if (Gow3Stats::enabled) {
                 frame_end_start = std::chrono::steady_clock::now();
             }
             VideoCore::EndCapture();
+            // gow3: the draw recording thread runs the frame end after the frame's draws and
+            // raises GPU idle itself (PostFrameEnd): nothing to wait for here.
+            if (rasterizer && rasterizer->FrameEndTaskEnabled() && PostFrameEnd()) {
+                submit_done = false;
+                count_frame_end();
+                continue;
+            }
             if (rasterizer) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
@@ -198,13 +213,60 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
-        if (frame_end_start != std::chrono::steady_clock::time_point{}) {
-            Gow3Stats::frame_end_a_ns.fetch_add(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - frame_end_start).count(),
-                std::memory_order_relaxed);
-        }
+        count_frame_end();
     }
+}
+
+bool Liverpool::PostFrameEnd() {
+    struct FrameEnd {
+        Liverpool* liverpool;
+        u64 generation;
+    };
+    FrameEnd frame_end{this, 0};
+    {
+        // Retiring needs every submission decoded: their draws are then ahead of the task.
+        std::scoped_lock lk{submit_mutex};
+        if (num_submits != 0) {
+            return false;
+        }
+        frame_end.generation = submit_generation;
+    }
+    const auto task = [](Vulkan::Rasterizer& vk_rasterizer, const u8* data) {
+        FrameEnd posted;
+        std::memcpy(&posted, data, sizeof(posted));
+        Liverpool& self = *posted.liverpool;
+        const bool stats = Gow3Stats::enabled;
+        const auto start = stats ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+        vk_rasterizer.FrameEndBeforeIdle();
+        // As at the end of Process: the work is retired once its draws and fences are done.
+        // A submission since the task was posted is not done yet: it retires, and raises GPU
+        // idle, at the end of its own decoding.
+        bool retired = false;
+        {
+            std::scoped_lock lk{self.submit_mutex};
+            if (self.submit_generation == posted.generation && self.num_submits == 0) {
+                self.work_retired = true;
+                retired = true;
+            }
+        }
+        if (retired) {
+            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        }
+        const auto idle = stats ? std::chrono::steady_clock::now() : start;
+        vk_rasterizer.FrameEndAfterIdle();
+        if (stats) {
+            const auto ns = [](auto duration) {
+                return static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+            };
+            Gow3Stats::frame_end_b_idle_ns.fetch_add(ns(idle - start), std::memory_order_relaxed);
+            Gow3Stats::frame_end_b_ns.fetch_add(ns(std::chrono::steady_clock::now() - start),
+                                                std::memory_order_relaxed);
+        }
+    };
+    rasterizer->RunInOrder(task, &frame_end, sizeof(frame_end));
+    return true;
 }
 
 namespace {

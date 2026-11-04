@@ -29,6 +29,7 @@
 #include "video_core/renderer_vulkan/vk_scene_signature.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/renderdoc.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/trace_range.h"
@@ -1583,6 +1584,35 @@ void Rasterizer::OnSubmit() {
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
+}
+
+bool Rasterizer::FrameEndTaskEnabled() const {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_FRAME_END_TASK");
+        return !(env && env[0] == '0');
+    }();
+    // RenderDoc ends its capture on the GPU command thread after the frame's submission.
+    return enabled && UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedTasks) &&
+           !VideoCore::IsRenderDocLoaded();
+}
+
+void Rasterizer::FrameEndBeforeIdle() {
+    texture_cache.ProcessDownloadImages();
+    // Under memory pressure its write-backs write guest memory.
+    texture_cache.RunGarbageCollector();
+    // The copies reading guest memory for this frame: Flush waited for them before GPU idle.
+    scheduler.WaitHostCopies();
+    scheduler.WaitDeferredSignals();
+}
+
+void Rasterizer::FrameEndAfterIdle() {
+    if (fault_process_pending) {
+        fault_process_pending = false;
+        buffer_cache.ProcessFaultBuffer();
+    }
+    runtime.TickFrame();
+    SubmitInfo info{};
+    scheduler.Flush(info);
 }
 
 const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) const {

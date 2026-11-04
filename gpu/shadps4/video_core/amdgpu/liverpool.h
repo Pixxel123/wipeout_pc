@@ -229,6 +229,9 @@ private:
 
     void ProcessCommands();
     void Process(std::stop_token stoken);
+    /// gow3: hands the frame end to the draw recording thread, which raises GPU idle (see
+    /// Rasterizer::FrameEndTaskEnabled). False when a submission is still to be decoded.
+    bool PostFrameEnd();
 
     struct GpuQueue {
         std::mutex m_access{};
