@@ -11,6 +11,16 @@
 #include <string>
 #include <unordered_set>
 #include "gow3_threads.h"
+#include "gow3_frame_log.h"
+#ifdef __linux__
+#include <fstream>
+#include <thread>
+#include <vector>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 
 #include "common/hash.h"
 #include "common/thread.h"
@@ -37,6 +47,127 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Vulkan {
+
+namespace {
+// gow3 diagnostic (GOW3_SHADER_SCAN=<file>): which PS4 shaders are in memory over time. Every
+// 5 s a low-priority thread reads the process's resident readable memory and lists the hashes
+// of the shader headers it finds ("OrbShdr", the hash programs are keyed by); GetProgram adds
+// the first use of each program. Times are milliseconds of the day, like the frame log.
+FILE* ShaderScanFile() {
+    static FILE* const file = [] {
+        const char* path = std::getenv("GOW3_SHADER_SCAN");
+        return path && *path ? std::fopen(path, "w") : nullptr;
+    }();
+    return file;
+}
+std::mutex shader_scan_mutex;
+
+void ShaderScanUse(u64 hash, int stage) {
+    if (FILE* out = ShaderScanFile()) {
+        std::scoped_lock lk{shader_scan_mutex};
+        std::fprintf(out, "use %u %016llx %d\n",
+                     Gow3FrameLog::MsOfDay(std::chrono::system_clock::now()),
+                     static_cast<unsigned long long>(hash), stage);
+        std::fflush(out);
+    }
+}
+
+#ifdef __linux__
+void ShaderScanOnce(FILE* out, std::vector<char>& buf) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const u32 at = Gow3FrameLog::MsOfDay(std::chrono::system_clock::now());
+    std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
+    std::ifstream maps("/proc/self/maps");
+    for (std::string line; std::getline(maps, line);) {
+        unsigned long lo = 0, hi = 0;
+        char perms[5] = {};
+        if (std::sscanf(line.c_str(), "%lx-%lx %4s", &lo, &hi, perms) != 3 || perms[0] != 'r' ||
+            line.find(".so") != std::string::npos || line.find("[v") != std::string::npos) {
+            continue;
+        }
+        ranges.emplace_back(lo, hi);
+    }
+    const uintptr_t own_lo = reinterpret_cast<uintptr_t>(buf.data());
+    const uintptr_t own_hi = own_lo + buf.size();
+    const size_t page = size_t(sysconf(_SC_PAGESIZE));
+    std::vector<unsigned char> resident;
+    std::unordered_set<u64> hashes;
+    u64 bytes = 0, hits = 0;
+    static constexpr char signature[] = {'O', 'r', 'b', 'S', 'h', 'd', 'r'};
+    for (const auto& [lo, hi] : ranges) {
+        for (uintptr_t chunk = lo; chunk < hi; chunk += buf.size()) {
+            const size_t n = std::min<uintptr_t>(buf.size(), hi - chunk);
+            resident.resize((n + page - 1) / page);
+            if (mincore(reinterpret_cast<void*>(chunk), n, resident.data()) != 0) {
+                continue;
+            }
+            for (size_t p = 0; p < resident.size();) {
+                if (!(resident[p] & 1)) {
+                    ++p;
+                    continue;
+                }
+                size_t q = p;
+                while (q < resident.size() && (resident[q] & 1)) {
+                    ++q;
+                }
+                const uintptr_t start = chunk + p * page;
+                const size_t len = std::min<size_t>((q - p) * page, hi - start);
+                p = q;
+                if (start < own_hi && start + len > own_lo) {
+                    continue; // this scan's own buffer
+                }
+                iovec local{buf.data(), len}, remote{reinterpret_cast<void*>(start), len};
+                const ssize_t got = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+                if (got <= 0) {
+                    continue; // unreadable now (protection changed): skipped
+                }
+                bytes += u64(got);
+                const char* data = buf.data();
+                const char* end = data + got;
+                for (const char* hit = data; end - hit >= 32;) {
+                    hit = static_cast<const char*>(
+                        memmem(hit, size_t(end - hit), signature, sizeof(signature)));
+                    if (!hit || end - hit < 32) {
+                        break;
+                    }
+                    u64 hash;
+                    std::memcpy(&hash, hit + 16, sizeof(hash)); // BinaryInfo::shader_hash
+                    hashes.insert(hash);
+                    ++hits;
+                    hit += sizeof(signature);
+                }
+            }
+        }
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::scoped_lock lk{shader_scan_mutex};
+    std::fprintf(out, "scan %u hashes %zu headers %llu read %.0f MB in %.2f s\n", at,
+                 hashes.size(), static_cast<unsigned long long>(hits), double(bytes) / 1e6,
+                 seconds);
+    for (const u64 hash : hashes) {
+        std::fprintf(out, "has %u %016llx\n", at, static_cast<unsigned long long>(hash));
+    }
+    std::fflush(out);
+}
+
+void StartShaderScan() {
+    if (!ShaderScanFile()) {
+        return;
+    }
+    std::thread([] {
+        setpriority(PRIO_PROCESS, 0, 19);
+        std::vector<char> buf(size_t(1) << 20);
+        for (int i = 0; i < 40; ++i) { // the first 200 s
+            ShaderScanOnce(ShaderScanFile(), buf);
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+    }).detach();
+}
+#else
+void StartShaderScan() {}
+#endif
+} // namespace
 
 using Shader::HwStage;
 using Shader::Output;
@@ -331,6 +462,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    StartShaderScan(); // gow3 diagnostic, GOW3_SHADER_SCAN
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
@@ -1412,6 +1544,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         it_pgm = program_cache.end();
     }
     if (it_pgm == program_cache.end()) {
+        ShaderScanUse(params.hash, int(hw_stage)); // gow3 diagnostic, GOW3_SHADER_SCAN
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
         if (compile_async()) {
             QueueShader(*new_program, hw_stage, sw_stage, params, runtime_info, binding, 0, true);
