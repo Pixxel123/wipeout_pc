@@ -4,7 +4,7 @@
 #   bench-run.sh <runs per build> <A spec> <B spec> [route]
 #   ':' separates the spec fields, so build paths and env values must not contain ':'
 #   spec: <extracted AppImage dir>[:GOW3_X=y[:...]]   route: default ~/diag/routes/vinetak-photo.pad
-#   BENCH_TITLE=<text>: the game shows "<text> - test X of Y" in a notice as each run starts,
+#   BENCH_TITLE=<text>: the game shows "<text> - test X of Y" in the top right during each run,
 #   with "(A)"/"(B)" added when the two specs differ
 # Summarise with: python3 -I ~/diag/bench-summary.py <printed directory>
 set -u
@@ -23,14 +23,14 @@ OUT=$DIAG/bench/$(date +%Y%m%d-%H%M%S); mkdir -p "$OUT"
 cp "$ROUTE" "$ROUTE.marks" "$OUT/" || exit 1
 export DISPLAY=:0 XAUTHORITY=$(ls /run/user/1000/xauth_* | head -1)
 trap 'pkill -x gow3-probe; systemctl --user stop wipeout-bench 2>/dev/null; exit 130' INT TERM HUP
-run_one() { # <run dir> <spec> <notice>
+run_one() { # <run dir> <spec> <label>
     local dir=$1 build=${2%%:*} envs=() e
     [ "$2" != "$build" ] && IFS=: read -ra envs <<<"${2#*:}"
     mkdir -p "$dir"
     echo replay > "$DIAG/pad.ctl"
     local args=(-E DISPLAY -E XAUTHORITY -E GOW3_FRAME_STATS=1 -E GOW3_FRAME_LOG="$dir/frames.log"
                 -E GOW3_PAD_FILE="$DIAG/pad.ctl" -E GOW3_PAD_REPLAY="$ROUTE" -E GOW3_STALL_MS=25
-                -E GOW3_TEST_NOTICE="$3")
+                -E GOW3_TEST_LABEL="$3")
     for e in "${envs[@]}"; do args+=(-E "$e"); done
     printf '%s\n' "build=$build" "${envs[@]}" > "$dir/env.txt"
     if ! systemd-run --user --collect --unit wipeout-bench "${args[@]}" bash -c \
