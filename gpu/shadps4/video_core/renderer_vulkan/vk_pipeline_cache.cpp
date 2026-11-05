@@ -645,7 +645,11 @@ bool GraceWait(const Job& job) {
         window = now;
         used = {};
     }
-    const nanoseconds left = std::min<nanoseconds>(milliseconds(10), milliseconds(30) - used);
+    // gow3 (diagnostic): GOW3_GRACE_MS / GOW3_GRACE_WINDOW_MS override the per-draw and per-100-ms budgets.
+    static const auto per_draw = milliseconds(std::getenv("GOW3_GRACE_MS") ? std::atoi(std::getenv("GOW3_GRACE_MS")) : 10);
+    static const auto per_window =
+        milliseconds(std::getenv("GOW3_GRACE_WINDOW_MS") ? std::atoi(std::getenv("GOW3_GRACE_WINDOW_MS")) : 30);
+    const nanoseconds left = std::min<nanoseconds>(per_draw, per_window - used);
     if (left <= nanoseconds(0)) {
         return false;
     }
