@@ -59,6 +59,7 @@ struct AsyncShaderCompilation {
     vk::ShaderModule module{};
     size_t permutation{};
     bool initial{};
+    u64 t_queued{}, t_started{}, t_done{}, capture_ns{}; // gow3: GOW3_SKIP_TRACE attribution
     ~AsyncShaderCompilation() {
         ir.reset();
         if (pools) {
@@ -80,6 +81,7 @@ struct AsyncGraphicsCompilation {
     GraphicsPipeline::SerializationSupport data;
     std::unique_ptr<GraphicsPipeline> pipeline;
     bool failure_logged = false;
+    u64 t_queued{}, t_started{}, t_done{}; // gow3: GOW3_SKIP_TRACE attribution
 };
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
@@ -455,9 +457,15 @@ struct PhaseTimer {
 // any 100 ms, so a burst of new shaders still cannot freeze the game.
 // ponytail: fixed budget, make it a setting if players need another one.
 // gow3: GOW3_SKIP_TRACE=1 (diagnostic): why draws are skipped while pipelines build. Per shader
-// set (the stages' program hashes): skipped draws, distinct pipeline keys, and which key fields
-// differ from the set's first key. A line at each new key, and at 1, 8, 64, 512... skips of a set.
+// set (the stages' program hashes): skipped draws, keys, which stage slots and colour-buffer fields
+// differ from the set's first key, whether a sibling key was already built when a key was first
+// requested, and per key and per shader the queue wait and compile time once it is ready.
 namespace SkipTrace {
+u64 NowNs() {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+}
 bool Enabled() {
     static const bool on = [] {
         const char* v = std::getenv("GOW3_SKIP_TRACE");
@@ -465,65 +473,87 @@ bool Enabled() {
     }();
     return on;
 }
+struct Key {
+    u64 first_ns = 0, skips = 0;
+    bool sibling_ready = false, vs_shared = false;
+};
 struct Set {
     GraphicsPipelineKey first{};
-    std::unordered_set<size_t> keys;
+    std::unordered_set<size_t> keys, published;
+    std::unordered_set<size_t> published_vs;
     u64 skips = 0;
 };
 std::mutex mutex;
 std::unordered_map<u64, Set> sets;
+std::unordered_map<size_t, Key> keys;
 u32 lines = 0;
+u64 queue_full = 0;
+constexpr u32 MaxLines = 6000;
+constexpr u32 VsSlot = u32(Shader::SwStage::Vertex);
+const char* SlotName(u32 i) {
+    static const char* names[] = {"fs", "tcs", "tes", "vs", "gs", "cs"};
+    return i < 6 ? names[i] : "?";
+}
+template <typename T>
+bool Same(const T& a, const T& b) {
+    return std::memcmp(&a, &b, sizeof(T)) == 0;
+}
 std::string Differs(const GraphicsPipelineKey& a, const GraphicsPipelineKey& b) {
-    struct Field {
-        const char* name;
-        size_t offset, size;
-    };
-    using K = GraphicsPipelineKey;
-    static const Field fields[] = {
-        {"stage_hashes", offsetof(K, stage_hashes), sizeof(K::stage_hashes)},
-        {"vertex_formats", offsetof(K, vertex_buffer_formats), sizeof(K::vertex_buffer_formats)},
-        {"patch_points", offsetof(K, patch_control_points), sizeof(K::patch_control_points)},
-        {"num_color", offsetof(K, num_color_attachments), sizeof(K::num_color_attachments)},
-        {"color_buffers", offsetof(K, color_buffers), sizeof(K::color_buffers)},
-        {"blend", offsetof(K, blend_controls), sizeof(K::blend_controls)},
-        {"write_masks", offsetof(K, write_masks), sizeof(K::write_masks)},
-        {"cb_shader_mask", offsetof(K, cb_shader_mask), sizeof(K::cb_shader_mask)},
-        {"logic_op", offsetof(K, logic_op), sizeof(K::logic_op)},
-        {"num_samples", offsetof(K, num_samples), sizeof(K::num_samples)},
-        {"depth_samples", offsetof(K, depth_samples), sizeof(K::depth_samples)},
-        {"color_samples", offsetof(K, color_samples), sizeof(K::color_samples)},
-        {"mrt_mask", offsetof(K, mrt_mask), sizeof(K::mrt_mask)},
-        {"motion_vectors", offsetof(K, motion_vectors), sizeof(K::motion_vectors)},
-    };
-    const auto* pa = reinterpret_cast<const u8*>(&a);
-    const auto* pb = reinterpret_cast<const u8*>(&b);
     std::string out;
-    size_t end = 0;
-    for (const auto& f : fields) {
-        if (std::memcmp(pa + f.offset, pb + f.offset, f.size) != 0) {
-            out += out.empty() ? "" : ",";
-            out += f.name;
+    const auto add = [&](const std::string& what) { out += (out.empty() ? "" : ",") + what; };
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (a.stage_hashes[i] != b.stage_hashes[i]) {
+            add(std::string("stage:") + SlotName(i));
         }
-        end = std::max(end, f.offset + f.size);
     }
-    if (std::memcmp(pa + end, pb + end, sizeof(K) - end) != 0) {
-        out += out.empty() ? "depth/raster bits" : ",depth/raster bits";
+    for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
+        const auto& x = a.color_buffers[i];
+        const auto& y = b.color_buffers[i];
+        if (Same(x, y)) {
+            continue;
+        }
+        std::string f;
+        if (x.data_format != y.data_format) f += "data_format/";
+        if (x.num_format != y.num_format) f += "num_format/";
+        if (x.num_conversion != y.num_conversion) f += "num_conversion/";
+        if (x.export_format != y.export_format) f += "export_format/";
+        if (!(x.swizzle == y.swizzle)) f += "swizzle/";
+        if (f.empty()) f = "other/";
+        f.pop_back();
+        add("cb" + std::to_string(i) + ":" + f);
     }
+    if (a.num_color_attachments != b.num_color_attachments) add("num_color");
+    if (!Same(a.blend_controls, b.blend_controls)) add("blend");
+    if (!Same(a.write_masks, b.write_masks)) add("write_masks");
+    if (a.num_samples != b.num_samples || a.depth_samples != b.depth_samples ||
+        !Same(a.color_samples, b.color_samples)) add("samples");
+    if (a.mrt_mask != b.mrt_mask) add("mrt_mask");
+    if (!Same(a.vertex_buffer_formats, b.vertex_buffer_formats)) add("vertex_formats");
+    if (a.z_format != b.z_format || a.stencil_format != b.stencil_format) add("depth_format");
+    if (a.prim_type != b.prim_type) add("topology");
     return out.empty() ? "nothing" : out;
 }
+u64 SetId(const std::array<const Shader::Info*, MaxShaderStages>& infos) {
+    u64 id = 0;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (infos[i]) {
+            id = id * 1099511628211ull ^ infos[i]->pgm_hash;
+        }
+    }
+    return id;
+}
+void Print(const char* format, auto... args) {
+    if (lines < MaxLines) {
+        ++lines;
+        std::printf(format, args...);
+    }
+}
+/// A draw is skipped because its pipeline is building (or could not be queued).
 void Note(const PipelineSelection& sel) {
     if (!Enabled()) {
         return;
     }
-    u64 id = 0;
-    u64 vs = 0, ps = 0;
-    for (u32 i = 0; i < MaxShaderStages; ++i) {
-        if (sel.infos[i]) {
-            id = id * 1099511628211ull ^ sel.infos[i]->pgm_hash;
-            vs = vs ? vs : sel.infos[i]->pgm_hash;
-            ps = sel.infos[i]->pgm_hash;
-        }
-    }
+    const u64 id = SetId(sel.infos);
     const size_t key_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
     std::scoped_lock lock{mutex};
     auto [it, fresh] = sets.try_emplace(id);
@@ -532,24 +562,74 @@ void Note(const PipelineSelection& sel) {
         set.first = sel.graphics_key;
     }
     ++set.skips;
-    const bool new_key = set.keys.insert(key_hash).second;
-    const bool milestone = (set.skips & (set.skips - 1)) == 0 && (set.skips == 1 || set.skips % 8 == 0);
-    if ((new_key || milestone) && lines < 600) {
-        ++lines;
-        std::printf("Skip trace: set %016llx (first stage %016llx, last %016llx): %llu skips, %zu keys; "
-                    "key %016zx%s%s\n",
-                    static_cast<unsigned long long>(id), static_cast<unsigned long long>(vs),
-                    static_cast<unsigned long long>(ps), static_cast<unsigned long long>(set.skips),
-                    set.keys.size(), key_hash, new_key && !fresh ? " new, differs from the first in: " : "",
-                    new_key && !fresh ? Differs(set.first, sel.graphics_key).c_str() : "");
+    auto [kit, new_key] = keys.try_emplace(key_hash);
+    Key& key = kit->second;
+    ++key.skips;
+    if (new_key) {
+        set.keys.insert(key_hash);
+        key.first_ns = NowNs();
+        key.sibling_ready = !set.published.empty();
+        key.vs_shared = set.published_vs.contains(sel.graphics_key.stage_hashes[VsSlot]);
+        Print("Skip trace: new key %016zx set %016llx (%zu keys, %zu built): sibling built %d, its vs "
+              "shared %d; differs from the set's first key in: %s\n",
+              key_hash, static_cast<unsigned long long>(id), set.keys.size(), set.published.size(),
+              int(key.sibling_ready), int(key.vs_shared),
+              fresh ? "(first key)" : Differs(set.first, sel.graphics_key).c_str());
+    }
+}
+void NoteQueueFull() {
+    if (!Enabled()) {
+        return;
+    }
+    std::scoped_lock lock{mutex};
+    ++queue_full;
+    if ((queue_full & (queue_full - 1)) == 0) {
+        Print("Skip trace: compile queue full, build not queued (%llu so far)\n",
+              static_cast<unsigned long long>(queue_full));
     }
 }
 void NoteShaders(size_t pending) {
-    if (Enabled() && lines < 600) {
+    if (Enabled()) {
         std::scoped_lock lock{mutex};
-        ++lines;
-        std::printf("Skip trace: draw waits for %zu shaders still translating\n", pending);
+        Print("Skip trace: draw waits for %zu shaders still translating\n", pending);
     }
+}
+/// A pipeline built on a worker is published (GPU thread).
+void Published(const GraphicsPipelineKey& gkey, const std::array<const Shader::Info*, MaxShaderStages>& infos,
+               u64 t_queued, u64 t_started, u64 t_done) {
+    if (!Enabled()) {
+        return;
+    }
+    const u64 id = SetId(infos);
+    const size_t key_hash = std::hash<GraphicsPipelineKey>{}(gkey);
+    const u64 now = NowNs();
+    std::scoped_lock lock{mutex};
+    Set& set = sets[id];
+    set.published.insert(key_hash);
+    set.published_vs.insert(gkey.stage_hashes[VsSlot]);
+    const auto kit = keys.find(key_hash);
+    const auto ms = [](u64 a, u64 b) { return b > a ? (b - a) / 1e6 : 0.0; };
+    if (kit != keys.end()) {
+        const Key& key = kit->second;
+        Print("Skip trace: built key %016zx set %016llx: %llu skips, first request to ready %.1f ms "
+              "(queue %.1f ms, compile %.1f ms), sibling built at request %d, vs shared %d\n",
+              key_hash, static_cast<unsigned long long>(id), static_cast<unsigned long long>(key.skips),
+              ms(key.first_ns, now), ms(t_queued, t_started), ms(t_started, t_done),
+              int(key.sibling_ready), int(key.vs_shared));
+    }
+}
+/// A shader permutation is published (GPU thread).
+void ShaderPublished(u64 pgm_hash, size_t permutation, u32 stage, u64 capture_ns, u64 t_queued,
+                     u64 t_started, u64 t_done) {
+    if (!Enabled()) {
+        return;
+    }
+    const auto ms = [](u64 a, u64 b) { return b > a ? (b - a) / 1e6 : 0.0; };
+    std::scoped_lock lock{mutex};
+    Print("Skip trace: shader %016llx/%zu stage %u ready: capture %.1f ms (GPU thread), queue %.1f ms, "
+          "emit+module %.1f ms\n",
+          static_cast<unsigned long long>(pgm_hash), permutation, stage, capture_ns / 1e6,
+          ms(t_queued, t_started), ms(t_started, t_done));
 }
 } // namespace SkipTrace
 
@@ -612,6 +692,7 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
     }
     build->pool_cache = &compiler_pools;
     snapshot.Stop();
+    const u64 capture_start = SkipTrace::NowNs();
     AsyncJob<bool> capture_job;
     if (!capture_job.Start(*capture_compiler, [this, build, binding] {
         PhaseTimer capture{g_gow3_capture_ns};
@@ -644,7 +725,10 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
                   permutation, capture_job.Error());
         return false;
     }
+    build->capture_ns = SkipTrace::NowNs() - capture_start;
+    build->t_queued = SkipTrace::NowNs();
     const bool queued = build->job.Start(*compiler, [this, build] {
+        build->t_started = SkipTrace::NowNs();
         PhaseTimer compile{g_gow3_async_ns};
         Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch};
         auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, build->runtime, *build->ir,
@@ -658,6 +742,7 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
         build->binary = std::move(spv);
         build->ir.reset();
         compiler_pools.Recycle(std::move(build->pools));
+        build->t_done = SkipTrace::NowNs();
         return build;
     }, true);
     if (queued) {
@@ -698,6 +783,8 @@ void PipelineCache::PublishShaders(bool wait) {
             continue;
         }
         const auto perm_hash = HashCombine(hash, build->permutation);
+        SkipTrace::ShaderPublished(hash, build->permutation, u32(build->info.sw_stage), build->capture_ns,
+                                   build->t_queued, build->t_started, build->t_done);
         Vulkan::SetObjectName(instance.GetDevice(), build->module,
                              GetShaderName(build->info.hw_stage, hash, build->permutation));
         RegisterShaderBinary(std::move(build->binary), hash, build->permutation);
@@ -738,6 +825,7 @@ void PipelineCache::PublishGraphics(bool wait) {
             continue;
         }
         const auto key = it.key();
+        SkipTrace::Published(key, build->selection.infos, build->t_queued, build->t_started, build->t_done);
         build->pipeline->PublishStages(build->live_infos);
         const auto hash = std::hash<GraphicsPipelineKey>{}(key);
         if (NewPipelineKey(fmt::format("g_{:#018x}", hash))) {
@@ -880,6 +968,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     const bool background =
         AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect();
     if (background || pending_graphics.contains(sel.graphics_key)) {
+        if (background && !pending_graphics.contains(sel.graphics_key) && !compiler->HasCapacity()) {
+            SkipTrace::NoteQueueFull();
+        }
         if (background && !pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_gow3_snapshot_ns};
             auto build = std::make_shared<AsyncGraphicsCompilation>();
@@ -895,7 +986,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                     build->fetch[i].Capture(*build->infos[i]);
                 }
             }
+            build->t_queued = SkipTrace::NowNs();
             const bool queued = build->job.Start(*compiler, [this, build] {
+                build->t_started = SkipTrace::NowNs();
                 // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
                 Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
                 PhaseTimer compile{g_gow3_async_ns};
@@ -904,6 +997,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                     instance, scheduler, desc_heap, profile, s.graphics_key,
                     *worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
                     s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false);
+                build->t_done = SkipTrace::NowNs();
                 return build;
             });
             if (queued) {
