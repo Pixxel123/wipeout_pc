@@ -60,6 +60,9 @@ enum : std::uint64_t {
     OrderedGuestWrites = 1ull << 49,
     SceneHalfRes = 1ull << 50, ///< live scaling also reduces the 960x540 post targets
     UpdateImageFastPath = 1u << 30,
+    /// A texture-set memo hit prefetches its images and their backing states before checking
+    /// them one by one (Rasterizer::PrefetchSetImages); bit set: off, for A/B runs.
+    TextureSetPrefetch = 1ull << 31,
     // TAA A/B in one run: optional techniques, off by default (no measured gain, 2026-10-02).
     TaaTonemapBlend = 1ull << 51,
     TaaClip = 1ull << 52,

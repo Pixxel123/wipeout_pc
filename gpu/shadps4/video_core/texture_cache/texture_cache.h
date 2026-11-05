@@ -253,6 +253,11 @@ public:
     /// the GPU.
     void DiagDumpImage(ImageId image_id, const char* tag);
 
+    /// gow3: an image's address without marking it used, for prefetching.
+    [[nodiscard]] const Image* ImageAddress(ImageId id) const {
+        return &slot_images[id];
+    }
+
     [[nodiscard]] Image& GetImage(ImageId id) {
         auto& image = slot_images[id];
         TouchImage(image);

@@ -2768,6 +2768,31 @@ bool Rasterizer::TextureSetCandidate(const Shader::Info& stage) const {
     return true;
 }
 
+// gow3: on a memo hit the checks and Transit below walk each image, then its backing state, one
+// load after another, and on the Deck these are often DRAM misses (Image::GetBarriers and
+// BindTexturesFromSet hold ~22 % of stage B's DRAM fills at the race countdown). Issue them all
+// first so the misses overlap. The ids are live: the registry generation matched.
+void Rasterizer::PrefetchSetImages(const TextureSet& set, u32 count) const {
+    std::array<const VideoCore::Image*, TextureSet::MaxImages> images;
+    u32 n = 0;
+    for (u32 i = 0; i < count; ++i) {
+        if (const auto id = set.entries[i].id) {
+            const auto* image = texture_cache.ImageAddress(id);
+            __builtin_prefetch(&image->flags);
+            __builtin_prefetch(&image->backing);
+            __builtin_prefetch(&image->info.props);
+            __builtin_prefetch(&image->info.resources);
+            images[n++] = image;
+        }
+    }
+    for (u32 i = 0; i < n; ++i) {
+        if (const auto* backing = images[i]->backing) {
+            __builtin_prefetch(&backing->state);
+            __builtin_prefetch(&backing->subresource_states);
+        }
+    }
+}
+
 bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const u64* hashes,
                                      u32 first_image_idx, bool& barrier, TextureSet*& slot) {
     const u32 count = static_cast<u32>(stage.images.size());
@@ -2791,6 +2816,9 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const u64* hashe
         set.generation = ~0ull;
         std::copy_n(hashes, count, set.hashes.begin());
         return false;
+    }
+    if (!Gow3Toggle::Disabled(Gow3Toggle::TextureSetPrefetch)) {
+        PrefetchSetImages(set, count);
     }
     // Every image still has the backing its view belongs to and needs no refresh.
     for (u32 i = 0; i < count; ++i) {
