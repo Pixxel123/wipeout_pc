@@ -152,6 +152,11 @@ struct Timer {
 };
 /// Wall time the GPU command thread waited for guest submissions (ns).
 inline std::atomic<std::uint64_t> gpu_idle_ns{0};
+/// Frame end (sceGnmSubmitDone), wall time in ns: the GPU command thread from the frame end
+/// until it waits for work again; the draw recording thread running the frame-end task, all of
+/// it and its part before GPU idle; guest threads blocked until GPU idle.
+inline std::atomic<std::uint64_t> frame_end_a_ns{0}, frame_end_b_ns{0}, frame_end_b_idle_ns{0},
+    gpu_idle_wait_ns{0};
 /// Draws recorded into the reduced scene targets, and draws after the scene started.
 inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
 /// Wall time spent blocked in the scheduler (ns): waiting for the recording thread to drain,

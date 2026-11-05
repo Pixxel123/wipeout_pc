@@ -145,6 +145,17 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
+    /// gow3: the frame end (OnSubmit, Flush, GPU idle) runs as a task on the draw recording
+    /// thread, after the frame's draws, instead of the GPU command thread waiting for them.
+    /// False with GOW3_FRAME_END_TASK=0, without the draw pipeline or with RenderDoc loaded.
+    [[nodiscard]] bool FrameEndTaskEnabled() const;
+    /// Frame-end task, before GPU idle: what the guest relies on once it resumes (readbacks
+    /// and their page protection, garbage collector write-backs, this frame's guest memory
+    /// reads, deferred fences).
+    void FrameEndBeforeIdle();
+    /// Frame-end task, after GPU idle: nothing the guest sees (fault buffer, staging trim,
+    /// the submission).
+    void FrameEndAfterIdle();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;

@@ -229,6 +229,9 @@ private:
 
     void ProcessCommands();
     void Process(std::stop_token stoken);
+    /// gow3: hands the frame end to the draw recording thread, which raises GPU idle (see
+    /// Rasterizer::FrameEndTaskEnabled). False when a submission is still to be decoded.
+    bool PostFrameEnd();
 
     struct GpuQueue {
         std::mutex m_access{};
@@ -273,6 +276,9 @@ private:
     /// decrements num_submits once it has decoded a submission, before that). Under
     /// submit_mutex with num_submits.
     std::atomic<bool> work_retired{true};
+    /// gow3: counts submissions (under submit_mutex), so that work retired later on another
+    /// thread is known to be all the work there is.
+    u64 submit_generation{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;

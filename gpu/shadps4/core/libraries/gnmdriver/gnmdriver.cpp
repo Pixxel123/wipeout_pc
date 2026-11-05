@@ -24,6 +24,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "gow3_perf_stats.h"
+#include "gow3_toggles.h"
 
 extern Frontend::WindowSDL* g_window;
 std::unique_ptr<Vulkan::Presenter> presenter;
@@ -88,6 +89,11 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 static void WaitGpuIdle() {
     HLE_TRACE;
     std::unique_lock lock{m_wait_idle};
+    if (submission_lock == 0) {
+        return;
+    }
+    // gow3 (GOW3_FRAME_STATS): how long the guest waits for the frame end.
+    Gow3Stats::Timer timer{Gow3Stats::gpu_idle_wait_ns};
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
 
