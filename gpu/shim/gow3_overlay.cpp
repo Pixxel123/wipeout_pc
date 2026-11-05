@@ -1413,6 +1413,15 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
     last_present = now;
+    // Automated test runs (tools/deck/bench-run.sh) name the run: "<title> - test X of Y".
+    static const bool test_notice_shown = [] {
+        const char* text = std::getenv("GOW3_TEST_NOTICE");
+        if (text && *text) {
+            ShowNotice(text, 10000);
+        }
+        return true;
+    }();
+    (void)test_notice_shown;
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
