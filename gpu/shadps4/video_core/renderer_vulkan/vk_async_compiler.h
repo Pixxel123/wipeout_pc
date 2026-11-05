@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <cstdint>
@@ -22,12 +23,14 @@ namespace Vulkan {
 class AsyncCompiler {
 public:
     /// gow3: a worker takes urgent work first, then normal, then low. Low work (optimised
-    /// rebuilds of pipelines already drawing) never takes a slot from the other lanes and is
-    /// dropped on Stop: nothing waits for it.
+    /// rebuilds of pipelines already drawing) never takes a slot from the other lanes, runs on
+    /// at most half the workers (a worker does not leave a task it started, so the others stay
+    /// free for new work) and is dropped on Stop: nothing waits for it.
     enum class Lane { Normal, Urgent, Low };
 
     explicit AsyncCompiler(unsigned count, size_t capacity = 64,
-                           std::function<void(unsigned)> initialize = {}) : capacity{capacity} {
+                           std::function<void(unsigned)> initialize = {})
+        : capacity{capacity}, low_limit{std::max(1u, count / 2)} {
         for (unsigned i = 0; i < count; ++i) {
             workers.emplace_back([this, i, initialize] {
                 worker_index = i;
@@ -36,22 +39,42 @@ public:
                 }
                 for (;;) {
                     std::function<void()> task;
+                    bool is_low = false;
                     {
                         std::unique_lock lock{mutex};
+                        const auto low_ready = [&] {
+                            return !low.empty() && low_running < low_limit;
+                        };
                         cv.wait(lock, [&] {
-                            return stopping || !tasks.empty() || !urgent.empty() || !low.empty();
+                            return stopping || !tasks.empty() || !urgent.empty() || low_ready();
                         });
-                        if (tasks.empty() && urgent.empty() && low.empty()) {
-                            return;
+                        if (tasks.empty() && urgent.empty() && !low_ready()) {
+                            return; // stopping (Stop empties the low lane)
                         }
-                        auto& queue = !urgent.empty() ? urgent : (!tasks.empty() ? tasks : low);
+                        is_low = urgent.empty() && tasks.empty();
+                        auto& queue = !urgent.empty() ? urgent : (!is_low ? tasks : low);
                         auto next = std::move(queue.front());
                         queue.pop_front();
-                        queue_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - next.enqueued).count();
+                        if (is_low) {
+                            ++low_running; // its long waits stay out of the queue wait stat
+                        } else {
+                            queue_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - next.enqueued).count();
+                        }
                         task = std::move(next.function);
                     }
                     task();
+                    if (is_low) {
+                        bool more = false;
+                        {
+                            std::scoped_lock lock{mutex};
+                            --low_running;
+                            more = !low.empty();
+                        }
+                        if (more) {
+                            cv.notify_one(); // a worker that found the low lane full
+                        }
+                    }
                 }
             });
         }
@@ -100,6 +123,8 @@ public:
 
 private:
     size_t capacity;
+    unsigned low_limit;
+    unsigned low_running = 0;
     std::mutex mutex;
     std::condition_variable cv;
     struct Task {

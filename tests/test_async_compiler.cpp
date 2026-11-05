@@ -106,6 +106,39 @@ int main() {
         assert(!dropped.Poll() && dropped.Failed());
     }
     {
+        // Low work runs on at most half the workers; the others take new work right away, and
+        // the next low task starts as soon as one finishes.
+        AsyncCompiler compiler(4, 8);
+        std::promise<void> release;
+        auto gate = release.get_future().share();
+        std::atomic<int> running{}, peak{}, entered{}, finished{};
+        for (int i = 0; i < 5; ++i) {
+            assert(compiler.Submit([&] {
+                const int now = ++running;
+                for (int seen = peak; now > seen && !peak.compare_exchange_weak(seen, now);) {
+                }
+                ++entered;
+                gate.wait();
+                --running;
+                ++finished;
+            }, AsyncCompiler::Lane::Low));
+        }
+        while (entered < 2) {
+            std::this_thread::yield();
+        }
+        std::promise<void> normal_done;
+        assert(compiler.Submit([&] { normal_done.set_value(); }));
+        normal_done.get_future().wait(); // a free worker, not held by the low lane
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        assert(entered == 2 && peak == 2);
+        release.set_value();
+        while (finished < 5) {
+            std::this_thread::yield();
+        }
+        compiler.Stop();
+        assert(peak == 2);
+    }
+    {
         std::atomic<unsigned> initialized{};
         AsyncCompiler compiler(2, 4, [&](unsigned) { ++initialized; });
         std::promise<void> entered[2], release;
