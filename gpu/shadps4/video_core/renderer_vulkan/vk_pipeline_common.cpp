@@ -18,8 +18,95 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include "gow3_toggles.h"
 
 namespace Vulkan {
+
+namespace {
+// gow3 (GOW3_FRAME_STATS): how draws and dispatches bind descriptors, to size a change that
+// skips repeated pushes or batches set updates. Collected only with the stats on.
+struct DescriptorStats {
+    std::mutex mutex;
+    u64 binds = 0, pushes = 0, set_updates = 0, descriptors = 0;
+    u64 same_layout_and_writes = 0; ///< as the previous bind of this bind point: skippable
+    u64 same_writes = 0;            ///< same contents, any layout: an upper bound
+    std::array<u64, 2> last_hash{};
+    std::array<VkPipelineLayout, 2> last_layout{};
+    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+DescriptorStats& Stats() {
+    static DescriptorStats stats;
+    return stats;
+}
+template <typename T>
+u64 HandleBits(T handle) {
+    return reinterpret_cast<u64>(static_cast<typename T::CType>(handle));
+}
+u64 HashWrites(const std::vector<vk::WriteDescriptorSet>& writes, u64& descriptors) {
+    u64 h = 1469598103934665603ull;
+    const auto mix = [&h](u64 v) { h = (h ^ v) * 1099511628211ull; };
+    for (const auto& w : writes) {
+        mix(w.dstBinding);
+        mix(w.dstArrayElement);
+        mix(w.descriptorCount);
+        mix(static_cast<u64>(w.descriptorType));
+        descriptors += w.descriptorCount;
+        for (u32 i = 0; i < w.descriptorCount; ++i) {
+            if (w.pImageInfo) {
+                mix(HandleBits(w.pImageInfo[i].sampler));
+                mix(HandleBits(w.pImageInfo[i].imageView));
+                mix(static_cast<u64>(w.pImageInfo[i].imageLayout));
+            }
+            if (w.pBufferInfo) {
+                mix(HandleBits(w.pBufferInfo[i].buffer));
+                mix(w.pBufferInfo[i].offset);
+                mix(w.pBufferInfo[i].range);
+            }
+            if (w.pTexelBufferView) {
+                mix(HandleBits(w.pTexelBufferView[i]));
+            }
+        }
+    }
+    return h;
+}
+void NoteBind(const std::vector<vk::WriteDescriptorSet>& writes, vk::PipelineLayout layout,
+              bool compute, bool push) {
+    auto& st = Stats();
+    std::scoped_lock lk{st.mutex};
+    u64 descriptors = 0;
+    const u64 hash = HashWrites(writes, descriptors);
+    const u32 point = compute ? 1 : 0;
+    const auto vk_layout = static_cast<VkPipelineLayout>(layout);
+    ++st.binds;
+    ++(push ? st.pushes : st.set_updates);
+    st.descriptors += descriptors;
+    if (hash == st.last_hash[point]) {
+        ++st.same_writes;
+        if (vk_layout == st.last_layout[point]) {
+            ++st.same_layout_and_writes;
+        }
+    }
+    st.last_hash[point] = hash;
+    st.last_layout[point] = vk_layout;
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(now - st.window).count();
+    if (seconds >= 5.0) {
+        const double b = std::max<double>(1.0, double(st.binds));
+        std::printf("Descriptor binds: %.0f/s (pushes %.0f/s, set updates %.0f/s), %.1f descriptors "
+                    "a bind; repeats of the previous bind: same layout and writes %.1f%%, same "
+                    "writes %.1f%%\n",
+                    st.binds / seconds, st.pushes / seconds, st.set_updates / seconds,
+                    st.descriptors / b, 100.0 * st.same_layout_and_writes / b,
+                    100.0 * st.same_writes / b);
+        st.binds = st.pushes = st.set_updates = st.descriptors = 0;
+        st.same_layout_and_writes = st.same_writes = 0;
+        st.window = now;
+    }
+}
+} // namespace
 
 Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorHeap& desc_heap_,
                    const Shader::Profile& profile_, vk::PipelineCache pipeline_cache,
@@ -43,6 +130,9 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
     // Bind descriptor set.
     if (set_writes.empty()) {
         return;
+    }
+    if (Gow3Stats::enabled) {
+        NoteBind(set_writes, layout, IsCompute(), uses_push_descriptors);
     }
 
     if (uses_push_descriptors) {
