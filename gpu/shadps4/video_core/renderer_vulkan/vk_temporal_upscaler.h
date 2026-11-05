@@ -274,6 +274,9 @@ private:
     vk::UniquePipeline merge_r11_pipeline; ///< wipeout: R11G11B10 scene color
     std::array<VideoCore::UniqueImage, 2> taa_history;
     std::array<vk::UniqueImageView, 2> taa_history_views;
+    /// Depth of each history pixel (r32f), beside the half-float colour history.
+    std::array<VideoCore::UniqueImage, 2> taa_history_depth;
+    std::array<vk::UniqueImageView, 2> taa_history_depth_views;
     u32 taa_next = 0;
     vk::UniqueSampler taa_sampler;
     vk::UniqueDescriptorSetLayout taa_desc_layout;

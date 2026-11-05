@@ -35,6 +35,12 @@ namespace Vulkan {
 
 namespace {
 
+/// taa.comp: bindings 0-3 and 7 are sampled (colour, depth, motion, history, history depth),
+/// 4-6 and 8 storage (result, next history, diagnostic, next history depth).
+constexpr bool TaaBindingSampled(u32 binding) {
+    return binding < 4 || binding == 7;
+}
+
 FfxVkPortableImage Describe(vk::Image image, vk::Format format, u32 width, u32 height,
                             vk::ImageUsageFlags usage, vk::ImageAspectFlags aspect,
                             FfxVkPortableResourceState state) {
@@ -520,11 +526,19 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     for (u32 i = 0; i < taa_history.size(); ++i) {
         taa_history_views[i].reset();
         taa_history[i] = VideoCore::UniqueImage{};
+        taa_history_depth_views[i].reset();
+        taa_history_depth[i] = VideoCore::UniqueImage{};
         if (use_taa) {
-            make_image(taa_history[i], taa_history_views[i], vk::Format::eR32G32B32A32Sfloat,
-                       vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
-                           vk::ImageUsageFlagBits::eTransferSrc,
-                       ow, oh);
+            // Half-float colour and a separate full-precision depth: 12 bytes a pixel instead
+            // of one 16-byte rgba32f image, read four times per pixel (Steam Deck: memory
+            // traffic is power the CPU then lacks).
+            constexpr auto usage = vk::ImageUsageFlagBits::eStorage |
+                                   vk::ImageUsageFlagBits::eSampled |
+                                   vk::ImageUsageFlagBits::eTransferSrc;
+            make_image(taa_history[i], taa_history_views[i], vk::Format::eR16G16B16A16Sfloat,
+                       usage, ow, oh);
+            make_image(taa_history_depth[i], taa_history_depth_views[i], vk::Format::eR32Sfloat,
+                       usage, ow, oh);
         }
     }
     taa_next = 0;
@@ -625,11 +639,11 @@ void TemporalUpscaler::CreatePipelines() {
     taa_sharpen_pipeline = compute(TAA_SHARPEN_COMP, *taa_sharpen_pipeline_layout);
     taa_sharpen_ldr_pipeline = compute(TAA_SHARPEN_LDR_COMP, *taa_sharpen_pipeline_layout);
     {
-        std::array<vk::DescriptorSetLayoutBinding, 7> bindings{};
+        std::array<vk::DescriptorSetLayoutBinding, 9> bindings{};
         for (u32 i = 0; i < bindings.size(); ++i) {
             bindings[i] = {.binding = i,
-                .descriptorType = i < 4 ? vk::DescriptorType::eCombinedImageSampler
-                                        : vk::DescriptorType::eStorageImage,
+                .descriptorType = TaaBindingSampled(i) ? vk::DescriptorType::eCombinedImageSampler
+                                                       : vk::DescriptorType::eStorageImage,
                 .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute};
         }
         taa_desc_layout = Check(device.createDescriptorSetLayoutUnique({
@@ -663,7 +677,7 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1,.pMemoryBarriers = &inputs});
     // Histories alternate between reads and writes. Queue ordering plus this dependency
     // protects both the previous write and a reused destination's previous read.
-    std::array<vk::ImageMemoryBarrier2, 2> barriers{};
+    std::array<vk::ImageMemoryBarrier2, 4> barriers{};
     for (u32 i = 0; i < barriers.size(); ++i) {
         barriers[i] = {.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
             .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
@@ -673,22 +687,23 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
                              vk::AccessFlagBits2::eShaderStorageWrite,
             .oldLayout = reset ? vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral,
             .newLayout = vk::ImageLayout::eGeneral,
-            .image = vk::Image(taa_history[i]),
+            .image = i < 2 ? vk::Image(taa_history[i]) : vk::Image(taa_history_depth[i - 2]),
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
     }
     cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(barriers.size()),
                              .pImageMemoryBarriers = barriers.data()});
-    const std::array<vk::ImageView, 7> views{
+    const std::array<vk::ImageView, 9> views{
         color, depth, *motion_view, *taa_history_views[1 - taa_next],
-        *output_view, *taa_history_views[taa_next], *opaque_view};
-    std::array<vk::DescriptorImageInfo, 7> infos{};
-    std::array<vk::WriteDescriptorSet, 7> writes{};
+        *output_view, *taa_history_views[taa_next], *opaque_view,
+        *taa_history_depth_views[1 - taa_next], *taa_history_depth_views[taa_next]};
+    std::array<vk::DescriptorImageInfo, 9> infos{};
+    std::array<vk::WriteDescriptorSet, 9> writes{};
     for (u32 i = 0; i < infos.size(); ++i) {
-        infos[i] = {.sampler = i < 4 ? *taa_sampler : vk::Sampler{},
+        infos[i] = {.sampler = TaaBindingSampled(i) ? *taa_sampler : vk::Sampler{},
                     .imageView = views[i], .imageLayout = vk::ImageLayout::eGeneral};
         writes[i] = {.dstBinding = i, .descriptorCount = 1,
-            .descriptorType = i < 4 ? vk::DescriptorType::eCombinedImageSampler
-                                    : vk::DescriptorType::eStorageImage,
+            .descriptorType = TaaBindingSampled(i) ? vk::DescriptorType::eCombinedImageSampler
+                                                   : vk::DescriptorType::eStorageImage,
             .pImageInfo = &infos[i]};
     }
     struct Params {
@@ -760,7 +775,7 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         extra_sharpen_image = VideoCore::UniqueImage(device, instance.GetAllocator());
         extra_sharpen_image.Create(vk::ImageCreateInfo{
             .imageType = vk::ImageType::e2D,
-            .format = vk::Format::eR32G32B32A32Sfloat,
+            .format = vk::Format::eR16G16B16A16Sfloat,
             .extent = {w, h, 1},
             .mipLevels = 1, .arrayLayers = 1, .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
@@ -769,7 +784,7 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         });
         extra_sharpen_view = Check(device.createImageViewUnique({
             .image = vk::Image(extra_sharpen_image), .viewType = vk::ImageViewType::e2D,
-            .format = vk::Format::eR32G32B32A32Sfloat,
+            .format = vk::Format::eR16G16B16A16Sfloat,
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
         extra_sharpen_width = w;
@@ -1729,8 +1744,10 @@ void TemporalUpscaler::RunScaled() {
                 if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa &&
                     std::getenv("GOW3_TAA_DIAGNOSTICS")) {
                     DumpImages(instance, scheduler, cmdbuf, dump,
-                               {{vk::Image(taa_history[taa_next]),ow,oh,16,
-                                 "previous_history","rgba32f"},
+                               {{vk::Image(taa_history[taa_next]),ow,oh,8,
+                                 "previous_history","rgba16f"},
+                                {vk::Image(taa_history_depth[taa_next]),ow,oh,4,
+                                 "previous_history_depth","f32"},
                                 {vk::Image(opaque_image),ow,oh,8,"history_sample","rgba16f"}});
                 }
                 // ObjectMotion's attachment can be in a different resolution from the FSR
