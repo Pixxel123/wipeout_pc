@@ -227,10 +227,10 @@ private:
                     if (!(spins & 255) && std::chrono::steady_clock::now() >= spin_until) {
                         const u32 seen = wake.load(std::memory_order_seq_cst);
                         sleeping.store(true, std::memory_order_seq_cst);
-                        if (asym_fence) {
-                            HeavyFence();
-                        }
-                        if (published.load(std::memory_order_seq_cst) == at &&
+                        // Without the heavy fence stage A's light side is not ordered for us:
+                        // a wake-up could be lost, so this pass spins on instead of sleeping.
+                        const bool fenced = !asym_fence || HeavyFence();
+                        if (fenced && published.load(std::memory_order_seq_cst) == at &&
                             !stop.stop_requested()) {
                             wake.wait(seen, std::memory_order_seq_cst);
                         }
@@ -270,14 +270,16 @@ private:
 #endif
     }
     /// Stage B, before it re-checks `published` on its way to sleep: every thread of the process
-    /// that runs now has its earlier stores (stage A's `published`) visible to this one.
-    void HeavyFence() {
+    /// that runs now has its earlier stores (stage A's `published`) visible to this one. False if
+    /// the barrier failed (not expected after registration): the caller must not sleep then.
+    bool HeavyFence() {
 #ifdef _WIN32
         FlushProcessWriteBuffers();
+        return true;
 #elif defined(__linux__)
-        if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0) {
-            std::atomic_thread_fence(std::memory_order_seq_cst); // not expected after registration
-        }
+        return syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) == 0;
+#else
+        return false;
 #endif
     }
 
