@@ -466,10 +466,18 @@ struct PhaseTimer {
 // skipped draws showed as missing objects and surfaces when a race started; with every shader
 // option off (all built on this thread) a player saw none. Up to 10 ms per draw and 30 ms in
 // any 100 ms, so a burst of new shaders still cannot freeze the game.
+// After a loading screen, until a few seconds into the scene (CompilePolicy::LongGrace), up to
+// 25 ms per draw and 80 ms in any 100 ms: with a fresh cache the race intro built its pipelines
+// in two bursts that skipped 1000-1400 draws (flickering pads on the grid); no racing yet.
+// GOW3_LOAD_GRACE=0 keeps the short budget throughout.
 // ponytail: fixed budget, make it a setting if players need another one.
 template <typename Job>
 bool GraceWait(const Job& job) {
     using namespace std::chrono;
+    static const bool load_grace = [] {
+        const char* env = std::getenv("GOW3_LOAD_GRACE");
+        return !(env && env[0] == '0');
+    }();
     static steady_clock::time_point window{};
     static nanoseconds used{};
     const auto now = steady_clock::now();
@@ -477,7 +485,12 @@ bool GraceWait(const Job& job) {
         window = now;
         used = {};
     }
-    const nanoseconds left = std::min<nanoseconds>(milliseconds(10), milliseconds(30) - used);
+    const bool long_grace =
+        load_grace &&
+        g_compile_policy.LongGrace(u64(duration_cast<nanoseconds>(now.time_since_epoch()).count()));
+    const nanoseconds per_draw = long_grace ? milliseconds(25) : milliseconds(10);
+    const nanoseconds per_window = long_grace ? milliseconds(80) : milliseconds(30);
+    const nanoseconds left = std::min<nanoseconds>(per_draw, per_window - used);
     if (left <= nanoseconds(0)) {
         return false;
     }
