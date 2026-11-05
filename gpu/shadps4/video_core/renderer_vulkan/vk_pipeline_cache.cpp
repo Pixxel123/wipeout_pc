@@ -3,12 +3,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <ranges>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include "gow3_threads.h"
 
@@ -452,6 +454,105 @@ struct PhaseTimer {
 // option off (all built on this thread) a player saw none. Up to 10 ms per draw and 30 ms in
 // any 100 ms, so a burst of new shaders still cannot freeze the game.
 // ponytail: fixed budget, make it a setting if players need another one.
+// gow3: GOW3_SKIP_TRACE=1 (diagnostic): why draws are skipped while pipelines build. Per shader
+// set (the stages' program hashes): skipped draws, distinct pipeline keys, and which key fields
+// differ from the set's first key. A line at each new key, and at 1, 8, 64, 512... skips of a set.
+namespace SkipTrace {
+bool Enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("GOW3_SKIP_TRACE");
+        return v && *v == '1';
+    }();
+    return on;
+}
+struct Set {
+    GraphicsPipelineKey first{};
+    std::unordered_set<size_t> keys;
+    u64 skips = 0;
+};
+std::mutex mutex;
+std::unordered_map<u64, Set> sets;
+u32 lines = 0;
+std::string Differs(const GraphicsPipelineKey& a, const GraphicsPipelineKey& b) {
+    struct Field {
+        const char* name;
+        size_t offset, size;
+    };
+    using K = GraphicsPipelineKey;
+    static const Field fields[] = {
+        {"stage_hashes", offsetof(K, stage_hashes), sizeof(K::stage_hashes)},
+        {"vertex_formats", offsetof(K, vertex_buffer_formats), sizeof(K::vertex_buffer_formats)},
+        {"patch_points", offsetof(K, patch_control_points), sizeof(K::patch_control_points)},
+        {"num_color", offsetof(K, num_color_attachments), sizeof(K::num_color_attachments)},
+        {"color_buffers", offsetof(K, color_buffers), sizeof(K::color_buffers)},
+        {"blend", offsetof(K, blend_controls), sizeof(K::blend_controls)},
+        {"write_masks", offsetof(K, write_masks), sizeof(K::write_masks)},
+        {"cb_shader_mask", offsetof(K, cb_shader_mask), sizeof(K::cb_shader_mask)},
+        {"logic_op", offsetof(K, logic_op), sizeof(K::logic_op)},
+        {"num_samples", offsetof(K, num_samples), sizeof(K::num_samples)},
+        {"depth_samples", offsetof(K, depth_samples), sizeof(K::depth_samples)},
+        {"color_samples", offsetof(K, color_samples), sizeof(K::color_samples)},
+        {"mrt_mask", offsetof(K, mrt_mask), sizeof(K::mrt_mask)},
+        {"motion_vectors", offsetof(K, motion_vectors), sizeof(K::motion_vectors)},
+    };
+    const auto* pa = reinterpret_cast<const u8*>(&a);
+    const auto* pb = reinterpret_cast<const u8*>(&b);
+    std::string out;
+    size_t end = 0;
+    for (const auto& f : fields) {
+        if (std::memcmp(pa + f.offset, pb + f.offset, f.size) != 0) {
+            out += out.empty() ? "" : ",";
+            out += f.name;
+        }
+        end = std::max(end, f.offset + f.size);
+    }
+    if (std::memcmp(pa + end, pb + end, sizeof(K) - end) != 0) {
+        out += out.empty() ? "depth/raster bits" : ",depth/raster bits";
+    }
+    return out.empty() ? "nothing" : out;
+}
+void Note(const PipelineSelection& sel) {
+    if (!Enabled()) {
+        return;
+    }
+    u64 id = 0;
+    u64 vs = 0, ps = 0;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (sel.infos[i]) {
+            id = id * 1099511628211ull ^ sel.infos[i]->pgm_hash;
+            vs = vs ? vs : sel.infos[i]->pgm_hash;
+            ps = sel.infos[i]->pgm_hash;
+        }
+    }
+    const size_t key_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
+    std::scoped_lock lock{mutex};
+    auto [it, fresh] = sets.try_emplace(id);
+    Set& set = it->second;
+    if (fresh) {
+        set.first = sel.graphics_key;
+    }
+    ++set.skips;
+    const bool new_key = set.keys.insert(key_hash).second;
+    const bool milestone = (set.skips & (set.skips - 1)) == 0 && (set.skips == 1 || set.skips % 8 == 0);
+    if ((new_key || milestone) && lines < 600) {
+        ++lines;
+        std::printf("Skip trace: set %016llx (first stage %016llx, last %016llx): %llu skips, %zu keys; "
+                    "key %016zx%s%s\n",
+                    static_cast<unsigned long long>(id), static_cast<unsigned long long>(vs),
+                    static_cast<unsigned long long>(ps), static_cast<unsigned long long>(set.skips),
+                    set.keys.size(), key_hash, new_key && !fresh ? " new, differs from the first in: " : "",
+                    new_key && !fresh ? Differs(set.first, sel.graphics_key).c_str() : "");
+    }
+}
+void NoteShaders(size_t pending) {
+    if (Enabled() && lines < 600) {
+        std::scoped_lock lock{mutex};
+        ++lines;
+        std::printf("Skip trace: draw waits for %zu shaders still translating\n", pending);
+    }
+}
+} // namespace SkipTrace
+
 template <typename Job>
 bool GraceWait(const Job& job) {
     using namespace std::chrono;
@@ -767,6 +868,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!refreshed) {
         if (sel.compilation_pending) {
             ++g_gow3_pending_draws;
+            SkipTrace::NoteShaders(pending_programs.size());
         }
         return nullptr;
     }
@@ -817,6 +919,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             }
         }
         ++g_gow3_pending_draws;
+        SkipTrace::Note(sel);
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
