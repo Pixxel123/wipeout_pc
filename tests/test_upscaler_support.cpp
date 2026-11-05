@@ -20,12 +20,13 @@ int main() {
     auto& s = Get();
     s.upscaler = UpscalerTaa;
     s.preset = Performance;
-    assert(RenderPreset() == NativeAA && s.preset == Performance);
+    // TAA follows the preset: below Native AA it upscales a reduced scene.
+    assert(RenderPreset() == Performance && s.preset == Performance);
     Save();
     s.upscaler = UpscalerOff;
     Load();
     assert(s.upscaler == UpscalerTaa && s.preset == Performance);
-    assert(RenderPreset() == NativeAA && !ResolutionNeedsRestart());
+    assert(RenderPreset() == Performance && !ResolutionNeedsRestart());
     s.upscaler = UpscalerFsr3;
     assert(RenderPreset() == Performance);
     for (bool fsr4 : {false, true}) {

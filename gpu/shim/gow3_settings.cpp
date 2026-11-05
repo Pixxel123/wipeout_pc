@@ -285,8 +285,8 @@ bool FixedRenderSession() {
 
 int RenderPreset() {
     const auto& v = Get();
-    return FixedRenderSession() ? v.startup_preset :
-        v.upscaler == UpscalerTaa ? NativeAA : v.preset.load();
+    // TAA follows the preset too: below Native AA it upscales a reduced scene (taa.comp).
+    return FixedRenderSession() ? v.startup_preset : v.preset.load();
 }
 
 bool ResolutionNeedsRestart() {

@@ -74,11 +74,16 @@ vec3 clipToBox(vec3 history, vec3 center, vec3 lo, vec3 hi) {
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    // `size`: the output and history; `in_size`: colour, depth and motion. They differ when
+    // the scene is rendered below the output (TAA upscaling): output pixel p's centre maps into
+    // the input, and at the same size this is p + jitter as before.
     ivec2 size = imageSize(result_img);
+    ivec2 in_size = textureSize(color_tex, 0);
     if (any(greaterThanEqual(p, size))) return;
+    const bool upscale = any(notEqual(in_size, size));
     const uint diag = pad & 0xffu, variant = pad >> 8;
-    vec2 current_pos = vec2(p) + jitter;
-    ivec2 color_source = clamp(ivec2(floor(current_pos + 0.5)), ivec2(0), size - 1);
+    vec2 current_pos = (vec2(p) + 0.5) * (vec2(in_size) / vec2(size)) - 0.5 + jitter;
+    ivec2 color_source = clamp(ivec2(floor(current_pos + 0.5)), ivec2(0), in_size - 1);
     ivec2 source = color_source;
     // Neighbourhood of the current pixel: the RGB min/max box (history clamp), and for the
     // optional techniques below its tonemapped YCoCg box, moments and a jitter-aware 3x3
@@ -89,7 +94,7 @@ void main() {
     float filter_weight = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
-            ivec2 q = clamp(color_source + ivec2(x,y), ivec2(0), size - 1);
+            ivec2 q = clamp(color_source + ivec2(x,y), ivec2(0), in_size - 1);
             vec3 c = texelFetch(color_tex, q, 0).rgb;
             if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
             rgb_lo = min(rgb_lo, c);
@@ -105,8 +110,10 @@ void main() {
             lo = min(lo, s);
             hi = max(hi, s);
         }
-    vec3 current = (variant & 8u) != 0u ? untonemap(filtered / filter_weight)
-                                         : fetchLinear(color_tex, current_pos).rgb;
+    // Upscaling reconstructs from the jittered input samples around the output pixel: a
+    // bilinear read there would only accumulate into a blur of the input.
+    vec3 current = upscale || (variant & 8u) != 0u ? untonemap(filtered / filter_weight)
+                                                   : fetchLinear(color_tex, current_pos).rgb;
     rgb_lo = min(rgb_lo, current);
     rgb_hi = max(rgb_hi, current);
     lo = min(lo, toYCoCg(tonemap(current)));
@@ -116,7 +123,7 @@ void main() {
     // alternate with background under jitter; a 3x3 nearest surface remains trackable.
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
-            ivec2 candidate = clamp(color_source+ivec2(x,y),ivec2(0),size-1);
+            ivec2 candidate = clamp(color_source+ivec2(x,y),ivec2(0),in_size-1);
             float candidate_depth = texelFetch(depth_tex,candidate,0).r;
             if (candidate_depth < depth) {
                 depth = candidate_depth;
@@ -124,8 +131,8 @@ void main() {
             }
         }
     if (depth < 1.0) {
-        vec2 slope = vec2(depthSlope(depth,source,ivec2(1,0),size),
-                          depthSlope(depth,source,ivec2(0,1),size));
+        vec2 slope = vec2(depthSlope(depth,source,ivec2(1,0),in_size),
+                          depthSlope(depth,source,ivec2(0,1),in_size));
         depth = clamp(depth + dot(current_pos-vec2(source),slope),0.0,1.0-1e-7);
     }
     vec3 result = current;
@@ -136,7 +143,8 @@ void main() {
     float diagnostic_displacement = 0.0;
     // Do not sample undefined history on reset, including the first dispatch after resizing.
     if (reset_history == 0) {
-        vec2 motion = texelFetch(motion_tex, source, 0).rg;
+        // Motion is in input pixels; the history is at the output size.
+        vec2 motion = texelFetch(motion_tex, source, 0).rg * (vec2(size) / vec2(in_size));
         vec2 previous_pos = vec2(p) + motion;
         if (diag != 0) {
             diagnostic_direct = texelFetch(history_tex,p,0).rgb;
@@ -145,7 +153,7 @@ void main() {
         if (!any(isnan(motion)) && !any(isinf(motion)) &&
             all(greaterThanEqual(previous_pos, vec2(0))) &&
             all(lessThanEqual(previous_pos, vec2(size - 1)))) {
-            float expected_depth = expectedPreviousDepth(depth, current_pos, size);
+            float expected_depth = expectedPreviousDepth(depth, current_pos, in_size);
             // Validate each bilinear tap separately: interpolating foreground/background
             // depth invents a surface and causes history rejection along thin edges.
             // Separate the integer pixel from the subpixel motion before interpolation.
@@ -214,7 +222,8 @@ void main() {
     vec3 output_color = diag == 2 ? current : diag == 3 ? diagnostic_history : result;
     imageStore(result_img, p, vec4(output_color, diag != 0 ? history_weight : 1.0));
     imageStore(next_history, p, vec4(result, depth));
-    if (diag != 0) imageStore(diagnostic_img,p,
+    // The diagnostic image has the input size.
+    if (diag != 0 && all(lessThan(p, imageSize(diagnostic_img)))) imageStore(diagnostic_img,p,
         vec4(diag == 2 ? diagnostic_direct : diagnostic_history,
              diag == 2 ? diagnostic_displacement : history_weight));
 }

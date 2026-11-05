@@ -389,8 +389,10 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     // DLSS, like FSR 4, has its own context: no portable FSR 3 context is made.
     const bool use_fsr4 = UseFsr4() || UseDlss();
     const bool use_taa = Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa;
-    if (use_taa && (w != ow || h != oh)) {
-        std::printf("TAA: remove GOW3_RENDER_RES to use native-resolution TAA\n");
+    // TAA upscales the live path's reduced scene; a fixed render session (GOW3_RENDER_RES)
+    // renders the guest's own targets small, which it does not handle.
+    if (use_taa && Scaled() && (w != ow || h != oh)) {
+        std::printf("TAA: remove GOW3_RENDER_RES to use TAA\n");
         return false;
     }
     if (resources_ready && w == width && h == height && ow == out_width && oh == out_height &&
@@ -1335,7 +1337,8 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 }
 
 float TemporalUpscaler::SceneMipBias() const {
-    if (!Active() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) return 0.0f;
+    // Native TAA renders at the output size, so this is 0 for it; upscaling TAA gets the bias.
+    if (!Active()) return 0.0f;
     const float render = float(Gow3Settings::Get().active_render_width.load());
     const float output = float(Scaled() ? target_width : 1920u);
     return render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
