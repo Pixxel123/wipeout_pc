@@ -1059,7 +1059,21 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
 bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto& regs = (*sel.regs);
     auto& key = sel.graphics_key;
-    sel.fetch_shader = std::nullopt;
+    // gow3: the vertex stage's fetch shader is copied into the selection's own storage, which
+    // keeps its capacity across draws (it was freed and copied again per draw); it is reset
+    // below when no stage has one. A failed selection may keep the previous value: no caller
+    // reads it after a false return. GOW3_FETCH_REUSE=0: the per-draw reset as before.
+    static const bool fetch_reuse = [] {
+        const char* env = std::getenv("GOW3_FETCH_REUSE");
+        const bool on = !(env && env[0] == '0');
+        std::printf("Pipeline selection: fetch shader storage reused %s (GOW3_FETCH_REUSE)\n",
+                    on ? "on" : "off");
+        return on;
+    }();
+    if (!fetch_reuse) {
+        sel.fetch_shader = std::nullopt;
+    }
+    bool have_fetch = false;
     sel.compilation_pending = false;
 
     Shader::Backend::Bindings binding{};
@@ -1080,7 +1094,7 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         }
 
         const auto params = AmdGpu::GetParams(*pgm);
-        std::optional<Shader::Gcn::FetchShaderData> fetch_shader_;
+        const Shader::Gcn::FetchShaderData* fetch_shader_ = nullptr;
         std::tie(sel.infos[stage_out_idx], sel.modules[stage_out_idx], fetch_shader_,
                  key.stage_hashes[stage_out_idx]) =
             GetProgram(sel, stage_in, stage_out, params, binding);
@@ -1089,7 +1103,13 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
             return false;
         }
         if (fetch_shader_) {
-            sel.fetch_shader = fetch_shader_;
+            // Copy-assignment reuses the attribute vector's capacity.
+            if (sel.fetch_shader) {
+                *sel.fetch_shader = *fetch_shader_;
+            } else {
+                sel.fetch_shader.emplace(*fetch_shader_);
+            }
+            have_fetch = true;
         }
         return true;
     };
@@ -1173,6 +1193,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         return false;
     }
 
+    if (!have_fetch) {
+        sel.fetch_shader.reset();
+    }
     const auto* vs_info = sel.infos[static_cast<u32>(SwStage::Vertex)];
     if (vs_info && sel.fetch_shader && !instance.IsVertexInputDynamicState()) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
@@ -1195,8 +1218,11 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
-    std::tie(sel.infos[0], sel.modules[0], sel.fetch_shader, compute_key.value) =
+    // A compute selection never reads sel.fetch_shader; the next graphics selection sets it.
+    const Shader::Gcn::FetchShaderData* unused_fetch = nullptr;
+    std::tie(sel.infos[0], sel.modules[0], unused_fetch, compute_key.value) =
         GetProgram(sel, HwStage::Compute, SwStage::Compute, cs_params, binding);
+    (void)unused_fetch;
     return sel.infos[0] != nullptr;
 }
 
@@ -1275,7 +1301,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         const size_t perm_idx = std::distance(program->modules.begin(), it);
         worker.stages.push_back(
             {program, params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
-        return std::make_tuple(&info, it->module, it->spec.fetch_shader_data,
+        worker.fetch = it->spec.fetch_shader_data;
+        return std::make_tuple(&info, it->module, worker.fetch ? &*worker.fetch : nullptr,
                                HashCombine(params.hash, perm_idx));
     }
 
@@ -1324,8 +1351,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             std::unique_lock lk{programs_mutex};
             program_cache.emplace(params.hash, std::move(new_program));
         }
-        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
-                               perm_hash);
+        const auto& fetch = program->modules[0].spec.fetch_shader_data;
+        return std::make_tuple(&program->info, module, fetch ? &*fetch : nullptr, perm_hash);
     }
 
     auto& program = it_pgm.value();
@@ -1386,8 +1413,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
     }
-    return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+    const auto& fetch = program->modules[perm_idx].spec.fetch_shader_data;
+    return std::make_tuple(&program->info, module, fetch ? &*fetch : nullptr, perm_hash);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

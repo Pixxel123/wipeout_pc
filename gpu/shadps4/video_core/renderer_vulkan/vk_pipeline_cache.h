@@ -120,6 +120,9 @@ struct PrepWorker {
     // Node-based: stages keep pointers to these Infos while later stages are inserted.
     std::unordered_map<const Program*, Shader::Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
+    /// The last stage's fetch shader, copied under the programs lock (GetProgram returns a
+    /// pointer to it: a GPU-thread InsertPermut may reallocate the program's modules).
+    std::optional<Shader::Gcn::FetchShaderData> fetch;
     bool failed = false;
 };
 
@@ -163,8 +166,10 @@ public:
 
     const ComputePipeline* GetComputePipeline();
 
+    /// gow3: the fetch shader by pointer (into the permutation, or the worker's own copy); the
+    /// caller copies it before the next GetProgram.
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
-                              std::optional<Shader::Gcn::FetchShaderData>, u64>;
+                              const Shader::Gcn::FetchShaderData*, u64>;
     Result GetProgram(PipelineSelection& sel, Shader::HwStage stage, Shader::SwStage l_stage,
                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
 
