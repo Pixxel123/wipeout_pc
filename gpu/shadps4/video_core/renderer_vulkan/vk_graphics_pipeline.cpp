@@ -23,6 +23,10 @@
 
 namespace Vulkan {
 
+// gow3 (diagnostic): GOW3_FAST_FIRST_BUILD=1 sets this on the background compile workers, so their
+// builds skip the driver's optimisations (VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT).
+thread_local bool g_gow3_fast_build = false;
+
 using Shader::Backend::SPIRV::AuxShaderType;
 
 // gow3: where pipeline construction time goes (reported when the background warm-up ends).
@@ -419,7 +423,7 @@ GraphicsPipeline::GraphicsPipeline(
     // In practice, we use dynamic state for all of it.
     constexpr vk::PipelineDepthStencilStateCreateInfo depth_stencil_info = {};
 
-    const vk::GraphicsPipelineCreateInfo pipeline_info = {
+    const vk::GraphicsPipelineCreateInfo base_pipeline_info = {
         .pNext = &pipeline_rendering_ci,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
@@ -435,6 +439,10 @@ GraphicsPipeline::GraphicsPipeline(
         .pDynamicState = &dynamic_info,
         .layout = *pipeline_layout,
     };
+    auto pipeline_info = base_pipeline_info;
+    if (g_gow3_fast_build) {
+        pipeline_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+    }
 
     const auto binary_directory = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
         Common::ElfInfo::Instance().GameSerial() / "pipeline-binaries";

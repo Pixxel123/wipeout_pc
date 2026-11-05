@@ -40,6 +40,8 @@
 
 namespace Vulkan {
 
+extern thread_local bool g_gow3_fast_build; // vk_graphics_pipeline.cpp (GOW3_FAST_FIRST_BUILD)
+
 using Shader::HwStage;
 using Shader::Output;
 using Shader::SwStage;
@@ -989,6 +991,11 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             build->t_queued = SkipTrace::NowNs();
             const bool queued = build->job.Start(*compiler, [this, build] {
                 build->t_started = SkipTrace::NowNs();
+                static const bool fast_first = [] {
+                    const char* v = std::getenv("GOW3_FAST_FIRST_BUILD");
+                    return v && *v == '1';
+                }();
+                g_gow3_fast_build = fast_first;
                 // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
                 Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
                 PhaseTimer compile{g_gow3_async_ns};
@@ -997,6 +1004,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                     instance, scheduler, desc_heap, profile, s.graphics_key,
                     *worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
                     s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false);
+                g_gow3_fast_build = false;
                 build->t_done = SkipTrace::NowNs();
                 return build;
             });
