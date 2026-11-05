@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <cstdlib>
 #include "gow3_threads.h"
 #include "gow3_toggles.h"
@@ -18,7 +19,10 @@
 #include <windows.h>
 #endif
 #ifdef __linux__
+#include <linux/membarrier.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 #include <array>
@@ -41,6 +45,8 @@ public:
     using Handler = void (*)(void* context, const u8* packet, u32 size);
 
     DrawPipe(Handler handler_, void* context_) : handler{handler_}, context{context_} {
+        std::printf("Draw pipe: asymmetric fence %s (GOW3_ASYM_FENCE=0 turns it off)\n",
+                    asym_fence ? "on" : "off");
         ring = std::make_unique<u8[]>(Capacity);
         thread = std::jthread([this](std::stop_token stop) { Run(stop); });
     }
@@ -87,9 +93,20 @@ public:
     void Commit(u32 payload_size) {
         reinterpret_cast<Header*>(ring.get() + head % Capacity)->payload = payload_size;
         head += pending_size;
-        published.store(head, std::memory_order_seq_cst);
+        // gow3: the store of `published` and the load of `sleeping` are half of a Dekker handshake
+        // with stage B's sleep (Run): B stores `sleeping`, then loads `published`. A seq_cst store
+        // is a full fence on every draw (~1.8 % of stage A at a race start). With the asymmetric
+        // fence the hot side only keeps the compiler from reordering, and stage B, about to sleep,
+        // makes every running thread's earlier stores visible (HeavyFence). GOW3_ASYM_FENCE=0, or
+        // no membarrier support: the full fence as before.
+        if (asym_fence) {
+            published.store(head, std::memory_order_release);
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+        } else {
+            published.store(head, std::memory_order_seq_cst);
+        }
         ++packets;
-        if (sleeping.load(std::memory_order_seq_cst)) {
+        if (sleeping.load(asym_fence ? std::memory_order_relaxed : std::memory_order_seq_cst)) {
             wake.fetch_add(1, std::memory_order_seq_cst);
             wake.notify_one();
         }
@@ -210,6 +227,9 @@ private:
                     if (!(spins & 255) && std::chrono::steady_clock::now() >= spin_until) {
                         const u32 seen = wake.load(std::memory_order_seq_cst);
                         sleeping.store(true, std::memory_order_seq_cst);
+                        if (asym_fence) {
+                            HeavyFence();
+                        }
                         if (published.load(std::memory_order_seq_cst) == at &&
                             !stop.stop_requested()) {
                             wake.wait(seen, std::memory_order_seq_cst);
@@ -233,7 +253,36 @@ private:
         }
     }
 
+    /// The asymmetric fence (Commit): on unless GOW3_ASYM_FENCE=0 or the OS cannot provide the
+    /// heavy side. Linux registers the process for MEMBARRIER_CMD_PRIVATE_EXPEDITED once.
+    static bool AsymmetricFenceAvailable() {
+        if (const char* env = std::getenv("GOW3_ASYM_FENCE"); env && env[0] == '0') {
+            return false;
+        }
+#ifdef _WIN32
+        return true;
+#elif defined(__linux__)
+        const long supported = syscall(SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0);
+        return supported >= 0 && (supported & MEMBARRIER_CMD_PRIVATE_EXPEDITED) &&
+               syscall(SYS_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) == 0;
+#else
+        return false;
+#endif
+    }
+    /// Stage B, before it re-checks `published` on its way to sleep: every thread of the process
+    /// that runs now has its earlier stores (stage A's `published`) visible to this one.
+    void HeavyFence() {
+#ifdef _WIN32
+        FlushProcessWriteBuffers();
+#elif defined(__linux__)
+        if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0) {
+            std::atomic_thread_fence(std::memory_order_seq_cst); // not expected after registration
+        }
+#endif
+    }
+
     static inline thread_local bool on_stage_b = false;
+    const bool asym_fence = AsymmetricFenceAvailable();
     Handler handler;
     void* context;
     std::unique_ptr<u8[]> ring;
