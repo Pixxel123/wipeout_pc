@@ -286,6 +286,7 @@ private:
     /// Returns true when the stage's images were bound from the memo. `hashes` are the stage's
     /// ImageDescHash values: a draw-preparation worker's, or the GPU thread's own at 0 workers;
     /// null skips the memo.
+    void PrefetchSetImages(const TextureSet& set, u32 count) const;
     bool BindTexturesFromSet(const Shader::Info& stage, const u64* hashes, u32 first_image_idx,
                              bool& barrier, TextureSet*& slot);
     /// The prepared sharps of `stage` in the current prepared draw, if they fit it.
