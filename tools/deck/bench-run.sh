@@ -4,7 +4,8 @@
 #   bench-run.sh <runs per build> <A spec> <B spec> [route]
 #   ':' separates the spec fields, so build paths and env values must not contain ':'
 #   spec: <extracted AppImage dir>[:GOW3_X=y[:...]]   route: default ~/diag/routes/vinetak-photo.pad
-#   BENCH_TITLE=<text>: the game shows "<text> - test X of Y" in a notice as each run starts
+#   BENCH_TITLE=<text>: the game shows "<text> - test X of Y" in a notice as each run starts,
+#   with "(A)"/"(B)" added when the two specs differ
 # Summarise with: python3 -I ~/diag/bench-summary.py <printed directory>
 set -u
 # Replayed input is not real input, so an idle suspend could cut a run short: re-exec under an inhibitor once.
@@ -62,8 +63,10 @@ run_one() { # <run dir> <spec> <notice>
     sleep 10
 }
 TITLE=${BENCH_TITLE:-Benchmark}
+SIDE_A=""; SIDE_B="" # the A/B letter only when the two specs differ
+[ "$SPEC_A" != "$SPEC_B" ] && { SIDE_A=" (A)"; SIDE_B=" (B)"; }
 for i in $(seq 1 "$N"); do
-    run_one "$OUT/$(printf %02d $((2 * i - 1)))-A" "$SPEC_A" "$TITLE - test $((2 * i - 1)) of $((2 * N)) (A)"
-    run_one "$OUT/$(printf %02d $((2 * i)))-B" "$SPEC_B" "$TITLE - test $((2 * i)) of $((2 * N)) (B)"
+    run_one "$OUT/$(printf %02d $((2 * i - 1)))-A" "$SPEC_A" "$TITLE - test $((2 * i - 1)) of $((2 * N))$SIDE_A"
+    run_one "$OUT/$(printf %02d $((2 * i)))-B" "$SPEC_B" "$TITLE - test $((2 * i)) of $((2 * N))$SIDE_B"
 done
 echo "$OUT"
