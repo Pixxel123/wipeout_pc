@@ -73,8 +73,9 @@ struct GraphicsPipelineKey {
 };
 
 /// gow3: how a graphics pipeline is built. Fast: a first build on a compile worker, without
-/// driver optimisations unless the binary cache has the optimised one. Rebuild: the optimised
-/// build that later replaces a fast one (GraphicsPipeline::AdoptOptimized).
+/// driver optimisations when the binary cache has nothing to restore. Rebuild: the optimised
+/// build that later replaces a fast one (GraphicsPipeline::AdoptOptimized); a driver error
+/// leaves it without a handle instead of stopping the game, and it stays out of the build stats.
 enum class PipelineBuild : u8 { Optimized, Fast, Rebuild };
 
 class GraphicsPipeline : public Pipeline {

@@ -451,11 +451,20 @@ GraphicsPipeline::GraphicsPipeline(
         PreloadMemoryStop().Report(static_cast<int>(pipeline_result)); // #149
         return;
     }
+    // gow3: a refused optimised rebuild (Handle() null) leaves the fast build in use.
+    const bool rebuild = build == PipelineBuild::Rebuild;
+    if (pipeline_result != vk::Result::eSuccess && rebuild) {
+        LOG_WARNING(Render_Vulkan, "Optimised rebuild of graphics pipeline {} failed ({})",
+                    debug_str, vk::to_string(pipeline_result));
+        return;
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
-    RecordWaveSizes();
+    if (!rebuild) {
+        RecordWaveSizes();
+    }
 
     if (needs_square_pass) {
         auto square_blending = color_blending;
@@ -478,13 +487,21 @@ GraphicsPipeline::GraphicsPipeline(
             pipeline.reset();
             return;
         }
+        if (square_result != vk::Result::eSuccess && rebuild) {
+            LOG_WARNING(Render_Vulkan, "Optimised rebuild of the squaring pass of {} failed ({})",
+                        debug_str, vk::to_string(square_result));
+            pipeline.reset();
+            return;
+        }
         ASSERT_MSG(square_result == vk::Result::eSuccess,
                    "Failed to create the squaring pipeline: {}", vk::to_string(square_result));
         square_pipeline = std::move(square);
         SetObjectName(device, *square_pipeline, "Graphics Pipeline {} squaring pass", debug_str);
     }
-    g_gow3_pipeline_total_ns += NsSince(started);
-    ++g_gow3_pipelines_built;
+    if (!rebuild) {
+        g_gow3_pipeline_total_ns += NsSince(started);
+        ++g_gow3_pipelines_built;
+    }
 }
 
 GraphicsPipeline::~GraphicsPipeline() = default;

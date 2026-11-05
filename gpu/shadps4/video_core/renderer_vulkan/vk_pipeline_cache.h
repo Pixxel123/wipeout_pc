@@ -237,8 +237,10 @@ private:
     /// gow3: StartBackgroundWarmUp state; owned here, deleted by StopWarmUp.
     BackgroundWarmup* background = nullptr;
     tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> pending_graphics;
-    /// gow3: published fast builds whose optimised rebuild is waiting, queued or done.
-    std::vector<std::shared_ptr<AsyncGraphicsCompilation>> rebuilds;
+    /// gow3: published fast builds whose optimised rebuild waits for the end of the cold burst
+    /// (QueueRebuilds), then the queued ones until they are swapped in or dropped.
+    std::vector<std::shared_ptr<AsyncGraphicsCompilation>> waiting_rebuilds, rebuilds;
+    bool fast_first_builds = false; ///< gow3: first builds on the workers skip optimisations
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     std::vector<Program*> pending_programs;
     /// gow3: exclusive for program/permutation insertions, shared for worker lookups.
