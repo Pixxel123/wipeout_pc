@@ -1080,7 +1080,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
         camera_motion->SetJitter(upscaler->Jitter());
         object_motion->OnFrameStart();
-        NoteFrameStart();
+        // gow3: once per display buffer, as without an upscaler below: the HUD draws into it after
+        // the copy and each of its draws comes through here. Counting every draw as a frame made
+        // GOW3_GPU_PROFILE start ~25 frames a frame and skip nearly all of them.
+        if (regs.color_buffers[0].Address() != last_display_buffer) {
+            last_display_buffer = regs.color_buffers[0].Address();
+            NoteFrameStart();
+        }
         static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
         // gow3: armed once per frame, at the first draw into a new display buffer. WipEout draws
         // its HUD into the display buffer after the copy, and each of those draws comes through

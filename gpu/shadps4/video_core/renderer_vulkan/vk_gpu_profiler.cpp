@@ -48,6 +48,12 @@ void GpuProfiler::WriteTimestamp(u64 key) {
 }
 
 void GpuProfiler::BeginFrame() {
+    const auto now = std::chrono::steady_clock::now();
+    if (last_frame.time_since_epoch().count() != 0) {
+        wall_ms += std::chrono::duration<double, std::milli>(now - last_frame).count();
+        ++wall_frames;
+    }
+    last_frame = now;
     // Close the frame: one more timestamp without a label.
     if (!paused && used[slice] > 0 && used[slice] < SliceQueries) {
         scheduler.EndRendering();
@@ -64,6 +70,7 @@ void GpuProfiler::BeginFrame() {
     const u32 next = (slice + 1) % NumSlices;
     paused = pending[next] && !scheduler.IsFree(ticks[next]);
     if (paused) {
+        ++skipped;
         Print();
         return;
     }
@@ -111,15 +118,22 @@ void GpuProfiler::Print() {
     for (const auto& [key, total] : sorted) {
         sum += total.ms;
     }
-    std::printf("GPU profile: %.2f ms/frame over %llu frames, %zu labels\n", sum / frames,
-                static_cast<unsigned long long>(frames), sorted.size());
-    for (size_t i = 0; i < std::min<size_t>(sorted.size(), 30); ++i) {
+    // On GPU-bound frames the GPU ms per frame should come close to the time between frames.
+    std::printf("GPU profile: %.2f ms/frame over %llu frames (%llu skipped, GPU behind), frames "
+                "%.2f ms apart, %zu labels\n",
+                sum / frames, static_cast<unsigned long long>(frames),
+                static_cast<unsigned long long>(skipped),
+                wall_frames ? wall_ms / double(wall_frames) : 0.0, sorted.size());
+    for (size_t i = 0; i < std::min<size_t>(sorted.size(), 40); ++i) {
         const auto& [key, total] = sorted[i];
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,
                     double(total.segments) / frames, described[key].c_str());
     }
     totals.clear();
     frames = 0;
+    skipped = 0;
+    wall_ms = 0;
+    wall_frames = 0;
 }
 
 } // namespace Vulkan
