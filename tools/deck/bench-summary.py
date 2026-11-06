@@ -10,8 +10,9 @@ from pathlib import Path
 COUNTDOWN = (500, 3000)       # ms after countdown_ms
 PHOTO = (3000, 23000)         # ms after the first steady photo-mode frame
 PHOTO_SEARCH = 6000           # ms before photo_ms where that frame is looked for (after the countdown)
-COUNTDOWN_MIN_DRAWS = 3500    # the grid is 4100-4250 draws a frame
-PHOTO_MIN_DRAWS = 3000        # photo mode on the grid is about 3217 with the menu open
+COUNTDOWN_MIN_DRAWS = 3500    # the Vineta K grid is 4100-4250 draws a frame
+PHOTO_MIN_DRAWS = 3000        # its photo mode on the grid is about 3217 with the menu open
+# A route on another track sets its own in its marks file: countdown_min_draws, photo_min_draws.
 PHOTO_CONSTANT_SHARE = 0.9
 PHOTO_TOLERANCE = 0.01        # a steady frame is within 1 % of the span's median draws
 MIN_SPAN_FRAMES = 30
@@ -86,9 +87,9 @@ def span(rows, t0, t1, tsc_hz):
     }
 
 
-def steady_start(rows, t_from):
+def steady_start(rows, t_from, min_draws=PHOTO_MIN_DRAWS):
     """Time of the first frame that starts MIN_SPAN_FRAMES steady photo-mode frames (draws at least
-    PHOTO_MIN_DRAWS, all within PHOTO_TOLERANCE of each other) at or after t_from, else None. The
+    min_draws, all within PHOTO_TOLERANCE of each other) at or after t_from, else None. The
     frame log has the game's own timestamps, so photo mode is found where it is, whenever the run
     got there."""
     per_frame = [(b[0], b[2] - a[2]) for a, b in zip(rows, rows[1:])]
@@ -97,7 +98,7 @@ def steady_start(rows, t_from):
             continue
         window = [n for _, n in per_frame[i:i + MIN_SPAN_FRAMES]]
         low = min(window)
-        if low >= PHOTO_MIN_DRAWS and max(window) - low <= low * PHOTO_TOLERANCE:
+        if low >= min_draws and max(window) - low <= low * PHOTO_TOLERANCE:
             return per_frame[i][0]
     return None
 
@@ -129,15 +130,17 @@ def analyse_run(run_dir, marks):
     if tsc_hz <= 0:
         result['invalid'] = 'frame log too short'
         return result
+    countdown_min = marks.get('countdown_min_draws', COUNTDOWN_MIN_DRAWS)
+    photo_min = marks.get('photo_min_draws', PHOTO_MIN_DRAWS)
     c0 = start + marks['countdown_ms']
     countdown = span(rows, c0 + COUNTDOWN[0], c0 + COUNTDOWN[1], tsc_hz)
     if not countdown:
         result['invalid'] = 'countdown cut short'
         return result
-    if statistics.median(countdown['per_frame_draws']) < COUNTDOWN_MIN_DRAWS:
+    if statistics.median(countdown['per_frame_draws']) < countdown_min:
         result['invalid'] = 'countdown not reached (no grid-sized frames at its mark)'
         return result
-    p0 = steady_start(rows, max(start + marks['photo_ms'] - PHOTO_SEARCH, c0 + COUNTDOWN[1]))
+    p0 = steady_start(rows, max(start + marks['photo_ms'] - PHOTO_SEARCH, c0 + COUNTDOWN[1]), photo_min)
     if p0 is None:
         result['invalid'] = 'photo mode not reached (no steady frames near its mark)'
         return result
@@ -151,8 +154,8 @@ def analyse_run(run_dir, marks):
     if share < PHOTO_CONSTANT_SHARE:
         result['invalid'] = f'photo mode not steady ({share:.0%} of frames within 1 % of {centre:.0f} draws)'
         return result
-    if centre < PHOTO_MIN_DRAWS:
-        result['invalid'] = f'photo mode too light (steady at {centre:.0f} draws, below {PHOTO_MIN_DRAWS})'
+    if centre < photo_min:
+        result['invalid'] = f'photo mode too light (steady at {centre:.0f} draws, below {photo_min})'
         return result
     result['countdown'], result['photo'] = countdown, photo
     return result

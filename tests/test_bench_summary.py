@@ -118,6 +118,24 @@ class SpanMetrics(unittest.TestCase):
             run = bench.analyse_run(make_run(root, '01-A', frames), MARKS)
             self.assertIn('photo mode not reached', run['invalid'])
 
+    def test_lighter_track_uses_the_minimums_in_its_marks(self):
+        with tempfile.TemporaryDirectory() as root:
+            # another track: grid about 3300 draws, photo mode 1970
+            light = [100] * 600 + [3300 + 60 * (i % 3) for i in range(300)] + [1579] * 300 + [1970] * 1500
+            run_dir = make_run(root, '01-A', light)
+            self.assertIn('countdown not reached', bench.analyse_run(run_dir, MARKS)['invalid'])
+            own = dict(MARKS, countdown_min_draws=3000, photo_min_draws=1800)
+            run = bench.analyse_run(run_dir, own)
+            self.assertIsNone(run['invalid'])
+            self.assertAlmostEqual(run['photo']['draws'], 1970, delta=1)
+
+    def test_marks_file_minimums_are_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            marks = Path(root) / 'x.pad.marks'
+            marks.write_text('countdown_ms 51770\nphoto_ms 60500\ncountdown_min_draws 3000\nphoto_min_draws 1800\n')
+            self.assertEqual(bench.read_marks(marks), {'countdown_ms': 51770, 'photo_ms': 60500,
+                                                       'countdown_min_draws': 3000, 'photo_min_draws': 1800})
+
     def test_photo_span_starts_where_photo_mode_is_steady(self):
         with tempfile.TemporaryDirectory() as root:
             late = GOOD[:1200] + [3000 + (i % 7) * 100 for i in range(240)] + [3434] * 1500  # 4 s late

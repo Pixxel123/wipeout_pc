@@ -70,7 +70,10 @@ writes `~/diag/routes/<name>.pad` (without a name, `~/diag/route-shifted.pad`).
 `route-record.sh list` shows the saved routes and whether their marks are written, and
 `bench-run.sh <N> <A> <B> <name>` replays one by name. Copy a route worth keeping to
 `tools/deck/routes/<name>.pad`. Write `<name>.pad.marks` by hand: `countdown_ms` is the X press
-at START RACE, `photo_ms` the press that opens photo mode, both read from the shifted route. A press the bench should not replay
+at START RACE, `photo_ms` the press that opens photo mode, both read from the shifted route. A route
+on a track other than Vineta K adds `countdown_min_draws` and `photo_min_draws` (draws a frame
+on its grid and in its photo mode, a little below what it shows; the defaults 3500 and 3000 fit
+Vineta K). A press the bench should not replay
 (accelerating at "go") is removed from the route, as for `vinetak-photo`. The repo copy lives in
 `tools/deck/routes/`; `bench-run.sh` reads `~/diag/routes/vinetak-photo.pad` on the Deck by default.
 `tools/deck/bench-run.sh <N> <A> <B>` then launches N alternating A/B pairs (A and B are extracted
