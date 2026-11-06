@@ -838,6 +838,51 @@ int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, i
     read_unlock();
     return found;
 }
+/* The first place in mapped guest memory that holds one of `count` byte blocks whole, found by
+ * 64 bytes of each at sig_at[i]; *which is that block's index. 0 when none is there. Faults (a
+ * region unmapped or protected meanwhile) skip the region. A full search reads every mapping
+ * once: call it only when needed, from a runtime thread. */
+static const unsigned char *find_bytes(const unsigned char *p, size_t n, const unsigned char *needle, size_t k) {
+    for (const unsigned char *end=p+n; p && (size_t)(end-p)>=k; ++p) {
+        p=memchr(p,needle[0],(size_t)(end-p)-k+1);
+        if (!p) return NULL;
+        if (!memcmp(p,needle,k)) return p;
+    }
+    return NULL;
+}
+uintptr_t runtime_memory_find(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
+                              int count, int *which) {
+    volatile uintptr_t address=0, hit=0;
+    volatile int found=-1;
+    sigjmp_buf recover;
+    uintptr_t start, end;
+    int mapped;
+    while (!hit && runtime_memory_region(address,&start,&end,&mapped) && end>address) {
+        const volatile uintptr_t lo=start, hi=end; /* kept across the recovery jump */
+        if (mapped) {
+            if (!sigsetjmp(recover,0)) {
+                runtime_fault_recover=&recover;
+                for (int b=0; b<count && !hit; ++b) {
+                    if (!blocks[b] || sizes[b]<sig_at[b]+64) continue;
+                    const unsigned char *p=(const unsigned char *)lo, *stop=(const unsigned char *)hi;
+                    while (p<stop && (p=find_bytes(p,(size_t)(stop-p),blocks[b]+sig_at[b],64))) {
+                        const uintptr_t base=(uintptr_t)p-sig_at[b];
+                        if (base>=lo && base+sizes[b]<=hi && !memcmp((const void *)base,blocks[b],sizes[b])) {
+                            hit=base; found=b; break;
+                        }
+                        ++p;
+                    }
+                }
+                runtime_fault_recover=NULL;
+            } else {
+                runtime_fault_recover=NULL;
+            }
+        }
+        address=hi;
+    }
+    if (which) *which=found;
+    return hit;
+}
 /* GPU page tracking: restrict host access, never beyond the guest's own protection. */
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write) {
     read_lock();

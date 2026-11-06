@@ -120,4 +120,9 @@ void runtime_json_report(void);
 const char *runtime_thread_name(void *handle);
 uint64_t runtime_memory_flexible_available(void);
 unsigned char *runtime_image_base(void);
+uintptr_t runtime_memory_find(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
+                              int count, int *which);
+void runtime_glyphs_start(void);
+int runtime_glyphs_watches(const char *guest);
+void runtime_glyphs_read(const char *guest, int64_t at, int64_t n);
 #endif
