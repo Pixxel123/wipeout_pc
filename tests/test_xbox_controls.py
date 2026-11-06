@@ -199,6 +199,39 @@ class BuildTest(unittest.TestCase):
             with mock.patch.object(xc, 'draw_sheet', side_effect=AssertionError('drawn again')):
                 self.assertEqual(xc.build(game, out), [line + '\n' for line in lines[1:]])
 
+    def test_the_layout_carries_the_rows_unless_told_not_to(self):
+        from test_controller_row import P1, P2
+        first, second, _rest = layout().split(b'</Screen>\r\n')
+        sliders = first + P1 + b'</Screen>\r\n' + second + P2 + b'</Screen>\r\n'
+        with tempfile.TemporaryDirectory() as folder:
+            game, out = self.game(folder), Path(folder) / 'out'
+            out.mkdir()
+            archive(game / 'data09.psarc', {xc.LAYOUT: sliders}, packed=False)
+
+            def patched_layout(*options):
+                # The same out folder each time: the cache must tell the two apart.
+                (out / 'file_patches.txt').write_text('')
+                argv = ['x', str(game), '--out', str(out), *options]
+                with redirect_stdout(io.StringIO()) as printed, mock.patch.object(sys, 'argv', argv):
+                    xc.main()
+                self.assertIn('Xbox controller: on the Controls screen', printed.getvalue())
+                mine = [line for line in (out / 'file_patches.txt').read_text().splitlines()
+                        if line.startswith('/app0/data09.psarc ')]
+                self.assertTrue(mine)
+                (Path(folder) / 'data09.psarc').write_bytes(apply((game / 'data09.psarc').read_bytes(), mine))
+                xml = read(Path(folder) / 'data09.psarc', xc.LAYOUT)
+                self.assertEqual(len(xml), len(sliders))
+                self.assertEqual(xml.count(b'x="-999"'), 2)  # the highlights moved either way
+                return xml
+            with_rows = patched_layout()
+            self.assertIn(b'name="Pad Style P1"', with_rows)
+            self.assertIn(b'name="Pad Style P2"', with_rows)
+            self.assertNotIn(b'aSlider', with_rows)
+            without = patched_layout('--no-row')
+            self.assertNotIn(b'Pad Style', without)
+            self.assertEqual(without.count(b'<aSlider name="Thrust Sensitivity"'), 2)
+            self.assertEqual(patched_layout(), with_rows)
+
     def test_an_older_copy_without_room_is_left_but_the_newest_must_fit(self):
         with tempfile.TemporaryDirectory() as folder:
             game, out = self.game(folder), Path(folder) / 'out'

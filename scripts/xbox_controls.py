@@ -300,10 +300,11 @@ def relayout(xml, sprites):
 
 # ------------------------------------------------------------------------------- patches
 
-def changes(game, given=None):
-    """{archive: [(offset, original, new)]} that draw the Xbox controller. The game reads the
-    newest archive's copy of a file (as scripts/menu_patches.py's data09 change), and the picture
-    and the layout go together: an archive changes only when all its copies fit. An archive that
+def changes(game, given=None, row=True):
+    """{archive: [(offset, original, new)]} that draw the Xbox controller (and with `row`, the
+    Controller type rows). The game reads the newest archive's copy of a file (as
+    scripts/menu_patches.py's data09 change), and the picture and the layout go together: an
+    archive changes only when all its copies fit. An archive that
     holds the newest copy of a file must fit, or ValueError and nothing changes; an older one that
     does not is left as it is."""
     with contextlib.ExitStack() as opened:
@@ -314,10 +315,10 @@ def changes(game, given=None):
                 i = archive.find(name)
                 if i is not None:
                     holders[name].append((archive_name, archive, i))
-        return _changes(holders)
+        return _changes(holders, row)
 
 
-def _changes(holders):
+def _changes(holders, row=True):
     """changes() of the archives' copies, found and opened: {file: [(archive name, Archive, entry)]}."""
     if not holders[LAYOUT] or not any(holders[name] for name in TEXTURES):
         raise ValueError("the Controls screen's picture or layout was not found")
@@ -335,7 +336,8 @@ def _changes(holders):
             if name == LAYOUT:
                 # The Controller type rows (scripts/controller_row.py) go in the same bytes: two
                 # patches of one entry would each check the other's original bytes and fail.
-                new = relayout(controller_row.add_row(layouts[archive_name]), sprites)
+                xml = layouts[archive_name]
+                new = relayout(controller_row.add_row(xml) if row else xml, sprites)
             else:
                 # The new texture depends only on the original's length and header (its size and
                 # levels), so copies that agree in both are encoded once.
@@ -358,14 +360,16 @@ def _changes(holders):
     return result
 
 
-def build(game, out, given=None):
-    """Lines for out/file_patches.txt, cached in out/xbox_controls until the drawing or the archives
-    change. given: the archives as psarc.archives takes them."""
+def build(game, out, given=None, row=True):
+    """Lines for out/file_patches.txt, cached in out/xbox_controls until the drawing, the rows or the
+    archives change. given: the archives as psarc.archives takes them; row: the Controller type
+    rows too (scripts/controller_row.py)."""
     found = psarc.archives(game, given)
 
     def make(folder):
-        return [line for name, parts in changes(game, given).items() for line in psarc.patch_lines(name, parts, folder)]
-    key = [VERSION, psarc.stamp([SVG]), [name for name, _p in found], psarc.stamp(p for _n, p in found)]
+        return [line for name, parts in changes(game, given, row).items() for line in psarc.patch_lines(name, parts, folder)]
+    key = [VERSION, controller_row.VERSION, row, psarc.stamp([SVG]), [name for name, _p in found],
+           psarc.stamp(p for _n, p in found)]
     return psarc.cached_lines(Path(out) / 'xbox_controls', key, make)
 
 
@@ -373,10 +377,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, required=True, help='adds its changes to OUT/file_patches.txt')
+    parser.add_argument('--no-row', action='store_true',
+                        help='without the Controller type rows (the save cannot take their settings)')
     psarc.add_archive_option(parser)
     args = parser.parse_args()
     try:
-        lines = build(args.game, args.out, args.archive)
+        lines = build(args.game, args.out, args.archive, row=not args.no_row)
     except Exception as error:  # noqa: BLE001  (a picture only: whatever fails, the game starts)
         print(f'Xbox controller: {error}; the Controls screen keeps the DualShock 4', flush=True)
         return
