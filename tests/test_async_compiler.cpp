@@ -67,12 +67,76 @@ int main() {
         assert(compiler.Submit([&] { entered.set_value(); gate.wait(); }));
         entered.get_future().wait();
         assert(compiler.Submit([&] { order.push_back(1); }));
-        assert(compiler.Submit([&] { order.push_back(2); }, true));
+        assert(compiler.Submit([&] { order.push_back(2); }, AsyncCompiler::Lane::Urgent));
         assert(compiler.Depth() == 2);
         release.set_value();
         compiler.Stop();
         assert((order == std::vector<int>{2, 1}));
         assert(compiler.QueueWaitNs() > 0);
+    }
+    {
+        // Low work runs after urgent and normal work, never takes their slots, and is
+        // dropped on Stop (its job then fails).
+        AsyncCompiler compiler(1, 2);
+        std::promise<void> entered, release, low_entered, low_release;
+        auto gate = release.get_future().share();
+        auto low_gate = low_release.get_future().share();
+        std::vector<int> order;
+        assert(compiler.Submit([&] { entered.set_value(); gate.wait(); }));
+        entered.get_future().wait();
+        assert(compiler.Submit([&] { order.push_back(3); low_entered.set_value(); low_gate.wait(); },
+                               AsyncCompiler::Lane::Low));
+        assert(compiler.Submit([&] { order.push_back(1); }));
+        assert(compiler.Submit([&] { order.push_back(2); }, AsyncCompiler::Lane::Urgent));
+        assert(!compiler.HasCapacity() && compiler.Depth() == 2);
+        AsyncJob<int> dropped;
+        assert(dropped.Start(compiler, [&] { order.push_back(4); return 4; },
+                             AsyncCompiler::Lane::Low));
+        release.set_value();
+        low_entered.get_future().wait();
+        assert(compiler.HasCapacity());
+        std::thread stopper([&] { compiler.Stop(); });
+        while (compiler.HasCapacity()) {
+            std::this_thread::yield();
+        }
+        low_release.set_value();
+        stopper.join();
+        assert((order == std::vector<int>{2, 1, 3}));
+        dropped.Wait();
+        assert(!dropped.Poll() && dropped.Failed());
+    }
+    {
+        // Low work runs on at most half the workers; the others take new work right away, and
+        // the next low task starts as soon as one finishes.
+        AsyncCompiler compiler(4, 8);
+        std::promise<void> release;
+        auto gate = release.get_future().share();
+        std::atomic<int> running{}, peak{}, entered{}, finished{};
+        for (int i = 0; i < 5; ++i) {
+            assert(compiler.Submit([&] {
+                const int now = ++running;
+                for (int seen = peak; now > seen && !peak.compare_exchange_weak(seen, now);) {
+                }
+                ++entered;
+                gate.wait();
+                --running;
+                ++finished;
+            }, AsyncCompiler::Lane::Low));
+        }
+        while (entered < 2) {
+            std::this_thread::yield();
+        }
+        std::promise<void> normal_done;
+        assert(compiler.Submit([&] { normal_done.set_value(); }));
+        normal_done.get_future().wait(); // a free worker, not held by the low lane
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        assert(entered == 2 && peak == 2);
+        release.set_value();
+        while (finished < 5) {
+            std::this_thread::yield();
+        }
+        compiler.Stop();
+        assert(peak == 2);
     }
     {
         std::atomic<unsigned> initialized{};

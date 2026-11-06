@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <cstdint>
@@ -17,11 +18,19 @@
 
 namespace Vulkan {
 
-// gow3: bounded compiler queue. Stop drains accepted work before Vulkan resources are released.
+// gow3: bounded compiler queue. Stop drains accepted urgent and normal work before Vulkan
+// resources are released.
 class AsyncCompiler {
 public:
+    /// gow3: a worker takes urgent work first, then normal, then low. Low work (optimised
+    /// rebuilds of pipelines already drawing) never takes a slot from the other lanes, runs on
+    /// at most half the workers (a worker does not leave a task it started, so the others stay
+    /// free for new work) and is dropped on Stop: nothing waits for it.
+    enum class Lane { Normal, Urgent, Low };
+
     explicit AsyncCompiler(unsigned count, size_t capacity = 64,
-                           std::function<void(unsigned)> initialize = {}) : capacity{capacity} {
+                           std::function<void(unsigned)> initialize = {})
+        : capacity{capacity}, low_limit{std::max(1u, count / 2)} {
         for (unsigned i = 0; i < count; ++i) {
             workers.emplace_back([this, i, initialize] {
                 worker_index = i;
@@ -30,33 +39,57 @@ public:
                 }
                 for (;;) {
                     std::function<void()> task;
+                    bool is_low = false;
                     {
                         std::unique_lock lock{mutex};
-                        cv.wait(lock, [&] { return stopping || !tasks.empty() || !urgent.empty(); });
-                        if (tasks.empty() && urgent.empty()) {
-                            return;
+                        const auto low_ready = [&] {
+                            return !low.empty() && low_running < low_limit;
+                        };
+                        cv.wait(lock, [&] {
+                            return stopping || !tasks.empty() || !urgent.empty() || low_ready();
+                        });
+                        if (tasks.empty() && urgent.empty() && !low_ready()) {
+                            return; // stopping (Stop empties the low lane)
                         }
-                        auto& queue = urgent.empty() ? tasks : urgent;
+                        is_low = urgent.empty() && tasks.empty();
+                        auto& queue = !urgent.empty() ? urgent : (!is_low ? tasks : low);
                         auto next = std::move(queue.front());
                         queue.pop_front();
-                        queue_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - next.enqueued).count();
+                        if (is_low) {
+                            ++low_running; // its long waits stay out of the queue wait stat
+                        } else {
+                            queue_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - next.enqueued).count();
+                        }
                         task = std::move(next.function);
                     }
                     task();
+                    if (is_low) {
+                        bool more = false;
+                        {
+                            std::scoped_lock lock{mutex};
+                            --low_running;
+                            more = !low.empty();
+                        }
+                        if (more) {
+                            cv.notify_one(); // a worker that found the low lane full
+                        }
+                    }
                 }
             });
         }
     }
     ~AsyncCompiler() { Stop(); }
 
-    bool Submit(std::function<void()> task, bool priority = false) {
+    bool Submit(std::function<void()> task, Lane lane = Lane::Normal) {
         {
             std::scoped_lock lock{mutex};
-            if (stopping || tasks.size() + urgent.size() >= capacity) {
+            auto& queue = lane == Lane::Urgent ? urgent : (lane == Lane::Low ? low : tasks);
+            const size_t used = lane == Lane::Low ? low.size() : tasks.size() + urgent.size();
+            if (stopping || used >= capacity) {
                 return false;
             }
-            (priority ? urgent : tasks).push_back({std::move(task), std::chrono::steady_clock::now()});
+            queue.push_back({std::move(task), std::chrono::steady_clock::now()});
         }
         cv.notify_one();
         return true;
@@ -66,16 +99,20 @@ public:
         return !stopping && tasks.size() + urgent.size() < capacity;
     }
     static unsigned WorkerIndex() { return worker_index; }
+    size_t Workers() const { return workers.size(); }
     size_t Depth() {
         std::scoped_lock lock{mutex};
         return tasks.size() + urgent.size();
     }
     uint64_t QueueWaitNs() { return queue_wait_ns.exchange(0); }
     void Stop() {
+        std::deque<Task> dropped;
         {
             std::scoped_lock lock{mutex};
             stopping = true;
+            dropped.swap(low);
         }
+        dropped.clear(); // their jobs report a broken promise, a failed Poll
         cv.notify_all();
         for (auto& worker : workers) {
             if (worker.joinable()) {
@@ -86,13 +123,15 @@ public:
 
 private:
     size_t capacity;
+    unsigned low_limit;
+    unsigned low_running = 0;
     std::mutex mutex;
     std::condition_variable cv;
     struct Task {
         std::function<void()> function;
         std::chrono::steady_clock::time_point enqueued;
     };
-    std::deque<Task> tasks, urgent;
+    std::deque<Task> tasks, urgent, low;
     static inline thread_local unsigned worker_index = 0;
     std::atomic<uint64_t> queue_wait_ns{};
     bool stopping = false;
@@ -104,13 +143,14 @@ template <typename T>
 class AsyncJob {
 public:
     template <typename F>
-    bool Start(AsyncCompiler& compiler, F&& function, bool priority = false) {
+    bool Start(AsyncCompiler& compiler, F&& function,
+               AsyncCompiler::Lane lane = AsyncCompiler::Lane::Normal) {
         if (started) {
             return false;
         }
         auto task = std::make_shared<std::packaged_task<T()>>(std::forward<F>(function));
         auto completion = task->get_future();
-        if (!compiler.Submit([task] { (*task)(); }, priority)) {
+        if (!compiler.Submit([task] { (*task)(); }, lane)) {
             return false;
         }
         future = std::move(completion);

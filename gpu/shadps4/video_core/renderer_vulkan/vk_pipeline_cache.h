@@ -141,6 +141,10 @@ public:
     void Sync();
     void ReportCompilerStats();
 
+    /// gow3: replaces fast first builds whose optimised rebuild is done (GPU command thread,
+    /// only while the draw recording thread is idle) and queues the next rebuilds.
+    void SwapRebuiltPipelines();
+
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
@@ -185,6 +189,7 @@ private:
                      std::optional<Shader::StageSpecialization> specialization = {});
     void PublishShaders(bool wait = false);
     void PublishGraphics(bool wait = false);
+    void QueueRebuilds();
     void FinishCompilations();
     void SeedWorkerCaches();
     bool CheckCacheProfile();
@@ -235,6 +240,10 @@ private:
     /// gow3: StartBackgroundWarmUp state; owned here, deleted by StopWarmUp.
     BackgroundWarmup* background = nullptr;
     tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> pending_graphics;
+    /// gow3: published fast builds whose optimised rebuild waits for the end of the cold burst
+    /// (QueueRebuilds), then the queued ones until they are swapped in or dropped.
+    std::vector<std::shared_ptr<AsyncGraphicsCompilation>> waiting_rebuilds, rebuilds;
+    bool fast_first_builds = false; ///< gow3: first builds on the workers skip optimisations
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     std::vector<Program*> pending_programs;
     /// gow3: exclusive for program/permutation insertions, shared for worker lookups.
