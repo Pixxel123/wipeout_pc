@@ -34,6 +34,8 @@ typedef struct {
     int shown;           /* the style at `at` */
     int failed_for;      /* the wanted style a search last failed for, or -2 */
     uint64_t read_at;    /* ns of the last read of its archive range; 0 when handled */
+    int reloaded;        /* read again since the last search: only the start style is looked for */
+    uint64_t retry_at;   /* ns of the one more search after a failed one following a read; 0 none */
 } Texture;
 static Texture textures[GLYPH_MAX_TEXTURES];
 static int texture_count;
@@ -80,7 +82,11 @@ static void load_config(const char *path) {
     char line[2200];
     while (texture_count<GLYPH_MAX_TEXTURES && fgets(line,sizeof(line),f)) {
         Texture *t=&textures[texture_count];
-        if (!glyph_parse_line(line,&t->spec)) continue;
+        if (!glyph_parse_line(line,&t->spec)) {
+            const int n=(int)strcspn(line,"\r\n");
+            if (n) printf("Runtime: glyphs: config line skipped: %.*s\n",n<80 ? n : 80,line);
+            continue;
+        }
         int styles=0;
         for (int s=0;s<GLYPH_STYLES;++s) {
             if (!t->spec.files[s][0]) continue;
@@ -154,7 +160,11 @@ static int write_style(Texture *t, int want) {
 }
 static void locate(Texture *t) {
     const unsigned char *blocks[GLYPH_STYLES];
-    for (int s=0;s<GLYPH_STYLES;++s) blocks[s]=t->data[s] ? t->data[s]+t->spec.skip : NULL;
+    /* Just read again, the texture holds the start style: a copy of another style written earlier
+     * may still be in memory and must not be taken for it. */
+    for (int s=0;s<GLYPH_STYLES;++s)
+        blocks[s]=t->data[s] && (!t->reloaded || s==launch_style) ? t->data[s]+t->spec.skip : NULL;
+    t->reloaded=0;
     int which=-1;
     t->at=(unsigned char *)runtime_memory_find(blocks,t->size,t->sig_at,GLYPH_STYLES,&which);
     t->shown=t->at ? which : -1;
@@ -185,11 +195,18 @@ static void *glyph_thread(void *unused) {
             if (read && now>read && now-read>1500000000ull) {
                 __atomic_store_n(&t->read_at,0,__ATOMIC_RELEASE);
                 t->at=NULL; t->shown=launch_style; t->failed_for=-2;
+                t->reloaded=1; t->retry_at=0;
             }
-            if (want<0 || !t->data[want] || t->shown==want || t->failed_for==want) continue;
+            if (want<0 || !t->data[want] || t->shown==want || t->failed_for==want || now<t->retry_at) continue;
             if (!still_there(t)) {
+                const int reloaded=t->reloaded;
                 locate(t);          /* the only search: the wanted style changed, the place is unknown */
-                if (!t->at) { t->failed_for=want; continue; }
+                if (!t->at) {
+                    /* After a read the game may still be unpacking it: one more try 2 s later. */
+                    if (reloaded && !t->retry_at) { t->retry_at=now+2000000000ull; t->reloaded=1; }
+                    else t->failed_for=want;
+                    continue;
+                }
                 if (t->shown==want) continue;
             }
             if (write_style(t,want)) {
