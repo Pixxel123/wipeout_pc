@@ -86,6 +86,17 @@ class LayoutTest(unittest.TestCase):
         old_lines, new_lines = old.decode('latin1').replace('\t', ' ').split('\r\n'), text.split('\r\n')
         self.assertEqual([a == b for a, b in zip(old_lines, new_lines)].count(False), 2 * 11)
 
+    def test_layout_has_row_and_xbox_highlights(self):
+        import controller_row
+        from test_controller_row import P1, P2
+        first, second, _rest = layout().split(b'</Screen>\r\n')
+        both = first + P1 + b'</Screen>\r\n' + second + P2 + b'</Screen>\r\n'
+        new = xc.relayout(controller_row.add_row(both), self.sprites)
+        self.assertEqual(len(new), len(both))
+        self.assertIn(b'name="Pad Style P1"', new)
+        self.assertIn(b'name="Pad Style P2"', new)
+        self.assertIn(b'x="-999"', new)  # the Share highlight moved off the screen, as before
+
     def test_a_layout_without_every_highlight_is_refused(self):
         with self.assertRaises(ValueError):
             xc.relayout(layout(('CrossButton',)), self.sprites)

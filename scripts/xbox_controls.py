@@ -18,10 +18,11 @@ from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
+import controller_row
 import gnf
 import psarc
 
-VERSION = 3  # of the drawing and the patches: a change rebuilds the cached ones
+VERSION = 4  # of the drawing and the patches: a change rebuilds the cached ones
 SVG = Path(__file__).resolve().parent / 'art' / 'xbox_controller.svg'
 TEXTURES = ('data/fe/images/controls_ps3.2x.gnf', 'data/fe/images/controls_ps3.gnf')
 LAYOUT = 'data/plugins/frontend/gui/controls_definition_ps4.xml'
@@ -332,7 +333,9 @@ def _changes(holders):
     for name, copies in holders.items():
         for archive_name, archive, i in copies:
             if name == LAYOUT:
-                new = relayout(layouts[archive_name], sprites)
+                # The Controller type rows (scripts/controller_row.py) go in the same bytes: two
+                # patches of one entry would each check the other's original bytes and fail.
+                new = relayout(controller_row.add_row(layouts[archive_name]), sprites)
             else:
                 # The new texture depends only on the original's length and header (its size and
                 # levels), so copies that agree in both are encoded once.
