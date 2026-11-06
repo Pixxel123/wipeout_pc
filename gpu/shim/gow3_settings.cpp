@@ -171,6 +171,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "live_resolution") {
         v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
     } else if (key == "output_res") {
+        v.output_native = value == "native";
         for (int r = 0; r < OutputCount; ++r) {
             if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
                 v.output_res = r;
@@ -317,7 +318,12 @@ void Save() {
                  v.debug_view.load(), int(v.show_fps.load()),
                  int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
     std::fprintf(file, "dlss_preset=%d\n", v.dlss_preset.load());
-    std::fprintf(file, "output_res=%dx%d\n", OutputWidths[v.output_res], OutputHeights[v.output_res]);
+    if (v.output_native.load()) {
+        std::fprintf(file, "output_res=native\n");
+    } else {
+        const int output = std::clamp(v.output_res.load(), 0, OutputCount - 1);
+        std::fprintf(file, "output_res=%dx%d\n", OutputWidths[output], OutputHeights[output]);
+    }
     std::fprintf(file, "red_orb_multiplier=%.3f\n", v.red_orb_multiplier.load());
     std::fprintf(file, "damage_dealt=%.3f\n", v.damage_dealt.load());
     std::fprintf(file, "damage_taken=%.3f\n", v.damage_taken.load());

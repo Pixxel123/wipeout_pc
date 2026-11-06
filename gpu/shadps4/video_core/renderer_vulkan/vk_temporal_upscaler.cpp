@@ -2,6 +2,7 @@
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/motion_history.h"
+#include "video_core/renderer_vulkan/output_resolution.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
 
@@ -187,7 +188,10 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     }
     if (const char* res = std::getenv("GOW3_OUTPUT_RES")) {
         u32 w = 0, h = 0;
-        if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
+        if (std::strcmp(res, "native") == 0) {
+            Gow3Settings::Get().output_native = true;
+        } else if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
+            Gow3Settings::Get().output_native = false;
             target_width = w;
             target_height = h;
         }
@@ -284,6 +288,7 @@ bool TemporalUpscaler::OnFrameStart() {
                 Gow3Settings::Get().preset.store(value);
             }
             if (fields >= 2 && output >= 0 && output < Gow3Settings::OutputCount) {
+                Gow3Settings::Get().output_native = false;
                 Gow3Settings::Get().output_res.store(output);
             }
             if (fields == 3 && provider >= 0 && provider < Gow3Settings::UpscalerCount) {
@@ -300,11 +305,27 @@ bool TemporalUpscaler::OnFrameStart() {
     const bool active = Active();
     const bool jitter_on = active && settings.jitter && !Gow3Toggle::Disabled(1u << 25);
     const int upscaler = settings.upscaler.load();
-    const int output = settings.output_res.load();
-    const bool output_changed = !scaled_session && applied_output != output;
+    // gow3: "Native (window)" follows the window once its size has settled. The size in use, not
+    // the setting, tells a change.
+    u32 output_width = target_width, output_height = target_height;
+    if (settings.output_native) {
+        const auto [w, h] = OutputResolution::Output(settings.window_width, settings.window_height,
+                                                     settings.game_width, settings.game_height);
+        if (w && native_settled.Update(w, h)) {
+            output_width = w;
+            output_height = h;
+        }
+    } else {
+        const int output = std::clamp(settings.output_res.load(), 0, Gow3Settings::OutputCount - 1);
+        output_width = u32(Gow3Settings::OutputWidths[output]);
+        output_height = u32(Gow3Settings::OutputHeights[output]);
+    }
+    const bool output_changed = !scaled_session &&
+                                (output_width != applied_output_width ||
+                                 output_height != applied_output_height);
     if (output_changed) {
-        target_width = Gow3Settings::OutputWidths[output];
-        target_height = Gow3Settings::OutputHeights[output];
+        target_width = output_width;
+        target_height = output_height;
         std::printf("Output resolution: %ux%u (live)\n", target_width, target_height);
         failed = false;
         fsr4_failed = false;
@@ -331,7 +352,8 @@ bool TemporalUpscaler::OnFrameStart() {
     if (changed || !dispatched_last_frame) reset = true;
     if (changed) jitter_index = 0;
     applied_preset = preset;
-    applied_output = output;
+    applied_output_width = target_width;
+    applied_output_height = target_height;
     applied_upscaler = upscaler;
     last_active = active;
     last_jitter = jitter_on;

@@ -73,8 +73,10 @@ struct Values {
     /// Set by the presenter: sharpening ran on the last frame (it needs FSR 1 when the game's
     /// image is smaller than the window).
     std::atomic<bool> rcas_applied{false};
-    /// Set by the presenter: the game's image and the window it is shown in, in pixels.
+    /// Set by the presenter: the game's image and the window (swapchain) it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
+    /// Set by the presenter: the guest display buffer (the render resolution).
+    std::atomic<int> game_width{0}, game_height{0};
     std::atomic<int> frames_queued{1};
     /// Controller vibration strength in percent; 0 turns it off (runtime_pad.c). Live.
     std::atomic<int> vibration{100};
@@ -122,6 +124,9 @@ struct Values {
     std::atomic<bool> fsr4_invert_jitter{false};
     std::atomic<int> active_render_width{1920}, active_render_height{1080};
     std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
+    /// "Native (window)": the output follows the window (output_resolution.h); output_res keeps
+    /// the last fixed size.
+    std::atomic<bool> output_native{false};
     /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
     /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
     std::atomic<int> live_resolution{0};

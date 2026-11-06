@@ -695,8 +695,10 @@ PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('B
 # resolution per axis, scaled up by FSR 3.1 or DLSS; the HUD stays at full size.
 UPSCALE_PRESETS = [('0', ('Off (full resolution)',)), ('1', ('Quality (scene at 1/1.5)',)),
                    ('2', ('Balanced (scene at 1/1.7)',)), ('3', ('Performance (scene at 1/2)',))]
-OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
-           ('2560x1440', ('2560 × 1440',)), ('3840x2160', ('3840 × 2160 (4K)',))]
+# "native": the window fitted to 16:9 (gpu: output_resolution.h).
+OUTPUTS = [('native', ('Native (window)',)), ('1280x720', ('1280 × 720 (Steam Deck)',)),
+           ('1920x1080', ('1920 × 1080',)), ('2560x1440', ('2560 × 1440',)),
+           ('3840x2160', ('3840 × 2160 (4K)',))]
 LIVE = [('auto', ('Auto (by graphics card)', 'Авто (по видеокарте)')), ('0', ('Off (faster)', 'Выключена (быстрее)')),
         ('1', ('On (change without restarting)', 'Включена (без перезапуска)'))]
 # (PS4 system language ID, name, regions): the game's own table (eboot.bin 0x9B89A0) only takes a

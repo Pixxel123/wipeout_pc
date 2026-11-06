@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <unistd.h>
 #include "gow3_settings.h"
@@ -77,6 +78,25 @@ int main() {
     setenv("GOW3_RENDER_RES", "", 1);
     assert(!FixedRenderSession() && !ResolutionNeedsRestart());
     unsetenv("GOW3_RENDER_RES");
+    // "Native (window)": the keyword round-trips, and a fixed size turns it off again.
+    {
+        const auto write_config = [&](const char* text) {
+            FILE* config = std::fopen(path, "w");
+            assert(config);
+            std::fputs(text, config);
+            std::fclose(config);
+        };
+        write_config("output_res=native\n");
+        Load();
+        assert(s.output_native);
+        Save();
+        Load();
+        assert(s.output_native);
+        assert(s.output_res >= 0 && s.output_res < OutputCount);
+        write_config("output_res=2560x1440\n");
+        Load();
+        assert(!s.output_native && s.output_res == 2);
+    }
     std::remove(path);
     std::puts("Upscaler support: saved choices and FSR 3.1 fallback PASS");
 }
