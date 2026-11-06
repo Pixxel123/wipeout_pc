@@ -146,6 +146,22 @@ def archive_args(game, unlinked, view):
     return [part for name, path in sorted(found.items()) for part in ('--archive', name, str(path))]
 
 
+def save_folder(env, data):
+    """The game's saves (as src/runtime_savedata.c): GOW3_SAVEDATA_DIR, else <user>/savedata."""
+    return Path(env.get('GOW3_SAVEDATA_DIR') or Path(env.get('GOW3_USER_DIR', data / 'user')) / 'savedata')
+
+
+def launch_style(env, savedata, title):
+    """WipEout's prompts at start: player 1's Controller type row as the save holds it
+    (scripts/pad_style_save.py), else the launcher's controller type, else PlayStation."""
+    import pad_style_save
+    saved = pad_style_save.saved_style(savedata, title, 'Pad Style P1')
+    if saved in pad_style_save.STYLES:
+        return saved
+    style = env.get('GOW3_PAD_STYLE')
+    return style if style in pad_style_save.STYLES else 'playstation'
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
@@ -258,13 +274,23 @@ def main():
         psarcs = archive_args(game, unlinked, update_view)
         run_script('menu_patches.py', game, '--out', out, *psarcs,  # Eliminator target slider limit (#89)
                    '--limit', env.get('GOW3_ELIMINATOR_LIMIT', '2000'))
-        # WipEout's own prompts and its Controls screen show the controller type's buttons.
-        style = env.get('GOW3_PAD_STYLE')
-        if style in ('xbox', 'nintendo') and profile['name'] == 'WipEout Omega Collection' and psarcs:
-            optional_script('wipeout_glyphs.py', game, '--out', out, '--style', style,
+        # WipEout: its Controls screens get a Controller type row per player (scripts/controller_row.py),
+        # which the game saves; the prompts start in player 1's choice and follow the rows while the
+        # game runs (src/runtime_glyphs.c). The Controls screen's controller picture is chosen here.
+        wipeout = bool(profile['name'] == 'WipEout Omega Collection' and psarcs)
+        if wipeout:
+            title = patches.game_title_id(game)
+            style = launch_style(env, save_folder(env, data), title)
+            if style in ('xbox', 'nintendo'):
+                optional_script('wipeout_glyphs.py', game, '--out', out, '--style', style,
+                                '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
+            # The Xbox picture's layout carries the rows (one patch per entry).
+            optional_script('xbox_controls.py' if style == 'xbox' else 'controller_row.py', game, '--out', out, *psarcs)
+            optional_script('wipeout_glyphs.py', game, '--out', out, '--swap-config', out / 'glyph_swap.txt',
                             '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
-            if style == 'xbox':
-                optional_script('xbox_controls.py', game, '--out', out, *psarcs)
+            env['GOW3_GLYPH_SWAP'] = str(out / 'glyph_swap.txt')
+            env['GOW3_GLYPH_STYLE'] = style  # what the file patches above load (src/runtime_glyphs.c)
+            derived += ['GOW3_GLYPH_SWAP', 'GOW3_GLYPH_STYLE']
         env['GOW3_FILE_PATCHES'] = str(out / 'file_patches.txt')
 
         from patches import game_profile_for, patch_requirements, patch_status, selected_patches
@@ -360,6 +386,13 @@ def main():
                 print(f'Saves backed up to {made}', flush=True)
         except OSError as error:
             print(f'Save backup failed, starting anyway: {error}', flush=True)
+        if wipeout:
+            import pad_style_save
+            try:
+                for path in pad_style_save.add_settings(save_folder(env, data), title, env.get('GOW3_PAD_STYLE')):
+                    print(f'Controller type: settings added to {path}', flush=True)
+            except OSError as error:
+                print(f'Controller type: the save was left as it is ({error})', flush=True)
         this = ['--run'] if getattr(sys, 'frozen', False) else [str(Path(__file__).resolve())]
         # Windows: the probe starts the new launch and ends, so it waits for this process. Linux:
         # the probe replaces itself with the new launch while this process still waits for it.

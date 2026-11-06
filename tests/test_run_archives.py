@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from paths import ROOT
@@ -26,6 +27,16 @@ class RunArchiveTests(unittest.TestCase):
             self.assertEqual(run.archive_args(base, {}, None),
                              ['--archive', 'data08.psarc', str(base / 'data08.psarc'),
                               '--archive', 'other.psarc', str(base / 'other.psarc')])
+
+    def test_saved_controller_type_wins_over_the_launcher(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch('pad_style_save.saved_style', return_value='xbox'):
+                self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'playstation'}, folder, 'CUSA07671'), 'xbox')
+            with mock.patch('pad_style_save.saved_style', return_value=None):
+                self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'nintendo'}, folder, 'CUSA07671'), 'nintendo')
+                self.assertEqual(run.launch_style({}, folder, 'CUSA07671'), 'playstation')
+            with mock.patch('pad_style_save.saved_style', return_value='motion off'):
+                self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'xbox'}, folder, 'CUSA07671'), 'xbox')
 
 
 if __name__ == '__main__':
