@@ -210,6 +210,9 @@ public:
     /// Returns a numeric scalar constant.
     Id Constant(Id result_type, const Literal& literal);
 
+    /// Returns a specialization constant: a default value the pipeline can replace (SpecId).
+    Id SpecConstant(Id result_type, const Literal& literal);
+
     /// Returns a numeric scalar constant.
     Id ConstantComposite(Id result_type, std::span<const Id> constituents);
 

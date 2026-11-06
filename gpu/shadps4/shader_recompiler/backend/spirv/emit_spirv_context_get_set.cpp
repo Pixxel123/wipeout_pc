@@ -130,7 +130,7 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
         const Id dimension = comp == 0
             ? ctx.OpBitwiseAnd(ctx.U32[1], packed, ctx.ConstU32(65535u))
             : ctx.OpShiftRightLogical(ctx.U32[1], packed, ctx.ConstU32(16u));
-        const Id native = ctx.ConstU32(comp == 0 ? 1920u : 1080u);
+        const Id native = comp == 0 ? ctx.guest_width : ctx.guest_height;
         const Id safe = ctx.OpSelect(ctx.U32[1],
             ctx.OpIEqual(ctx.U1[1], dimension, ctx.u32_zero_value), native, dimension);
         return ctx.OpFMul(ctx.F32[1], value, ctx.OpFDiv(ctx.F32[1],

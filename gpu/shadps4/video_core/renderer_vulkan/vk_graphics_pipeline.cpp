@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/elf_info.h"
+#include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
@@ -190,6 +191,20 @@ GraphicsPipeline::GraphicsPipeline(
         .pDynamicStates = dynamic_states.data(),
     };
 
+    // gow3: the guest's render size for FragCoord of reduced passes (spec constants 0 and 1).
+    static constexpr std::array<vk::SpecializationMapEntry, 2> guest_entries{{
+        {.constantID = 0, .offset = 0, .size = sizeof(u32)},
+        {.constantID = 1, .offset = sizeof(u32), .size = sizeof(u32)},
+    }};
+    const auto guest = SceneResolution::Guest();
+    const std::array<u32, 2> guest_size{guest.width, guest.height};
+    const vk::SpecializationInfo guest_spec{
+        .mapEntryCount = u32(guest_entries.size()),
+        .pMapEntries = guest_entries.data(),
+        .dataSize = sizeof(guest_size),
+        .pData = guest_size.data(),
+    };
+
     boost::container::static_vector<vk::PipelineShaderStageCreateInfo, MaxShaderStages>
         shader_stages;
     auto stage = u32(Shader::SwStage::Vertex);
@@ -252,6 +267,7 @@ GraphicsPipeline::GraphicsPipeline(
             .stage = vk::ShaderStageFlagBits::eFragment,
             .module = modules[stage],
             .pName = "main",
+            .pSpecializationInfo = &guest_spec,
         });
     } else if (runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs.clip_distance_emulation) {
         if (!preloading) {

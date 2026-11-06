@@ -355,6 +355,12 @@ void EmitContext::DefineInputs() {
             (info.loads.GetAny(IR::Attribute::BaryCoordPullModel) &&
              !profile.supports_amd_shader_explicit_vertex_parameter)) {
             frag_coord = DefineVariable(F32[4], spv::BuiltIn::FragCoord, spv::StorageClass::Input);
+            // gow3: the guest's render size (spec constants 0/1, set per pipeline): FragCoord of
+            // reduced passes converts back to it.
+            guest_width = SpecConstant(U32[1], 1920u);
+            guest_height = SpecConstant(U32[1], 1080u);
+            Decorate(guest_width, spv::Decoration::SpecId, 0u);
+            Decorate(guest_height, spv::Decoration::SpecId, 1u);
         }
         if (info.loads.Get(IR::Attribute::IsFrontFace)) {
             front_facing =
