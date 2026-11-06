@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <vector>
 #include <chrono>
 #include <cstdio>
@@ -35,6 +36,7 @@ extern "C" int runtime_wipeout_paused(void); // src/probe.c
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_descriptor_reuse.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_wait_diagnostics.h"
 
@@ -342,6 +344,23 @@ void VideoOutDriver::Flip(const Request& req) {
                 Gow3Stats::pipe_busy_cycles.load(std::memory_order_relaxed), __rdtsc()};
             std::fputs(Gow3FrameLog::Format(sample).c_str(), frame_log);
             std::fflush(frame_log); // the benchmark ends the game with a signal
+            // gow3: GOW3_DESCRIPTOR_REUSE_STATS=1: <frame log>.desc, the same flip's cumulative
+            // descriptor reuse counters (vk_descriptor_reuse.h).
+            static FILE* const desc_log = [] {
+                if (!DescriptorReuse::stats_enabled) {
+                    return static_cast<FILE*>(nullptr);
+                }
+                const std::string path = std::string(std::getenv("GOW3_FRAME_LOG")) + ".desc";
+                FILE* file = std::fopen(path.c_str(), "w");
+                if (file) {
+                    DescriptorReuse::WriteHeader(file);
+                }
+                return file;
+            }();
+            if (desc_log) {
+                DescriptorReuse::WriteLine(desc_log, sample.ms_of_day);
+                std::fflush(desc_log);
+            }
         }
         const double frame_ms = std::chrono::duration<double, std::milli>(now - last).count();
         worst_ms = std::max(worst_ms, frame_ms);

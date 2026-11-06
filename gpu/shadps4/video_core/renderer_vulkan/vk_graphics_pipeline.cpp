@@ -585,6 +585,7 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         .bindingCount = static_cast<u32>(bindings.size()),
         .pBindings = bindings.data(),
     };
+    layout_signature = LayoutSignature(desc_layout_ci);
     auto [layout_result, layout] =
         instance.GetDevice().createDescriptorSetLayoutUnique(desc_layout_ci);
     ASSERT_MSG(layout_result == vk::Result::eSuccess,

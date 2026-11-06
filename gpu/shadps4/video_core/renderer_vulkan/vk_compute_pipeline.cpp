@@ -82,6 +82,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .bindingCount = static_cast<u32>(bindings.size()),
         .pBindings = bindings.data(),
     };
+    layout_signature = LayoutSignature(desc_layout_ci);
     const auto device = instance.GetDevice();
     auto [descriptor_set_result, descriptor_set] =
         device.createDescriptorSetLayoutUnique(desc_layout_ci);

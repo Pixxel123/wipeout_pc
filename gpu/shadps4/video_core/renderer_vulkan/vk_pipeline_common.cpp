@@ -7,6 +7,7 @@
 #include <boost/container/static_vector.hpp>
 
 #include "shader_recompiler/resource.h"
+#include "video_core/renderer_vulkan/vk_descriptor_reuse.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
@@ -20,6 +21,107 @@
 #include <mutex>
 
 namespace Vulkan {
+
+namespace {
+// gow3: GOW3_DESCRIPTOR_REUSE_STATS (vk_descriptor_reuse.h).
+DescriptorReuse::Kind KindOf(vk::DescriptorType type) {
+    switch (type) {
+    case vk::DescriptorType::eStorageBuffer:
+    case vk::DescriptorType::eUniformBuffer:
+        return DescriptorReuse::Kind::Buffer;
+    case vk::DescriptorType::eSampledImage:
+    case vk::DescriptorType::eStorageImage:
+        return DescriptorReuse::Kind::Image;
+    case vk::DescriptorType::eSampler:
+        return DescriptorReuse::Kind::Sampler;
+    default:
+        return DescriptorReuse::Kind::Other;
+    }
+}
+
+template <typename T>
+u64 HandleBits(T handle) {
+    return reinterpret_cast<u64>(static_cast<typename T::CType>(handle));
+}
+
+/// Counts what this push could leave out against what the stream already holds, by content.
+void AccountReuse(Scheduler& scheduler, u32 point, const Pipeline::DescriptorWrites& set_writes,
+                  vk::PipelineLayout layout, u64 signature) {
+    using namespace DescriptorReuse;
+    thread_local std::vector<Element> elements;
+    thread_local std::vector<Write> writes;
+    thread_local std::vector<u32> bytes;
+    size_t total = 0;
+    for (const auto& w : set_writes) {
+        total += w.descriptorCount;
+    }
+    elements.clear();
+    elements.reserve(total); // no reallocation below: writes point into it
+    writes.clear();
+    bytes.clear();
+    for (const auto& w : set_writes) {
+        Write out{.binding = w.dstBinding,
+                  .first = w.dstArrayElement,
+                  .count = w.descriptorCount,
+                  .type = static_cast<u32>(w.descriptorType),
+                  .kind = KindOf(w.descriptorType),
+                  .supported = w.pNext == nullptr && !w.pTexelBufferView,
+                  .elements = elements.data() + elements.size()};
+        u32 info_size = 0;
+        switch (out.kind) {
+        case Kind::Buffer:
+            out.supported &= w.pBufferInfo != nullptr;
+            info_size = sizeof(vk::DescriptorBufferInfo);
+            break;
+        case Kind::Image:
+        case Kind::Sampler:
+            out.supported &= w.pImageInfo != nullptr;
+            info_size = sizeof(vk::DescriptorImageInfo);
+            break;
+        case Kind::Other:
+            out.supported = false;
+            info_size = w.pBufferInfo ? sizeof(vk::DescriptorBufferInfo)
+                        : w.pImageInfo ? sizeof(vk::DescriptorImageInfo)
+                                       : sizeof(vk::BufferView);
+            break;
+        }
+        for (u32 i = 0; i < w.descriptorCount; ++i) {
+            Element e{};
+            if (out.supported && out.kind == Kind::Buffer) {
+                const auto& info = w.pBufferInfo[i];
+                e = {HandleBits(info.buffer), info.offset, info.range};
+            } else if (out.supported && out.kind == Kind::Image) {
+                const auto& info = w.pImageInfo[i];
+                e = {HandleBits(info.imageView), static_cast<u64>(info.imageLayout), 0};
+            } else if (out.supported && out.kind == Kind::Sampler) {
+                e = {HandleBits(w.pImageInfo[i].sampler), 0, 0};
+            }
+            elements.push_back(e);
+        }
+        writes.push_back(out);
+        bytes.push_back(u32(sizeof(vk::WriteDescriptorSet) + w.descriptorCount * info_size));
+    }
+    Account(stats, point, scheduler.DescriptorShadow(point), scheduler.DescriptorLastPush(point),
+            scheduler.DescriptorEpochs(), writes.data(), writes.size(), bytes.data(),
+            HandleBits(layout), signature);
+}
+} // namespace
+
+u64 Pipeline::LayoutSignature(const vk::DescriptorSetLayoutCreateInfo& info) {
+    u64 h = 1469598103934665603ull;
+    const auto mix = [&h](u64 v) { h = (h ^ v) * 1099511628211ull; };
+    mix(static_cast<u32>(info.flags));
+    mix(info.bindingCount);
+    for (u32 i = 0; i < info.bindingCount; ++i) {
+        const auto& b = info.pBindings[i];
+        mix(b.binding);
+        mix(static_cast<u64>(b.descriptorType));
+        mix(b.descriptorCount);
+        mix(static_cast<u32>(b.stageFlags));
+        mix(b.pImmutableSamplers != nullptr);
+    }
+    return h;
+}
 
 Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorHeap& desc_heap_,
                    const Shader::Profile& profile_, vk::PipelineCache pipeline_cache,
@@ -45,7 +147,14 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
         return;
     }
 
+    const u32 point = IsCompute() ? 1 : 0;
+    if (DescriptorReuse::stats_enabled) {
+        DescriptorReuse::stats.Add(point, DescriptorReuse::Binds);
+    }
     if (uses_push_descriptors) {
+        if (DescriptorReuse::stats_enabled) {
+            AccountReuse(scheduler, point, set_writes, layout, layout_signature);
+        }
         if (!scheduler.IsRecordingDeferred()) {
             scheduler.Record([&](vk::CommandBuffer cmdbuf) {
                 cmdbuf.pushDescriptorSetKHR(bind_point, layout, 0, set_writes);
@@ -83,6 +192,11 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
         return;
     }
 
+    // gow3: binding a set disturbs what tracked pushes established on this bind point.
+    scheduler.InvalidateDescriptors(DescriptorReuse::Cause::SetFallback, point == 0, point == 1);
+    if (DescriptorReuse::stats_enabled) {
+        DescriptorReuse::stats.Add(point, DescriptorReuse::SetBinds);
+    }
     // Descriptor set updates are device calls: they stay on this thread.
     const auto desc_set = desc_heap.Commit(*desc_layout);
     for (auto& set_write : set_writes) {

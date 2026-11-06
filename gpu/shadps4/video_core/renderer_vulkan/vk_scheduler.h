@@ -24,6 +24,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/vk_descriptor_reuse.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 
@@ -721,11 +722,31 @@ public:
         return dynamic_state;
     }
 
+    /// gow3: marks the descriptors of the bind points as unknown to the tracking in
+    /// Pipeline::BindResources. Call before recording, in stream order, any command that binds
+    /// or pushes descriptors outside BindResources (Record() closures included).
+    void InvalidateDescriptors(DescriptorReuse::Cause cause, bool graphics, bool compute) {
+        descriptor_epochs.Invalidate(cause, graphics, compute);
+    }
+    DescriptorReuse::Epochs& DescriptorEpochs() {
+        return descriptor_epochs;
+    }
+    /// The descriptors tracked pushes established, per bind point (0 graphics, 1 compute).
+    /// Only the thread producing commands for this scheduler touches them.
+    DescriptorReuse::Shadow& DescriptorShadow(u32 point) {
+        return descriptor_shadows[point];
+    }
+    DescriptorReuse::LastPush& DescriptorLastPush(u32 point) {
+        return descriptor_last_push[point];
+    }
+
     /// Returns the current command buffer for recording on the calling thread. With threaded
     /// recording this first waits until all commands passed to Record() are recorded, then
     /// records directly (Record() included, so callers may mix both) until the next
     /// KickRecording() or submission.
     [[gnu::noinline]] vk::CommandBuffer CommandBuffer() {
+        // The caller may bind anything: tracked descriptors no longer describe the stream.
+        descriptor_epochs.Invalidate(DescriptorReuse::Cause::RawCommandBuffer, true, true);
         if (recording_threaded && !direct_mode) {
             SyncRecording();
             direct_mode = true;
@@ -897,6 +918,9 @@ private:
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;
+    DescriptorReuse::Epochs descriptor_epochs; // gow3
+    std::array<DescriptorReuse::Shadow, 2> descriptor_shadows;
+    std::array<DescriptorReuse::LastPush, 2> descriptor_last_push{};
     SubmitFunc on_submit{};
     vk::CommandBuffer current_cmdbuf;
     std::condition_variable_any event_cv;

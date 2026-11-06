@@ -63,6 +63,9 @@ public:
 protected:
     [[nodiscard]] std::string GetDebugString() const;
 
+    /// gow3: the value of layout_signature for a set layout.
+    [[nodiscard]] static u64 LayoutSignature(const vk::DescriptorSetLayoutCreateInfo& info);
+
     /// gow3: GOW3_WAVE_STATS=1: logs the subgroup width the driver compiled each stage of
     /// `pipeline` at (vk_wave_stats.h). Call once the pipeline exists.
     void RecordWaveSizes() const;
@@ -75,6 +78,9 @@ protected:
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
+    /// gow3: hash of the set layout's flags and bindings: equal for identically defined
+    /// (Vulkan-compatible) layouts of different pipelines (GOW3_DESCRIPTOR_REUSE_STATS).
+    u64 layout_signature{};
     bool uses_push_descriptors{};
     bool is_compute;
 };

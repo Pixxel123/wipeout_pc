@@ -958,6 +958,8 @@ bool TemporalUpscaler::RecordReactive(vk::ImageView color_view) {
     const auto& settings = Gow3Settings::Get();
     const std::array<float, 3> params{settings.reactive_scale, settings.reactive_max,
                                       settings.reactive_threshold};
+    // gow3: pushes compute descriptors outside Pipeline::BindResources.
+    scheduler.InvalidateDescriptors(DescriptorReuse::Cause::ComputePass, false, true);
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         const vk::ImageMemoryBarrier2 to_write{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
