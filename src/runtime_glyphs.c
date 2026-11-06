@@ -103,15 +103,21 @@ static void load_config(const char *path) {
     }
     fclose(f);
 }
-/* Whether the image is the build these offsets are for, read under fault recovery. */
+/* Whether the image is the build these offsets are for, read under fault recovery once; the
+ * switcher thread and the Accept hook share the answer. */
+static int build_state; /* 0 not checked, 1 the known build, -1 another */
 static int known_build(const unsigned char *image) {
+    const int state=__atomic_load_n(&build_state,__ATOMIC_ACQUIRE);
+    if (state) return state>0;
     sigjmp_buf recover;
     volatile int ok=0;
+    sigjmp_buf *const outer=runtime_fault_recover;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
         ok=!memcmp(image+GLYPH_GUARD_AT,glyph_guard,sizeof(glyph_guard));
     }
-    runtime_fault_recover=NULL;
+    runtime_fault_recover=outer;
+    __atomic_store_n(&build_state,ok ? 1 : -1,__ATOMIC_RELEASE);
     return ok;
 }
 /* Guest reads under fault recovery: 0 when a fault stopped them. */
@@ -220,6 +226,32 @@ static void *glyph_thread(void *unused) {
         }
     }
     return NULL;
+}
+/* The Controls screen's Accept (probe.c hook in its Update, game thread): its own code copies only
+ * the settings it knows into the profile, and a List row writes its setting only when its screen
+ * is left with previous="true", which Accept's redirect is not. So the open Controller type row's
+ * value is written here into its existing "Pad Style P<n>" setting. Only the screen's own row is
+ * open; nothing is written for a value that is not a known style or does not fit the node. */
+ABI void runtime_glyphs_accept(void) {
+    unsigned char *image=runtime_image_base();
+    if (!image || !known_build(image)) return;
+    static const char *const rows[2]={"FE_Pad Style P1","FE_Pad Style P2"};
+    static const char *const settings[2]={"Pad Style P1","Pad Style P2"};
+    volatile int committed[2]={-1,-1};
+    sigjmp_buf recover;
+    sigjmp_buf *const outer=runtime_fault_recover;
+    if (!sigsetjmp(recover,0)) {
+        runtime_fault_recover=&recover;
+        unsigned char *store=(unsigned char *)(uintptr_t)glyph_load64(image+GLYPH_STORE_AT);
+        for (int p=0; store && p<2; ++p) {
+            const char *value=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key(rows[p]));
+            const int style=glyph_style_index(value);
+            if (style>=0 && glyph_commit(store,glyph_key(settings[p]),glyph_style_names[style])) committed[p]=style;
+        }
+    }
+    runtime_fault_recover=outer;
+    for (int p=0;p<2;++p)
+        if (committed[p]>=0) printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_style_names[committed[p]]);
 }
 int runtime_glyphs_watches(const char *guest) {
     for (int i=0;i<texture_count;++i) if (!strcasecmp(textures[i].spec.guest,guest)) return 1;

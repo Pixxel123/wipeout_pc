@@ -125,4 +125,6 @@ uintptr_t runtime_memory_find(const unsigned char *const *blocks, const size_t *
 void runtime_glyphs_start(void);
 int runtime_glyphs_watches(const char *guest);
 void runtime_glyphs_read(const char *guest, int64_t at, int64_t n);
+/* WipEout's Controls screen Accept (probe.c hook, game thread): commits the Controller type rows. */
+ABI void runtime_glyphs_accept(void);
 #endif

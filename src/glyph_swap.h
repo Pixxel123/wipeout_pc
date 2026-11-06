@@ -4,9 +4,10 @@
 /* The side-effect-free parts of src/runtime_glyphs.c (WipEout CUSA07671, image offsets):
  * - the game's hash of setting and row names: CRC-32 (0xedb88320) from 0, inverted (0x401a08);
  * - its settings list: store at u64 [0x10ea398], head at store+0x580, node +0 u32 key, +0x48 u32
- *   value length with its NUL, +0x50 next, +0x68 the value;
+ *   value length with its NUL, +0x4c u32 capacity of the value, +0x50 next, +0x68 the value;
  * - its table of rows on open screens (0x11ac4c8): 256 value pointers, then 256 u64 keys at
- *   +0x800 (hash of "FE_" + the row's global) and 256 u32 counts at +0x1000;
+ *   +0x800 (hash of "FE_" + the row's global) and 256 u32 counts at +0x1000; a value pointer
+ *   points at the row's current-value field, a char * to the selected entry's value string;
  * - GOW3_GLYPH_SWAP lines (scripts/wipeout_glyphs.py variants()). */
 #include <stddef.h>
 #include <stdint.h>
@@ -46,6 +47,32 @@ static inline const char *glyph_setting(const unsigned char *store, uint32_t key
 static inline int glyph_row_open(const unsigned char *table, uint32_t key) {
     for (int i=0;i<GLYPH_ROWS;++i)
         if ((uint32_t)glyph_load64(table+0x800+8*i)==key && glyph_load32(table+0x1000+4*i)) return 1;
+    return 0;
+}
+/* The selected value of the open row with this key (the guest's string, not a copy); NULL when no
+ * open row has the key or its pointers are NULL. */
+static inline const char *glyph_row_value(const unsigned char *table, uint32_t key) {
+    for (int i=0;i<GLYPH_ROWS;++i) {
+        if ((uint32_t)glyph_load64(table+0x800+8*i)!=key || !glyph_load32(table+0x1000+4*i)) continue;
+        const unsigned char *field=(const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
+        return field ? (const char *)(uintptr_t)glyph_load64(field) : NULL;
+    }
+    return NULL;
+}
+/* Writes value (with its NUL) into the existing setting with this key when it fits the node's
+ * capacity; 1 when written. Never grows a node and never adds a missing one. The caller commits
+ * only values glyph_style_index() knows (>= 0). */
+static inline int glyph_commit(unsigned char *store, uint32_t key, const char *value) {
+    unsigned char *node=(unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
+    const size_t n=strlen(value)+1;
+    for (int i=0; node && i<GLYPH_MAX_NODES; ++i, node=(unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
+        if (glyph_load32(node)!=key) continue;
+        if (n>glyph_load32(node+0x4c)) return 0;
+        const uint32_t length=(uint32_t)n;
+        memcpy(node+0x68,value,n);
+        memcpy(node+0x48,&length,4);
+        return 1;
+    }
     return 0;
 }
 static inline int glyph_style_index(const char *value) {

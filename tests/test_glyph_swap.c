@@ -28,6 +28,34 @@ int main(void) {
     assert(glyph_row_open(table,glyph_key("FE_Pad Style P2")));
     assert(!glyph_row_open(table,glyph_key("FE_Pad Style P1")));
 
+    /* The open row's selected value: slot pointer -> current-value field -> string. */
+    static const char selected[]="nintendo";
+    uint64_t field=(uint64_t)(uintptr_t)selected;
+    put64(table+8*7,(uint64_t)(uintptr_t)&field);
+    assert(glyph_row_value(table,glyph_key("FE_Pad Style P2"))==selected);
+    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P1")));        /* no such row */
+    put32(table+0x1000+4*7,0);
+    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* not open */
+    put32(table+0x1000+4*7,1);
+    field=0;
+    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* NULL string */
+    put64(table+8*7,0);
+    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* NULL slot */
+
+    /* Commit: only into an existing node, only within its capacity. */
+    put64(b+0x50,0);
+    put32(b+0x4c,12);
+    assert(glyph_commit(store,glyph_key("Pad Style P1"),"nintendo"));
+    assert(glyph_load32(b+0x48)==9 && !strcmp((const char *)b+0x68,"nintendo"));
+    assert(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value)) && !strcmp(value,"nintendo"));
+    put32(b+0x4c,9);
+    assert(!glyph_commit(store,glyph_key("Pad Style P1"),"playstation")); /* 12 bytes > capacity 9 */
+    assert(glyph_load32(b+0x48)==9 && !strcmp((const char *)b+0x68,"nintendo"));
+    unsigned char before_a[sizeof(a)], before_b[sizeof(b)];
+    memcpy(before_a,a,sizeof(a)); memcpy(before_b,b,sizeof(b));
+    assert(!glyph_commit(store,glyph_key("Pad Style P2"),"xbox"));       /* missing: nothing written */
+    assert(!memcmp(before_a,a,sizeof(a)) && !memcmp(before_b,b,sizeof(b)));
+
     assert(glyph_style_index("playstation")==0 && glyph_style_index("xbox")==1 && glyph_style_index("nintendo")==2);
     assert(glyph_style_index("motion off")==-1 && glyph_style_index(NULL)==-1);
     assert(glyph_wanted(1,0,1)==0 && glyph_wanted(1,0,0)==1 && glyph_wanted(1,-1,1)==1 && glyph_wanted(-1,-1,0)==-1);

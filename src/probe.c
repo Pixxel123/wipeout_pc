@@ -962,6 +962,57 @@ static void install_wipeout_logs(Segment *segments, uint64_t count, int which) {
     printf("Load diagnostics: the game's loader errors and models not loaded go to this log\n");
 }
 
+/* WipEout (CUSA07671) Controls screen: Update's Accept branch (0x54848c) copies only the settings
+ * it knows into the profile, so the Controller type rows would not keep their value. After those
+ * copies, at 0x548590 (two whole instructions no branch targets), the stub calls
+ * runtime_glyphs_accept (src/runtime_glyphs.c), which writes each open row into its setting. The
+ * site's stack alignment and live vector registers are unknown: the stub keeps the caller-saved
+ * GPRs and xmm0-15 and aligns the stack itself; the replayed `or` sets the flags the code after it
+ * reads, as before. Returns the end of the stub. */
+static unsigned char *controller_accept_stub(unsigned char *p, const unsigned char *original, unsigned length,
+                                             uintptr_t helper, uintptr_t resume) {
+    static const unsigned char save[] = {0x50, 0x51, 0x52, 0x56, 0x57, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, /* rax..r11 */
+                                         0x55, 0x48, 0x89, 0xe5,                      /* push rbp; mov rbp,rsp */
+                                         0x48, 0x83, 0xe4, 0xf0,                      /* and rsp,-16 */
+                                         0x48, 0x81, 0xec, 0x00, 0x01, 0x00, 0x00};   /* sub rsp,256 */
+    static const unsigned char restore[] = {0x48, 0x89, 0xec, 0x5d,                  /* mov rsp,rbp; pop rbp */
+                                            0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58, 0x5f, 0x5e, 0x5a, 0x59, 0x58};
+    memcpy(p, save, sizeof(save)); p += sizeof(save);
+    for (int x = 0; x < 16; ++x) { /* movdqu [rsp+16*x],xmmx */
+        *p++ = 0xf3; if (x >= 8) *p++ = 0x44;
+        *p++ = 0x0f; *p++ = 0x7f; *p++ = (unsigned char)(0x84 | (x & 7) << 3); *p++ = 0x24;
+        const int32_t at = x * 16; memcpy(p, &at, 4); p += 4;
+    }
+    *p++ = 0x48; *p++ = 0xb8; memcpy(p, &helper, 8); p += 8; *p++ = 0xff; *p++ = 0xd0; /* mov rax,helper; call rax */
+    for (int x = 0; x < 16; ++x) { /* movdqu xmmx,[rsp+16*x] */
+        *p++ = 0xf3; if (x >= 8) *p++ = 0x44;
+        *p++ = 0x0f; *p++ = 0x6f; *p++ = (unsigned char)(0x84 | (x & 7) << 3); *p++ = 0x24;
+        const int32_t at = x * 16; memcpy(p, &at, 4); p += 4;
+    }
+    memcpy(p, restore, sizeof(restore)); p += sizeof(restore);
+    memcpy(p, original, length); p += length;
+    return put_jump(p, resume);
+}
+static void install_controller_accept(Segment *segments, uint64_t count) {
+    enum { SITE = 0x548590, LENGTH = 11 };
+    static const unsigned char original[LENGTH] = {
+        0x49, 0x8b, 0x85, 0x08, 0x02, 0x00, 0x00,  /* mov rax,[r13+208h] */
+        0x83, 0x48, 0x60, 0x02};                   /* or dword [rax+60h],2 */
+    if (!mapped(segments, count, SITE, LENGTH) || memcmp(image + SITE, original, LENGTH)) {
+        printf("Controller type: Accept hook unavailable (code differs in this eboot.bin)\n");
+        return;
+    }
+    unsigned char *stub = allocate(page_size);
+    controller_accept_stub(stub, original, LENGTH, (uintptr_t)runtime_glyphs_accept, (uintptr_t)(image + SITE + LENGTH));
+    protect(stub, page_size, 5);
+    /* rel32 jump: the stub is in the low mapping right after the image (allocate). */
+    if (!install_jump(SITE, LENGTH, stub)) {
+        printf("Controller type: Accept hook unavailable (hook outside relative-jump range)\n");
+        return;
+    }
+    printf("Controller type: Accept commits the rows\n");
+}
+
 /* Damage dealt/taken and green/blue/gold orb multipliers (src/damage_hook.h, src/orb_hook.h):
  * the stubs read the menu's floats directly, so changes apply on the next hit or pickup. */
 static void install_stat_multipliers(Segment *segments, uint64_t count, uint64_t size) {
@@ -1423,6 +1474,7 @@ int main(int argc, char **argv) {
     const char *load_log = getenv("GOW3_LOAD_LOG"); /* 0: off; 1: errors only; 2: slots only (tests) */
     if ((!strcmp(hooks_serial, "CUSA07671") || !strcmp(hooks_serial, "CUSA05670")) && !(load_log && *load_log == '0'))
         install_wipeout_logs(segments, ns, load_log && *load_log == '1' ? 1 : load_log && *load_log == '2' ? 2 : 3);
+    if (!strcmp(hooks_serial, "CUSA07671")) install_controller_accept(segments, ns);
     if (isa_table) {
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {
