@@ -25,11 +25,13 @@ public:
     ~SceneTargets();
     bool SetSize(SceneResolution::Size);
     SceneResolution::Size Size() const { return size; }
-    bool Reduced() const { return size != SceneResolution::Size{}; }
-    /// A reduced proxy can stand in for the image: a 1920x1080 scene target or, scaled by
-    /// the same factor, a half-resolution (960x540) one (toggle SceneHalfRes).
+    SceneResolution::Size Guest() const { return guest; }
+    void SetGuest(SceneResolution::Size g) { guest = g; size = g; }
+    bool Reduced() const { return size != guest; }
+    /// A reduced proxy can stand in for the image: a guest-size scene target or, scaled by
+    /// the same factor, a half-resolution (half the guest size) one (toggle SceneHalfRes).
     bool Eligible(const VideoCore::Image&) const;
-    /// Eligible at the full scene size (1920x1080): the upscaler's inputs, the scene start.
+    /// Eligible at the full scene size (the guest size): the upscaler's inputs, the scene start.
     bool EligibleScene(const VideoCore::Image&) const;
     /// The proxy size of an eligible image: the scene size divided like the native size.
     SceneResolution::Size ProxySize(const VideoCore::Image&, u32 level = 0) const;
@@ -96,7 +98,7 @@ private:
     Scheduler& scheduler;
     Runtime& runtime;
     Lookup lookup;
-    SceneResolution::Size size;
+    SceneResolution::Size size, guest;
     std::unordered_map<u64, std::unique_ptr<Entry>> entries; ///< by Key(uid, level)
     std::unordered_set<u64> tracked; ///< uids with proxies
     bool copying = false;

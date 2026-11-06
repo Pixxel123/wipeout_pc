@@ -10,12 +10,20 @@ struct Size {
     uint32_t width = 1920, height = 1080;
     bool operator==(const Size&) const = default;
 };
-inline Size ForPreset(int preset, Size output = {}) {
+inline Size ForPreset(int preset, Size output) {
     // Even dimensions for half-resolution effects; match the preset labels exactly.
     constexpr std::array<double, 5> scales{1.0, 1.5, 1.7, 2.0, 3.0};
     const double scale = scales[std::clamp(preset, 0, 4)];
     return {uint32_t(std::max(1l, std::lround(output.width / scale / 2)) * 2),
             uint32_t(std::max(1l, std::lround(output.height / scale / 2)) * 2)};
+}
+/// 1 for an image of the guest's size, 2 for exactly half of it (the game's half-resolution
+/// post targets; the scene must halve exactly), else 0.
+constexpr uint32_t SizeDivisor(Size image, Size guest, Size scene, bool half_res = true) {
+    if (image == guest) return 1;
+    return half_res && image.width * 2 == guest.width && image.height * 2 == guest.height &&
+                   scene.width % 2 == 0 && scene.height % 2 == 0
+               ? 2u : 0u;
 }
 constexpr uint32_t Pack(Size size) { return size.width | (size.height << 16); }
 constexpr Size Unpack(uint32_t packed) {

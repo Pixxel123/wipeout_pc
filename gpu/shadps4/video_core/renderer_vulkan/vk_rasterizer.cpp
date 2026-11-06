@@ -63,6 +63,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // submits after the presenter (and this) exist; until then the default hashes as before.
     liverpool->hash_registers = AmdGpu::HashRegisters(draw_prep ? draw_prep->WorkerCount() : 0);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
+    scene_targets->SetGuest(SceneResolution::Guest());
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
     camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
@@ -2949,7 +2950,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     // WipEout rule it meets, since "Scene pass:" lines below need scene_started already.
     if (scene_debug_frame && db_desc.first) {
         const auto& depth = texture_cache.GetImage(db_desc.first);
-        if (depth.info.size.width == 1920 && depth.info.size.height == 1080) {
+        if (depth.info.size.width == scene_targets->Guest().width &&
+            depth.info.size.height == scene_targets->Guest().height) {
             const auto describe = [&](VideoCore::ImageId id) {
                 if (!id) return std::string{"-"};
                 const auto& info = texture_cache.GetImage(id).info;
@@ -3265,12 +3267,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
 
     if (reduced) {
-        // Half-resolution passes keep the scene's factor (proxy / native = scene / 1920).
+        // Half-resolution passes keep the scene's factor (proxy / native = scene / guest).
         const auto size = scene_targets->Size();
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
-        target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        const auto guest = scene_targets->Guest();
+        target_scale = {float(size.width) / float(guest.width),
+                        float(size.height) / float(guest.height)};
     }
     if (census_on) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};

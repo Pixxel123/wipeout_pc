@@ -155,7 +155,7 @@ int main() {
     hi.size = {960, 540, 1};
     hi.resources = {4, 1};
     const auto half_id = images.insert(instance, runtime, views, hi);
-    const auto scene = SceneResolution::ForPreset(4); // 640x360 (x3 of 1080p)
+    const auto scene = SceneResolution::ForPreset(4, {1920, 1080}); // 640x360 (x3 of 1080p)
     targets.SetSize(scene);
     auto& half = images[half_id];
     assert(targets.Eligible(half) && !targets.EligibleScene(half));
