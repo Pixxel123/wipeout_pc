@@ -49,15 +49,18 @@ static void glyph_pause_ns(uint64_t ns) {
     nanosleep(&pause,NULL);
 #endif
 }
+/* The 64-byte window with the most distinct bytes, among those not starting with 0x00 or 0xFF
+ * (the search keys on the first byte; zero-filled memory would match it everywhere). */
 static size_t signature_at(const unsigned char *texels, size_t n) {
-    size_t at=0, best=0;
+    size_t at=0, best=0, any_at=0, any_best=0;
     for (size_t o=0; o+64<=n; o+=4096) {
         unsigned char seen[256]={0};
         size_t distinct=0;
         for (size_t i=0;i<64;++i) distinct+=!seen[texels[o+i]]++;
-        if (distinct>best) { best=distinct; at=o; }
+        if (distinct>any_best) { any_best=distinct; any_at=o; }
+        if (texels[o]!=0x00 && texels[o]!=0xff && distinct>best) { best=distinct; at=o; }
     }
-    return at;
+    return best ? at : any_at;
 }
 static unsigned char *read_file(const char *path, size_t *size) {
     FILE *f=fopen(path,"rb");

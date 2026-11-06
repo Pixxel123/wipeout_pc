@@ -843,12 +843,16 @@ int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, i
  * region unmapped or protected meanwhile) skip the region. A full search reads every mapping
  * once: call it only when needed, from a runtime thread. */
 static const unsigned char *find_bytes(const unsigned char *p, size_t n, const unsigned char *needle, size_t k) {
+#ifdef _WIN32 /* MinGW has no memmem */
     for (const unsigned char *end=p+n; p && (size_t)(end-p)>=k; ++p) {
         p=memchr(p,needle[0],(size_t)(end-p)-k+1);
         if (!p) return NULL;
         if (!memcmp(p,needle,k)) return p;
     }
     return NULL;
+#else
+    return memmem(p,n,needle,k);
+#endif
 }
 uintptr_t runtime_memory_find(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
                               int count, int *which) {
