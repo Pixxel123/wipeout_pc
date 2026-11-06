@@ -162,6 +162,28 @@ def launch_style(env, savedata, title):
     return style if style in pad_style_save.STYLES else 'playstation'
 
 
+def row_scripts(style, ready):
+    """[(script, options)] that draw WipEout's Controls screens' controller picture and put the
+    Controller type rows on them; the Xbox picture's layout carries the rows (one patch per entry).
+    ready: whether the saves hold the rows' settings (scripts/pad_style_save.py). The game saves a
+    row's value without checking that its setting exists, so without them there are no rows."""
+    if style == 'xbox':
+        return [('xbox_controls.py', [] if ready else ['--no-row'])]
+    return [('controller_row.py', [])] if ready else []
+
+
+def backup_saves(user_dir, env):
+    """Backs up the saves (scripts/save_backup.py); False when the backup failed."""
+    from save_backup import backup
+    try:
+        if made := backup(user_dir, savedata=env.get('GOW3_SAVEDATA_DIR')):
+            print(f'Saves backed up to {made}', flush=True)
+        return True
+    except OSError as error:
+        print(f'Save backup failed, starting anyway: {error}', flush=True)
+        return False
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
@@ -274,18 +296,34 @@ def main():
         psarcs = archive_args(game, unlinked, update_view)
         run_script('menu_patches.py', game, '--out', out, *psarcs,  # Eliminator target slider limit (#89)
                    '--limit', env.get('GOW3_ELIMINATOR_LIMIT', '2000'))
+        user_dir = Path(env.get('GOW3_USER_DIR', data / 'user')).resolve()  # saves, GPU caches (below)
         # WipEout: its Controls screens get a Controller type row per player (scripts/controller_row.py),
         # which the game saves; the prompts start in player 1's choice and follow the rows while the
         # game runs (src/runtime_glyphs.c). The Controls screen's controller picture is chosen here.
         wipeout = bool(profile['name'] == 'WipEout Omega Collection' and psarcs)
         if wipeout:
             title = patches.game_title_id(game)
-            style = launch_style(env, save_folder(env, data), title)
+            savedata = save_folder(env, data)
+            # The saves first: backed up, then given the rows' settings; the rows only once every
+            # save holds them.
+            import pad_style_save
+            try:
+                if backup_saves(user_dir, env):
+                    for path in pad_style_save.add_settings(savedata, title, env.get('GOW3_PAD_STYLE')):
+                        print(f'Controller type: settings added to {path}', flush=True)
+                ready = pad_style_save.settings_ready(savedata, title)
+            except OSError as error:
+                print(f'Controller type: the save was left as it is ({error})', flush=True)
+                ready = False
+            if not ready:
+                print("Controller type: the save could not take the row's settings; the Controls screens "
+                      'stay as they are', flush=True)
+            style = launch_style(env, savedata, title)
             if style in ('xbox', 'nintendo'):
                 optional_script('wipeout_glyphs.py', game, '--out', out, '--style', style,
                                 '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
-            # The Xbox picture's layout carries the rows (one patch per entry).
-            optional_script('xbox_controls.py' if style == 'xbox' else 'controller_row.py', game, '--out', out, *psarcs)
+            for script, options in row_scripts(style, ready):
+                optional_script(script, game, '--out', out, *options, *psarcs)
             optional_script('wipeout_glyphs.py', game, '--out', out, '--swap-config', out / 'glyph_swap.txt',
                             '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
             env['GOW3_GLYPH_SWAP'] = str(out / 'glyph_swap.txt')
@@ -376,23 +414,11 @@ def main():
 
         # The in-game restart starts this script again once this process is gone.
         # GPU caches (shaders, pipelines) beside the saves; read before main(), so set here.
-        user_dir = Path(env.get('GOW3_USER_DIR', data / 'user')).resolve()
         user_dir.mkdir(parents=True, exist_ok=True)
         (user_dir / 'music').mkdir(exist_ok=True)  # custom soundtrack (src/runtime_music.c)
         env.setdefault('GOW3_GPU_USER_DIR', str(user_dir))
-        from save_backup import backup
-        try:
-            if made := backup(user_dir, savedata=env.get('GOW3_SAVEDATA_DIR')):
-                print(f'Saves backed up to {made}', flush=True)
-        except OSError as error:
-            print(f'Save backup failed, starting anyway: {error}', flush=True)
-        if wipeout:
-            import pad_style_save
-            try:
-                for path in pad_style_save.add_settings(save_folder(env, data), title, env.get('GOW3_PAD_STYLE')):
-                    print(f'Controller type: settings added to {path}', flush=True)
-            except OSError as error:
-                print(f'Controller type: the save was left as it is ({error})', flush=True)
+        if not wipeout:  # WipEout's were backed up before its settings went in (above)
+            backup_saves(user_dir, env)
         this = ['--run'] if getattr(sys, 'frozen', False) else [str(Path(__file__).resolve())]
         # Windows: the probe starts the new launch and ends, so it waits for this process. Linux:
         # the probe replaces itself with the new launch while this process still waits for it.
