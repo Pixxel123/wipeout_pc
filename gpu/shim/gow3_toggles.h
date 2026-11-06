@@ -68,10 +68,16 @@ enum : std::uint64_t {
     // On by default (bit set: off): history of a thin feature this jitter phase missed is kept
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
+    /// WipEout's three-target scene pass starts the reduced-size scene; bit set: off, for A/B runs.
+    WipeoutSceneRaster = 1ull << 56,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
     /// A texture/storage request for the top rows of a cached image (same address and layout)
     /// uses that image, instead of creating and uploading a new one (texture_cache.cpp).
     PartialHeightViews = 1ull << 58,
+    /// An image only the CPU writes, written again in the flip it was re-uploaded in (a texture
+    /// the game streams into while draws bind it), stays unprotected until the next flip instead
+    /// of being re-protected and re-uploaded whole at every bind (TextureCache::InvalidateMemory).
+    DeferStreamedImageTracking = 1ull << 59,
     /// Up to 512 GPU readbacks pending instead of 64; when full, only the oldest is waited for
     /// instead of the whole GPU (TextureCache::ProcessDownloadImages).
     DeepReadbackQueue = 1ull << 60,
@@ -104,6 +110,8 @@ inline std::atomic<unsigned long> draw_rec_thread_id{0};
 inline std::atomic<unsigned long> vk_recorder_thread_id{0};
 /// TSC cycles the GPU command thread waited in DrawPipe::Drain for stage B (all time).
 inline std::atomic<std::uint64_t> pipe_drain_cycles{0};
+/// TSC cycles the draw recording thread (DrawPipe stage B) spent running packets (all time).
+inline std::atomic<std::uint64_t> pipe_busy_cycles{0};
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 /// Graphics memory by owner (GOW3_FRAME_STATS prints them once a second): images (bytes and
 /// count), device memory backing guest buffers, staging buffers.

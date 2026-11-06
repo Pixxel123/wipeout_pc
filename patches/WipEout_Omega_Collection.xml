@@ -44,8 +44,12 @@
         <PatchList>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="26b41740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="26b4973f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="26b49740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="26b41740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="26b4973f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="26b49740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="000a0000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -82,6 +86,9 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="00050000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="1c020000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Resolution Patch - 5120x2160" Note="Renders at 5120x2160 (2.370:1): output and half-resolution buffers at that size and the camera aspect ratio set to match. The camera keeps its vertical field of view, so the wider picture shows more at the sides (Hor+). HUD and menus stay 16:9 in the middle of the screen. Outside PS4 Pro mode the game gets 1 GB more of its own video memory for the bigger picture (DMEM to 1024 MB), so big races load." Author="d4g" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
@@ -94,8 +101,12 @@
             <Line Type="bytes" Address="0x00c6bb60" Value="0000004801000000" Pattern="00 00 00 08 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00 00 00 00 28 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00" At="0"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="26b41740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="26b4973f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="26b49740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="26b41740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="26b4973f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="26b49740" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="00140000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -132,6 +143,9 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="000a0000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="38040000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Resolution Patch - 720p" Note="Renders at 1280x720 (16:9): output and half-resolution buffers at that size. Same 16:9 view as the game, softer, for graphics cards that are short of speed or memory." Author="AbdelmoumenDeghbouche (sites by d4g)" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
@@ -310,8 +324,12 @@
             <Line Type="bytes" Address="0x00c6bb60" Value="0000004801000000" Pattern="00 00 00 08 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00 00 00 00 28 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00" At="0"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="8ee31840" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="8ee3983f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="8ee39840" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="8ee31840" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="8ee3983f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="8ee39840" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="700d0000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -348,14 +366,21 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="b8060000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="d0020000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Resolution Patch - 1920x1200" Note="Renders at 1920x1200 (16:10): output and half-resolution buffers at that size and the camera aspect ratio set to match. The camera keeps its vertical field of view, so the taller picture shows a little less at the sides. HUD and menus stay 16:9 in the middle of the screen." Author="AbdelmoumenDeghbouche (sites by d4g)" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
         <PatchList>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="cdcccc3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="cdcc4c3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="cdcc4c40" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="cdcccc3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="cdcc4c3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="cdcc4c40" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="80070000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -392,14 +417,21 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="c0030000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="58020000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Resolution Patch - 2560x1600" Note="Renders at 2560x1600 (16:10): output and half-resolution buffers at that size and the camera aspect ratio set to match. The camera keeps its vertical field of view, so the taller picture shows a little less at the sides. HUD and menus stay 16:9 in the middle of the screen." Author="AbdelmoumenDeghbouche (sites by d4g)" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
         <PatchList>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="cdcccc3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="cdcc4c3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="cdcc4c40" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="cdcccc3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="cdcc4c3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="cdcc4c40" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="000a0000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -436,6 +468,9 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="00050000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="20030000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Resolution Patch - 2880x1800" Note="Renders at 2880x1800 (16:10): output and half-resolution buffers at that size and the camera aspect ratio set to match. The camera keeps its vertical field of view, so the taller picture shows a little less at the sides. HUD and menus stay 16:9 in the middle of the screen. Outside PS4 Pro mode the game gets 1 GB more of its own video memory for the bigger picture (DMEM to 1024 MB), so big races load." Author="AbdelmoumenDeghbouche (sites by d4g)" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
@@ -448,8 +483,12 @@
             <Line Type="bytes" Address="0x00c6bb60" Value="0000004801000000" Pattern="00 00 00 08 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00 00 00 00 28 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00" At="0"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="cdcccc3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="cdcc4c3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="cdcc4c40" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="cdcccc3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="cdcc4c3f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="cdcc4c40" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="400b0000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -486,6 +525,9 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="a0050000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="84030000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Resolution Patch - 3840x1600" Note="Renders at 3840x1600 (2.400:1): output and half-resolution buffers at that size and the camera aspect ratio set to match. The camera keeps its vertical field of view, so the wider picture shows more at the sides (Hor+). HUD and menus stay 16:9 in the middle of the screen. Outside PS4 Pro mode the game gets 1 GB more of its own video memory for the bigger picture (DMEM to 1024 MB), so big races load." Author="AbdelmoumenDeghbouche (sites by d4g)" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
@@ -498,8 +540,12 @@
             <Line Type="bytes" Address="0x00c6bb60" Value="0000004801000000" Pattern="00 00 00 08 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00 00 00 00 28 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00" At="0"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="9a991940" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="9a99993f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="9a999940" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="9a991940" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="9a99993f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="9a999940" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="000f0000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -536,6 +582,9 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="80070000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="20030000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Resolution Patch - 5120x1440" Note="Renders at 5120x1440 (32:9): output and half-resolution buffers at that size and the camera aspect ratio set to match. The camera keeps its vertical field of view, so the wider picture shows more at the sides (Hor+). HUD and menus stay 16:9 in the middle of the screen. Needs more than 8 GB of video memory. Outside PS4 Pro mode the game gets 1 GB more of its own video memory for the bigger picture (DMEM to 1024 MB), so big races load." Author="AbdelmoumenDeghbouche (sites by d4g)" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
@@ -548,8 +597,12 @@
             <Line Type="bytes" Address="0x00c6bb60" Value="0000004801000000" Pattern="00 00 00 08 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00 00 00 00 28 01 00 00 00 00 00 00 10 00 00 00 00 00 80 00 00 00 00 00 00 00 70 05 00 00 00 00 00" At="0"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d08" Value="398e6340" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="12"/>
+            <Line Type="bytes" Address="0x00c60d00" Value="398ee33f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="4"/>
+            <Line Type="bytes" Address="0x00c60d04" Value="398ee340" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 9a 99" At="8"/>
             <!-- camera aspect ratio (16/9) -->
             <Line Type="bytes" Address="0x00c60d48" Value="398e6340" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="12"/>
+            <Line Type="bytes" Address="0x00c60d40" Value="398ee33f" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="4"/>
+            <Line Type="bytes" Address="0x00c60d44" Value="398ee340" Pattern="00 00 00 bf f3 8e 63 3f f3 8e 63 40 39 8e e3 3f 35 fa 0e 3c 00 00 80 bf 00 00" At="8"/>
             <!-- output size: minimum width -->
             <Line Type="bytes" Address="0x00bfa2e8" Value="00140000" Pattern="7a 00 00 8a 45 a0 b9 80 07 00 00 66 bf 80 07 bb" At="7"/>
             <!-- output size: width cap -->
@@ -586,6 +639,9 @@
             <Line Type="bytes" Address="0x00a4b5b9" Value="000a0000" Pattern="9c 00 01 0f 45 ce 69 d9 c0 03 00 00 20 c2 0f 44" At="8"/>
             <!-- half-resolution height multiple -->
             <Line Type="bytes" Address="0x00a4b5c4" Value="d0020000" Pattern="00 20 c2 0f 44 de 69 c1 1c 02 00 00 84 d2 89 9d" At="8"/>
+            <!-- PS4 Pro mode: its 2D/HDR layer buffer is 3840x2160 (0x7fbdfb), then stretched to the output;
+                 cmove -> mov keeps it at the output size (HDR at any size, SDR below 3840 wide) -->
+            <Line Type="bytes" Address="0x00bfbe0c" Value="4189c6904189cf90" Pattern="41 be 00 0f 00 00 41 bf 70 08 00 00 bf 30 00 00 00 44 0f 44 f0 44 0f 44 f9" At="17"/>
         </PatchList>
     </Metadata>
     <Metadata Title="WipEout Omega Collection" Name="Native 4K rendering (no checkerboard)" Note="From 3840 pixels wide the game switches to its 4K mode, which renders the scene at half width with checkerboard reconstruction (the Pro path). This keeps the 1080p mode at any size: the scene renders at full resolution with 4-sample depth, sharper and heavier on the GPU (over 100 FPS at 5120x2160 on an RTX 4090). Untick it for checkerboard. It changes nothing below 3840 pixels wide." Author="d4g" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="true">

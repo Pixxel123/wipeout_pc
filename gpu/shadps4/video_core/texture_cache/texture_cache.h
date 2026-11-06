@@ -217,7 +217,7 @@ public:
         std::scoped_lock lock{mutex};
         ApplyBackingWrites();
         Image& image = slot_images[image_id];
-        TrackImage(image_id);
+        TrackImageUnlessDeferred(image_id);
         TouchImage(image);
         RefreshImage(image);
         SynchronizeAlias(image_id);
@@ -325,10 +325,21 @@ public:
     }
 
     /// gow3: the color target of a CMask surface and the clear color it was last cleared with.
-    std::pair<ImageId, vk::ClearValue> MetaTarget(VAddr address) const {
+    /// Only a live, registered image that still owns the CMask: a stale entry (the image deleted,
+    /// or moved to another CMask) crashed a race in the clear (#135). Images go on guest threads.
+    std::pair<ImageId, vk::ClearValue> MetaTarget(VAddr address) {
+        std::scoped_lock lock{mutex};
         const auto it = surface_metas.find(address);
-        return it != surface_metas.end() ? std::pair{it->second.image, it->second.clear_value}
-                                         : std::pair{ImageId{}, vk::ClearValue{}};
+        if (it == surface_metas.end() || !it->second.image ||
+            !slot_images.is_allocated(it->second.image)) {
+            return {ImageId{}, vk::ClearValue{}};
+        }
+        const Image& image = slot_images[it->second.image];
+        if (False(image.flags & ImageFlagBits::Registered) ||
+            image.info.meta_info.cmask_addr != address) {
+            return {ImageId{}, vk::ClearValue{}};
+        }
+        return {it->second.image, it->second.clear_value};
     }
 
     void SetMetaClearValue(VAddr address, const vk::ClearValue& value) {
@@ -441,6 +452,9 @@ private:
 
     /// Track CPU reads and writes for image
     void TrackImage(ImageId image_id);
+    /// gow3: TrackImage, except for an image left unprotected for the rest of the flip of its
+    /// last CPU write (DeferStreamedImageTracking); a flip later it is re-read and tracked again.
+    void TrackImageUnlessDeferred(ImageId image_id);
     void TrackImageHead(ImageId image_id);
     void TrackImageTail(ImageId image_id);
 
@@ -455,7 +469,13 @@ private:
     void DeleteImage(ImageId image_id);
 
     /// Touch the image in the LRU cache.
-    void TouchImage(const Image& image);
+    /// Marks the image used in this GC tick (LRU). Inline: most lookups are already marked.
+    void TouchImage(const Image& image) {
+        if (image.lru_touched_tick != gc_tick) {
+            TouchImageSlow(image);
+        }
+    }
+    void TouchImageSlow(const Image& image);
 
     void FreeImage(ImageId image_id) {
         const auto& image = slot_images[image_id];

@@ -15,6 +15,7 @@
 #include <map>
 #ifdef _WIN32
 #include <windows.h>
+#include <psapi.h>
 #endif
 #include "common/serdes.h"
 #include "common/scope_exit.h"
@@ -26,11 +27,34 @@
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_amd_paths.h"
+#include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
+
+static_assert(int(vk::Result::eErrorOutOfHostMemory) == Vulkan::WarmupMemoryStop::OutOfHostMemory &&
+              int(vk::Result::eErrorOutOfDeviceMemory) == Vulkan::WarmupMemoryStop::OutOfDeviceMemory);
+
+namespace {
+/// gow3 (#149): the blocking warm-up keeps every cached pipeline it builds (about 9 GB of commit
+/// for 8,600 pipelines on an RTX 4070), and stopping only at the driver's own out-of-memory left
+/// the PC with 0.3 GB of commit. It stops while 4 GB is still free for the game and other programs;
+/// the rest compile when the game needs them.
+/// ponytail: fixed 4 GB margin; make it a setting if players need another one.
+bool LowOnCommit() {
+#ifdef _WIN32
+    MEMORYSTATUSEX memory{};
+    memory.dwLength = sizeof(memory);
+    if (GlobalMemoryStatusEx(&memory) && memory.ullAvailPageFile < (u64{4} << 30)) {
+        Vulkan::PreloadMemoryStop().Report(Vulkan::WarmupMemoryStop::OutOfHostMemory);
+        return true;
+    }
+#endif
+    return false;
+}
+} // namespace
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
@@ -293,6 +317,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                                                               : create(nullptr, used_info, false);
     };
     if (!enabled) {
+        g_compile_policy.Compiled(CompilePolicy::Now()); // gow3: no cache, every build compiles
         return create_any(info);
     }
     SCOPE_EXIT {
@@ -318,6 +343,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         !ValidKey(global) || !ValidKey(BinaryKey(pipeline_key))) {
         ++binary_errors;
         ++binary_misses;
+        g_compile_policy.Compiled(CompilePolicy::Now());
         return create_any(info);
     }
     const auto pipeline_id = BinaryKey(pipeline_key);
@@ -393,6 +419,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         destroy();
     }
     ++binary_misses;
+    g_compile_policy.Compiled(CompilePolicy::Now()); // gow3: a real compile
     flags.flags = vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)} |
                   vk::PipelineCreateFlagBits2::eCaptureDataKHR;
     auto result = create(nullptr, captured_info, false);
@@ -714,14 +741,21 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
 
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     ASSERT(is_new);
+    bool refused = false;
 
     if (warmup_pool) {
         // The slot stays null until WarmUp moves the built pipeline in (the map may rehash).
         warmup_pool->Push([this, key = compute_key, info = sel.infos[0], module = sel.modules[0],
                            sdata]() mutable {
+            if (PreloadMemoryStop().Stopped() || LowOnCommit()) {
+                return false; // #149: out of memory, the rest compile when needed
+            }
             auto pipeline = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap,
                                                               profile, *pipeline_cache, key, *info,
                                                               module, sdata, true);
+            if (!pipeline->Handle()) {
+                return false; // the driver refused it (#149); its reserved slot is dropped
+            }
             std::scoped_lock lock{warmup_results_mutex};
             warmup_compute.emplace_back(key, std::move(pipeline));
             return true;
@@ -730,12 +764,16 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key,
                                                        *sel.infos[0], sel.modules[0], sdata, true);
+        if (!it.value()->Handle()) {
+            compute_pipelines.erase(compute_key); // the driver refused it (#149)
+            refused = true;
+        }
     }
 
     sel.infos.fill(nullptr);
     sel.modules.fill(nullptr);
 
-    return true;
+    return !refused;
 }
 
 void GraphicsPipelineKey::Serialize(Serialization::Archive& ar) const {
@@ -807,6 +845,9 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         warmup_pool->Push([this, key = sel.graphics_key, infos = sel.infos,
                            runtime_infos = sel.runtime_infos, fetch = sel.fetch_shader,
                            modules = sel.modules, sdata]() mutable {
+            if (PreloadMemoryStop().Stopped() || LowOnCommit()) {
+                return false; // #149: out of memory, the rest compile when needed
+            }
             auto pipeline = std::make_unique<GraphicsPipeline>(
                 instance, scheduler, desc_heap, profile, key, *pipeline_cache, infos,
                 runtime_infos, fetch, modules, sdata, true);
@@ -933,6 +974,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     if (!CheckCacheProfile()) {
         return;
     }
+    PreloadMemoryStop().Reset();
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
@@ -980,7 +1022,8 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
             if (result) {
                 ++num_pipelines;
             }
-        });
+        },
+        [] { return PreloadMemoryStop().Stopped() || LowOnCommit(); }); // #149
 
     if (pool) {
         pool->Wait(report);
@@ -1007,6 +1050,27 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
                 num_total_pipelines,
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
                 warmup_threads);
+#ifdef _WIN32
+    // #149: memory after the bulk warm-up. The process figure is its private commit (the guest
+    // pool, a shared section committed before the warm-up, is not in it); the system figures
+    // include everything.
+    PROCESS_MEMORY_COUNTERS process_memory{};
+    MEMORYSTATUSEX system_memory{};
+    process_memory.cb = sizeof(process_memory);
+    system_memory.dwLength = sizeof(system_memory);
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), &process_memory, sizeof(process_memory)) &&
+        GlobalMemoryStatusEx(&system_memory)) {
+        std::printf("Pipeline warm-up: private commit of this process %llu MiB; system commit "
+                    "free %llu of %llu MiB\n",
+                    static_cast<unsigned long long>(process_memory.PagefileUsage >> 20),
+                    static_cast<unsigned long long>(system_memory.ullAvailPageFile >> 20),
+                    static_cast<unsigned long long>(system_memory.ullTotalPageFile >> 20));
+    }
+#endif
+    if (PreloadMemoryStop().Stopped()) {
+        std::printf("Pipeline warm-up: stopped early, memory ran low; the other "
+                    "cached pipelines compile when the game needs them\n");
+    }
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
     ReportPipelineBinaryCache();
     if (num_total_pipelines > num_pipelines) {
@@ -1306,6 +1370,9 @@ void PipelineCache::PumpWarmUp() {
                 built.compute = std::make_unique<ComputePipeline>(
                     instance, scheduler, desc_heap, profile, *pipeline_cache, compute_key,
                     *infos[0], modules[0], compute_data, true);
+                if (!built.compute->Handle()) {
+                    built.compute.reset(); // the driver refused it (#149): not published
+                }
             } else {
                 built.graphics = std::make_unique<GraphicsPipeline>(
                     instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,

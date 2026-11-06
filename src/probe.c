@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "runtime_online.h"
 #include "runtime.h"
 #include "cpu_check.h"
 #include "isa_rewrite.h"
@@ -1223,6 +1224,12 @@ int main(int argc, char **argv) {
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
     }
+    /* GOW3_NET_HOST=1: this game hosts the match server of online play (GOW3_NET_PORT, 7788). */
+    const char *net_host = getenv("GOW3_NET_HOST");
+    if (net_host && *net_host && *net_host != '0') {
+        const char *net_port = getenv("GOW3_NET_PORT");
+        if (runtime_matchserver_start((uint16_t)(net_port ? atoi(net_port) : 0))) fail("cannot host the match server (is the port in use?)");
+    }
     gow3gpu_register_kernel();
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
@@ -1372,6 +1379,9 @@ int main(int argc, char **argv) {
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         Gow3GpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        /* #149: the game's memory pool before the GPU, whose blocking shader warm-up can
+         * otherwise leave too little commit for it on Windows. */
+        if (runtime_memory_commit()) fail("the guest memory pool could not be created");
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (gow3gpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,gow3gpu_symbol_count());

@@ -336,6 +336,7 @@ void TextureCache::ProcessDownloadImages() {
             if (auto copy = RecordImageDownload(image_id)) {
                 if (!pending_readbacks.CanFit(copy->size)) {
                     scheduler.Finish();
+                    RetireReadbacks();
                     copy->staging.Invalidate();
                     Core::Memory::Instance()->TryWriteBacking(
                         std::bit_cast<u8*>(copy->guest_address), copy->staging.mapped, copy->size);
@@ -681,6 +682,17 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
             // Untrack the image, so that the range is unprotected and the guest can write freely.
             InvalidateAlias(image);
             image.flags |= ImageFlagBits::CpuDirty;
+            // gow3: a second fault in one flip means the guest is still writing after the
+            // re-upload. WipEout HD's grid intro streams ~42 MB into a bound 45 MB texture array:
+            // re-protecting it at every bind cost a fault and a whole re-upload each time (114 in
+            // two flips). Such an image stays unprotected until the next flip.
+            const u64 flip = Vulkan::FrameCapture::Flips();
+            if (image.cpu_dirty_flip == flip &&
+                False(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::Aliased)) &&
+                !Gow3Toggle::Disabled(Gow3Toggle::DeferStreamedImageTracking)) {
+                image.track_deferred = true;
+            }
+            image.cpu_dirty_flip = flip;
             UntrackImage(image_id);
         } else if (pages_end < image_end) {
             // This page access may or may not modify the image.
@@ -1518,7 +1530,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // are applied first, as UpdateImage does.
     if (!unmerged_levels.empty()) {
         ApplyBackingWrites();
-        TrackImage(image_id);
+        TrackImageUnlessDeferred(image_id);
         RefreshImage(slot_images[image_id]);
         for (const auto level_id : unmerged_levels) {
             if (False(slot_images[level_id].flags & ImageFlagBits::Registered)) {
@@ -1933,6 +1945,25 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     });
 }
 
+void TextureCache::TrackImageUnlessDeferred(ImageId image_id) {
+    auto& image = slot_images[image_id];
+    if (image.track_deferred) {
+        // Deferral starts only on images no GPU work writes, so GpuModified here means a GPU
+        // write bind (render target, depth or storage target, which set it before UpdateImage)
+        // or a GPU copy into the image: that ends the deferral at once.
+        if (image.cpu_dirty_flip == Vulkan::FrameCapture::Flips() &&
+            False(image.flags & ImageFlagBits::GpuModified) &&
+            !Gow3Toggle::Disabled(Gow3Toggle::DeferStreamedImageTracking)) {
+            return; // Still the flip of the last write: the guest may still be writing.
+        }
+        image.track_deferred = false;
+        // Writes made while unprotected took no fault: read the image again, before any GPU
+        // write, as when each of those writes faulted and dirtied it.
+        image.flags |= ImageFlagBits::CpuDirty;
+    }
+    TrackImage(image_id);
+}
+
 void TextureCache::TrackImage(ImageId image_id) {
     auto& image = slot_images[image_id];
     if (!(image.flags & ImageFlagBits::Registered)) {
@@ -2066,11 +2097,16 @@ void TextureCache::GarbageCollectImages() {
             // gow3 (#116): other programs' video memory shrinks the driver's budget. The limits
             // set at start (pressure at 19 GB of a 24 GB card) were never reached while the
             // budget ran out: out of memory loading the 8th race at 4K. They follow it now.
+            // gow3 (#27, #103): with 6 GB or more the start limits (pressure at ~40% of the card)
+            // evicted ~90,000 images in one 1080p 2048 race on 8 GB: re-uploads, and render targets
+            // back from stale guest memory. Those cards use the budget as integrated GPUs do;
+            // smaller cards keep the start limits, they ran out of memory with less room left.
             static const u64 start[3] = {trigger_gc_memory, pressure_gc_memory, critical_gc_memory};
             if (const u64 budget = instance.GetDeviceMemoryBudgetNow(); budget != 0) {
-                trigger_gc_memory = std::min(start[0], budget / 10 * 7);
-                pressure_gc_memory = std::min(start[1], budget / 100 * 85);
-                critical_gc_memory = std::min(start[2], budget / 100 * 95);
+                const bool roomy = budget >= 6_GB;
+                trigger_gc_memory = roomy ? budget / 10 * 7 : std::min(start[0], budget / 10 * 7);
+                pressure_gc_memory = roomy ? budget / 100 * 85 : std::min(start[1], budget / 100 * 85);
+                critical_gc_memory = roomy ? budget / 100 * 95 : std::min(start[2], budget / 100 * 95);
             }
         }
     }
@@ -2293,10 +2329,7 @@ void TextureCache::RunGarbageCollector() {
     GarbageCollectSamplers();
 }
 
-void TextureCache::TouchImage(const Image& image) {
-    if (image.lru_touched_tick == gc_tick) {
-        return;
-    }
+void TextureCache::TouchImageSlow(const Image& image) {
     image.lru_touched_tick = gc_tick;
     lru_cache.Touch(image.lru_id, gc_tick);
 }

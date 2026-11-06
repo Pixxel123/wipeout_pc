@@ -485,6 +485,18 @@ void ImageTab() {
         ImGui::EndDisabled();
         ImGui::EndTable();
     }
+    ImGui::SeparatorText("HDR");
+    if (BeginRows("##hdr")) {
+        ImGui::BeginDisabled(!s.hdr_active);
+        const char* off = s.hdr_active ? nullptr : "HDR is off: turn on HDR in the launcher and in Windows.";
+        SliderRow("HDR brightness", s.hdr_brightness, 10, 200, "%d%%",
+                  off ? off : "Brightness of the whole picture. 100%: the game's own.");
+        SliderRow("HDR peak brightness", s.hdr_peak, 100, 10000, "%d nits",
+                  off ? off : "Set it to your display's peak brightness: the brightest parts then keep "
+                              "their detail. 10000: no limit (the game's own).");
+        ImGui::EndDisabled();
+        ImGui::EndTable();
+    }
     ImGui::SeparatorText("Textures (applied on restart)");
     if (BeginRows("##textures")) {
         static const char* const anisotropy_labels[] = {"Game default", "2x", "4x", "8x", "16x"};
@@ -527,7 +539,8 @@ void PerformanceTab() {
         ChoiceRow("Frames queued", s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), "More frames queued: steadier FPS, slower response to input.");
         CheckRow("Compile new shaders in the background", s.async_shaders,
-                 "Fewer stutters in new areas; an object or effect may appear a moment later.");
+                 "Shaders seen for the first time on this PC: fewer stutters in new areas; an object "
+                 "or effect may appear a moment later. Shaders in the cache never wait.");
         ImGui::EndTable();
     }
     ImGui::SeparatorText("Applied on restart");
@@ -1007,6 +1020,30 @@ s64 NowMs() {
         .count();
 }
 
+/// Automated test runs (tools/deck/bench-run.sh) name the run, "<title> - test X of Y":
+/// GOW3_TEST_LABEL, shown in the top right corner for the whole run.
+const std::string& TestLabel() {
+    static const std::string label = [] {
+        const char* text = std::getenv("GOW3_TEST_LABEL");
+        return std::string(text ? text : "");
+    }();
+    return label;
+}
+
+void TestLabelWindow() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad, viewport->WorkPos.y + pad),
+                            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::Begin("##test_label", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(TestLabel().c_str());
+    ImGui::End();
+}
+
 bool NoticeActive() {
     return notice_until.load(std::memory_order_relaxed) > NowMs();
 }
@@ -1363,7 +1400,7 @@ void SetLoading(bool active, u32 done, u32 total) {
 bool Visible() {
     const auto& s = Gow3Settings::Get();
     return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
-                           choice_retiring || s.show_fps || NoticeActive() ||
+                           choice_retiring || s.show_fps || NoticeActive() || !TestLabel().empty() ||
                            (s.actor_watch_supported && s.enemy_health_bar));
 }
 
@@ -1434,6 +1471,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (NoticeActive()) {
         Notice();
+    }
+    if (!TestLabel().empty()) {
+        TestLabelWindow();
     }
     if (!loading && !menu_open) {
         HealthDisplay();
