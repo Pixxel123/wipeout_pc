@@ -2029,8 +2029,10 @@ class Launcher:
                  _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
         self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('What the upscaler produces; the HUD is drawn at this size too.',
-                   'Что выдаёт апскейлер; интерфейс рисуется в этом же размере.'), restart=True)
+                 _('These sizes and Native (window) apply at the native render resolution. '
+                   'Other render resolutions output at their own size.',
+                   'Эти размеры и Native (window) действуют при родном разрешении рендеринга. '
+                   'Другие разрешения выводятся в своём размере.'), restart=True)
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
                    'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)
