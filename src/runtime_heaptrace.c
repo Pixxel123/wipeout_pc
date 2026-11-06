@@ -8,6 +8,7 @@
  * directly in ~70 places, so the free itself (FUN_017f0f00: heap object, address) jumps here
  * first. Every live block of heap A is kept with the game code that asked for it; a thread
  * prints the callers with the most live memory, and how that changed, every 10 s. */
+#define _GNU_SOURCE /* pthread rwlocks and mmap under -std=c11 */
 #include "runtime.h"
 #include "gpu/gow3gpu.h"
 #include <inttypes.h>
@@ -16,12 +17,60 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
-/* ponytail: Windows only for now (VirtualAlloc/VirtualProtect/SRWLOCK). Linux keeps the v0.2.59
- * behaviour until a port is tested on Linux (#150). */
-void runtime_heap_trace_install(unsigned char *image, uint64_t size) { (void)image; (void)size; }
-#else
+#ifdef _WIN32
 #include <windows.h>
+typedef SRWLOCK Lock;
+#define LOCK_INIT SRWLOCK_INIT
+#define lock_shared(l) AcquireSRWLockShared(l)
+#define unlock_shared(l) ReleaseSRWLockShared(l)
+#define lock_exclusive(l) AcquireSRWLockExclusive(l)
+#define unlock_exclusive(l) ReleaseSRWLockExclusive(l)
+static void sleep_seconds(unsigned s) { Sleep(s * 1000); }
+static void *code_alloc(size_t size) {
+    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+}
+/* Writes code over the game's own instructions, keeping the pages' protection. */
+static int code_write(unsigned char *at, const void *bytes, size_t size) {
+    DWORD old;
+    if (!VirtualProtect(at, size, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    memcpy(at, bytes, size);
+    VirtualProtect(at, size, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, size);
+    return 1;
+}
+static void code_flush(void *at, size_t size) { FlushInstructionCache(GetCurrentProcess(), at, size); }
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+/* gow3: Linux port (#150). pthread rwlocks stand in for the SRW locks: neither is recursive,
+ * and the lock is only held for a table probe, or a copy of the table every 10 s. */
+typedef pthread_rwlock_t Lock;
+#define LOCK_INIT PTHREAD_RWLOCK_INITIALIZER
+#define lock_shared(l) pthread_rwlock_rdlock(l)
+#define unlock_shared(l) pthread_rwlock_unlock(l)
+#define lock_exclusive(l) pthread_rwlock_wrlock(l)
+#define unlock_exclusive(l) pthread_rwlock_unlock(l)
+static void sleep_seconds(unsigned s) { sleep(s); }
+static void *code_alloc(size_t size) {
+    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+}
+/* The install runs before probe.c's segment pass, while the image is still the PROT_READ |
+ * PROT_WRITE mapping allocate() made (the cheat and QTE hooks write it the same way); the pass
+ * then sets each segment's own protection. Linux cannot ask a page for its protection without
+ * reading /proc/self/maps, so the pages around the prologue are made RWX and left so: if the
+ * install ever moves after the segment pass, the free stays executable rather than faulting. */
+static int code_write(unsigned char *at, const void *bytes, size_t size) {
+    const uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t start = (uintptr_t)at & ~(page - 1);
+    const uintptr_t end = ((uintptr_t)at + size + page - 1) & ~(page - 1);
+    if (mprotect((void *)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC)) return 0;
+    memcpy(at, bytes, size);
+    __builtin___clear_cache((char *)at, (char *)at + size);
+    return 1;
+}
+static void code_flush(void *at, size_t size) { __builtin___clear_cache((char *)at, (char *)at + size); }
+#endif
 
 enum { GHIDRA_BASE = 0x1000000, VTABLE = 0x19977f0, HANDLE_A = 0x2212548, HEAP_A = 0x2212568,
        ALLOC_FN = 0x17f0af0, FREE_IMPL = 0x17f0f00, FREE_PROLOGUE = 12 };
@@ -42,7 +91,7 @@ static void *heap_a_impl; /* the heap object behind it */
 /* seq: the allocation's number (1, 2, ...), to tell what was placed after a hole was freed. */
 typedef struct { uint64_t address, size, caller, align, seq; } Block; /* address 0: empty, ~0: removed */
 static Block blocks[SLOTS];
-static SRWLOCK lock = SRWLOCK_INIT;
+static Lock lock = LOCK_INIT;
 static uint64_t alloc_seq; /* under the lock */
 
 /* gow3: freed holes. A 216 MiB eye target failed with 883 MiB free in 6217 gaps, the largest
@@ -55,7 +104,7 @@ typedef struct { uint64_t address, size, caller, freed_at; } Hole; /* address 0:
 static Hole holes[HOLES];
 static int next_hole;
 static atomic_int large_reports;
-static SRWLOCK report_lock = SRWLOCK_INIT; /* the report buffers; taken before the lock */
+static Lock report_lock = LOCK_INIT; /* the report buffers; taken before the lock */
 
 /* gow3: placement. The game's allocator (FUN_017f0af0) is best fit by size: every block goes
  * to the smallest free region it fits, wherever that is. The menu's render targets (682.7,
@@ -195,14 +244,14 @@ static int by_address(const void *a, const void *b) {
 static Hole hole_copy[HOLES];
 static uint64_t seq_copy;
 static size_t snapshot(void) {
-    AcquireSRWLockShared(&lock);
+    lock_shared(&lock);
     size_t n = 0;
     for (int i = 0; i < SLOTS; ++i) {
         if (blocks[i].address != 0 && blocks[i].address != ~0ull) sorted_blocks[n++] = blocks[i];
     }
     memcpy(hole_copy, holes, sizeof(holes));
     seq_copy = alloc_seq;
-    ReleaseSRWLockShared(&lock);
+    unlock_shared(&lock);
     qsort(sorted_blocks, n, sizeof(Block), by_address);
     return n;
 }
@@ -275,9 +324,9 @@ static void report_holes(size_t n, int all) {
 
 static void report_gaps(uint64_t wanted) {
     const size_t n = snapshot();
-    AcquireSRWLockShared(&lock);
+    lock_shared(&lock);
     const uint64_t low = span_low, high = span_high;
-    ReleaseSRWLockShared(&lock);
+    unlock_shared(&lock);
     uint64_t top[5] = {0}, top_at[5] = {0}, free_total = 0, fitting = 0, gaps = 0;
     uint64_t cursor = low;
     for (size_t i = 0; i <= n; ++i) {
@@ -339,7 +388,7 @@ static ABI uint64_t traced_alloc(void *handle, uint64_t size, uint64_t align, ui
     const int top = game_caller >= RT_FN_START && game_caller < RT_FN_END;
     uint64_t address = 0;
     if (own_heap) {
-        AcquireSRWLockExclusive(&lock);
+        lock_exclusive(&lock);
         if (!own_ready) {
             uint64_t base = 0, total = 0;
             memcpy(&base, heap_a_impl, 8);
@@ -358,7 +407,7 @@ static ABI uint64_t traced_alloc(void *handle, uint64_t size, uint64_t align, ui
             address = own_alloc(block_size, align & 0xffffffffu, top);
             if (address) own_counters((int64_t)block_size, 1);
         }
-        ReleaseSRWLockExclusive(&lock);
+        unlock_exclusive(&lock);
         if (!own_ready) address = original_alloc(handle, size, align, flags);
     } else {
         address = original_alloc(handle, size, align, flags);
@@ -367,9 +416,9 @@ static ABI uint64_t traced_alloc(void *handle, uint64_t size, uint64_t align, ui
         /* The game draws or copies into what it gets back: a null here is a GPU write to
          * address 0 (device lost) or a memcpy to it. Always said, and at once. */
         const unsigned long long n = atomic_fetch_add(&failed_allocs, 1) + 1;
-        AcquireSRWLockShared(&lock);
+        lock_shared(&lock);
         const uint64_t live = live_bytes;
-        ReleaseSRWLockShared(&lock);
+        unlock_shared(&lock);
         if (n <= 20) {
             /* The heap object's own totals: +0x10 its size, +0x18 bytes in use. */
             uint64_t heap_total = 0, heap_used = 0;
@@ -383,15 +432,15 @@ static ABI uint64_t traced_alloc(void *handle, uint64_t size, uint64_t align, ui
                    (double)live / 1048576.0, n);
             fflush(stdout);
             if (n <= 3) {
-                AcquireSRWLockExclusive(&report_lock);
+                lock_exclusive(&report_lock);
                 report_gaps(block_size);
-                ReleaseSRWLockExclusive(&report_lock);
+                unlock_exclusive(&report_lock);
             }
         }
         return address;
     }
     Hole reused = {0};
-    AcquireSRWLockExclusive(&lock);
+    lock_exclusive(&lock);
     if (block_size >= LARGE) {
         for (int k = 0; k < HOLES; ++k)
             if (holes[k].address && overlaps(holes[k].address, holes[k].size, address, block_size))
@@ -399,9 +448,9 @@ static ABI uint64_t traced_alloc(void *handle, uint64_t size, uint64_t align, ui
         drop_holes(address, block_size);
     }
     track(address, block_size, caller, align);
-    ReleaseSRWLockExclusive(&lock);
+    unlock_exclusive(&lock);
     if (block_size >= LARGE && atomic_fetch_add(&large_reports, 1) < LARGE_REPORTS) {
-        AcquireSRWLockExclusive(&report_lock);
+        lock_exclusive(&report_lock);
         printf("Heap: %.1f MiB to %#llx at %#llx%s, ", (double)block_size / 1048576.0,
                (unsigned long long)game_caller, (unsigned long long)address,
                own_heap ? (top ? " (top down)" : " (bottom up)") : "");
@@ -413,7 +462,7 @@ static ABI uint64_t traced_alloc(void *handle, uint64_t size, uint64_t align, ui
             printf("not in a freed hole\n");
         report_holes(snapshot(), 0);
         fflush(stdout);
-        ReleaseSRWLockExclusive(&report_lock);
+        unlock_exclusive(&report_lock);
     }
     return address;
 }
@@ -442,7 +491,7 @@ static ABI void traced_free(void *heap, uint64_t address) {
     uint64_t freed = 0;
     int known = 0;
     if (heap == heap_a_impl && address) {
-        AcquireSRWLockExclusive(&lock);
+        lock_exclusive(&lock);
         for (uint64_t i = slot_of(address), n = 0; n < SLOTS; ++n, i = (i + 1) & (SLOTS - 1)) {
             if (blocks[i].address == 0) break;
             if (blocks[i].address == address) {
@@ -464,7 +513,7 @@ static ABI void traced_free(void *heap, uint64_t address) {
             own_free(address, freed);
             own_counters(-(int64_t)freed, -1);
         }
-        ReleaseSRWLockExclusive(&lock);
+        unlock_exclusive(&lock);
     }
     if (heap == heap_a_impl && own_ready) {
         /* The game's trees never held this block. */
@@ -491,12 +540,12 @@ static double mib(uint64_t bytes) { return (double)bytes / 1048576.0; }
 static void *report_thread(void *unused) {
     (void)unused;
     for (;;) {
-        Sleep(10000);
-        AcquireSRWLockExclusive(&lock);
+        sleep_seconds(10);
+        lock_exclusive(&lock);
         memcpy(copy, blocks, sizeof(copy));
         const uint64_t peak = peak_bytes;
         peak_bytes = live_bytes; /* each report's peak is that of its own 10 s */
-        ReleaseSRWLockExclusive(&lock);
+        unlock_exclusive(&lock);
         if (peak > peak_reported) peak_reported = peak;
         for (int c = 0; c < CALLERS; ++c) callers[c].bytes = callers[c].count = 0;
         uint64_t total = 0, live = 0;
@@ -565,8 +614,7 @@ void runtime_heap_trace_install(unsigned char *image, uint64_t size) {
     heap_a = image + (HANDLE_A - GHIDRA_BASE);
     heap_a_impl = image + (HEAP_A - GHIDRA_BASE);
     /* The free's first instructions, then a jump back past them. */
-    unsigned char *trampoline =
-        VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    unsigned char *trampoline = code_alloc(4096);
     if (!trampoline) return;
     memcpy(trampoline, free_prologue, FREE_PROLOGUE);
     const uint64_t back = (uint64_t)(free_code + FREE_PROLOGUE);
@@ -575,17 +623,17 @@ void runtime_heap_trace_install(unsigned char *image, uint64_t size) {
     memcpy(trampoline + 14, &back, 8);
     trampoline[22] = 0xff;
     trampoline[23] = 0xe0; /* jmp rax */
-    FlushInstructionCache(GetCurrentProcess(), trampoline, 24);
+    code_flush(trampoline, 24);
     original_free = (FreeFn)(void *)trampoline;
     const uint64_t hooked_alloc = (uint64_t)traced_alloc, hooked_free = (uint64_t)traced_free;
     memcpy(image + vtable + 0x10, &hooked_alloc, 8);
     unsigned char jump[FREE_PROLOGUE] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0};
     memcpy(jump + 2, &hooked_free, 8); /* mov rax, traced_free; jmp rax */
-    DWORD old;
-    VirtualProtect(free_code, FREE_PROLOGUE, PAGE_EXECUTE_READWRITE, &old);
-    memcpy(free_code, jump, FREE_PROLOGUE);
-    VirtualProtect(free_code, FREE_PROLOGUE, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), free_code, FREE_PROLOGUE);
+    if (!code_write(free_code, jump, FREE_PROLOGUE)) {
+        memcpy(image + vtable + 0x10, &alloc_ptr, 8); /* neither hook, rather than half */
+        printf("Heap trace: the GPU heap's free could not be patched; not tracing\n");
+        return;
+    }
     const char *game_placement = getenv("GOW3_HEAP_GAME_PLACEMENT");
     own_heap = !(game_placement && *game_placement == '1');
     /* GOW3_HEAP_TRACE=1: every 10 s, the game code holding the most heap memory. */
@@ -596,4 +644,3 @@ void runtime_heap_trace_install(unsigned char *image, uint64_t size) {
         printf("Heap trace: allocations of the GPU heap are traced\n");
     }
 }
-#endif
