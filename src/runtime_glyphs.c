@@ -284,21 +284,23 @@ ABI void runtime_glyphs_accept(void) {
     if (!image || !known_build(image)) return;
     static const char *const rows[2]={"FE_Pad Style P1","FE_Pad Style P2"};
     static const char *const settings[2]={"Pad Style P1","Pad Style P2"};
-    volatile int committed[2]={-1,-1};
+    volatile int style[2]={-1,-1}, committed[2]={0,0};
     sigjmp_buf recover;
     sigjmp_buf *const outer=runtime_fault_recover;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
         unsigned char *store=(unsigned char *)(uintptr_t)glyph_load64(image+GLYPH_STORE_AT);
         for (int p=0; store && p<2; ++p) {
-            const char *value=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key(rows[p]));
-            const int style=glyph_style_index(value);
-            if (style>=0 && glyph_commit(store,glyph_key(settings[p]),glyph_style_names[style])) committed[p]=style;
+            style[p]=glyph_style_index(glyph_row_value(image+GLYPH_TABLE_AT,glyph_key(rows[p])));
+            if (style[p]>=0) committed[p]=glyph_commit(store,glyph_key(settings[p]),glyph_style_names[style[p]]);
         }
     }
     runtime_fault_recover=outer;
-    for (int p=0;p<2;++p)
-        if (committed[p]>=0) printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_style_names[committed[p]]);
+    for (int p=0;p<2;++p) {
+        if (style[p]<0) continue;
+        if (committed[p]) printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_style_names[style[p]]);
+        else printf("Runtime: Controller type P%d not kept (%s: no setting it fits in)\n",p+1,glyph_style_names[style[p]]);
+    }
 }
 int runtime_glyphs_watches(const char *guest) {
     for (int i=0;i<texture_count;++i) if (!strcasecmp(textures[i].spec.guest,guest)) return 1;

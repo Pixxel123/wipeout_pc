@@ -60,16 +60,18 @@ static inline const char *glyph_row_value(const unsigned char *table, uint32_t k
     return NULL;
 }
 /* Writes value (with its NUL) into the existing setting with this key when it fits the node's
- * capacity; 1 when written. Never grows a node and never adds a missing one. The caller commits
- * only values glyph_style_index() knows (>= 0). */
+ * capacity, the rest of the capacity zeroed, as the game's own in-place write (0x696300) does; 1
+ * when written. Never grows a node and never adds a missing one. The caller commits only values
+ * glyph_style_index() knows (>= 0). */
 static inline int glyph_commit(unsigned char *store, uint32_t key, const char *value) {
     unsigned char *node=(unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
     const size_t n=strlen(value)+1;
     for (int i=0; node && i<GLYPH_MAX_NODES; ++i, node=(unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
         if (glyph_load32(node)!=key) continue;
-        if (n>glyph_load32(node+0x4c)) return 0;
-        const uint32_t length=(uint32_t)n;
+        const uint32_t capacity=glyph_load32(node+0x4c), length=(uint32_t)n;
+        if (n>capacity) return 0;
         memcpy(node+0x68,value,n);
+        memset(node+0x68+n,0,capacity-n);
         memcpy(node+0x48,&length,4);
         return 1;
     }

@@ -47,6 +47,10 @@ int main(void) {
     put32(b+0x4c,12);
     assert(glyph_commit(store,glyph_key("Pad Style P1"),"nintendo"));
     assert(glyph_load32(b+0x48)==9 && !strcmp((const char *)b+0x68,"nintendo"));
+    b[0x68+12]=0x55;                                                       /* past the capacity */
+    assert(glyph_commit(store,glyph_key("Pad Style P1"),"xbox"));          /* the rest is zeroed */
+    assert(glyph_load32(b+0x48)==5 && !memcmp(b+0x68,"xbox\0\0\0\0\0\0\0\0",12) && b[0x68+12]==0x55);
+    assert(glyph_commit(store,glyph_key("Pad Style P1"),"nintendo"));
     assert(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value)) && !strcmp(value,"nintendo"));
     put32(b+0x4c,9);
     assert(!glyph_commit(store,glyph_key("Pad Style P1"),"playstation")); /* 12 bytes > capacity 9 */
