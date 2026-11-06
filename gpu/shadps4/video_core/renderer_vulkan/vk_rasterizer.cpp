@@ -2674,7 +2674,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
             if (FrameCapture::Active()) {
-                FrameCapture::Sampled(image.info, is_storage);
+                FrameCapture::Sampled(image.info, is_storage, desc.view_info.range.base.level,
+                                      desc.view_info.range.extent.levels, desc.view_info.min_lod);
             }
 
             vk::ImageView view = *image_view.image_view;
@@ -2732,6 +2733,9 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
+        if (FrameCapture::Active()) {
+            FrameCapture::SampledWith(ssharp, sampler.is_depth ? 0.0f : sampler_lod_bias);
+        }
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
