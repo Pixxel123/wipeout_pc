@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Live controller glyphs (WipEout, the Controls screens' Controller type rows):
  * GOW3_GLYPH_SWAP=<file> names the button font's atlas and tab textures and a file of each style's
- * version (scripts/wipeout_glyphs.py --swap-config). A thread reads the game's settings "Pad Style
- * P1" and "Pad Style P2" and whether player 2's row is on screen (src/glyph_swap.h) four times a
- * second; when the wanted style changes it finds each texture in guest memory by its bytes
- * (runtime_memory_find) and writes the wanted style's texels over it. Plain writes, as the game's
+ * version (scripts/wipeout_glyphs.py --swap-config). A thread reads four times a second the live
+ * value of an open Controller type row and the game's setting "Pad Style P1" (src/glyph_swap.h):
+ * an open row's value is shown as it changes, else the saved P1. When the wanted style changes it
+ * finds each texture's copies in guest memory by their bytes (runtime_memory_find_all, up to
+ * GLYPH_MAX_COPIES) and writes the wanted style's texels over each. Plain writes, as the game's
  * own: the GPU's page tracking uploads the texture again. Smooth play first: nothing is searched
- * or written unless the wanted style changed or the game has just read a texture from its archive
- * (then the texture may have moved), and a texture is written only where its whole texels were
- * just checked to be the version thought to be there. Offsets are CUSA07671's (glyph_swap.h);
+ * or written unless the wanted style changed, a row has just opened (a menu screen) or the game
+ * has just read a texture from its archive (then the texture may have moved), and a copy is
+ * written only where its whole texels were just checked to be the version thought to be there. Offsets are CUSA07671's (glyph_swap.h);
  * another build (no List_Item.cpp path at 0x87f142) leaves everything alone. */
 #define _GNU_SOURCE
 #include "runtime.h"
@@ -20,7 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { GLYPH_MAX_TEXTURES=8 };
+enum { GLYPH_MAX_TEXTURES=8, GLYPH_MAX_COPIES=4 };
 #define GLYPH_GUARD_AT 0x87f142
 #define GLYPH_STORE_AT 0x10ea398
 #define GLYPH_TABLE_AT 0x11ac4c8
@@ -30,8 +31,10 @@ typedef struct {
     GlyphTexture spec;
     unsigned char *data[GLYPH_STYLES]; /* whole files; texels from spec.skip */
     size_t size[GLYPH_STYLES], sig_at[GLYPH_STYLES];
-    unsigned char *at;   /* the texels in guest memory, or NULL */
-    int shown;           /* the style at `at` */
+    unsigned char *at[GLYPH_MAX_COPIES]; /* the copies of the texels in guest memory */
+    int at_style[GLYPH_MAX_COPIES];      /* the style each copy holds */
+    int copies;          /* how many places are known; 0 none */
+    int shown;           /* the style all copies hold (as loaded while none is known), or -1 */
     int failed_for;      /* the wanted style a search last failed for, or -2 */
     uint64_t read_at;    /* ns of the last read of its archive range; 0 when handled */
     int reloaded;        /* read again since the last search: only the start style is looked for */
@@ -120,44 +123,55 @@ static int known_build(const unsigned char *image) {
     __atomic_store_n(&build_state,ok ? 1 : -1,__ATOMIC_RELEASE);
     return ok;
 }
-/* Guest reads under fault recovery: 0 when a fault stopped them. */
-static int read_state(const unsigned char *image, int *p1, int *p2, int *p2_open) {
+/* Guest reads under fault recovery: 0 when a fault stopped them. The live values are those of
+ * open Controller type rows (-1 when not open), rows_open whether either row is open. */
+static int read_state(const unsigned char *image, int *saved_p1, int *live_p1, int *live_p2, int *rows_open) {
     sigjmp_buf recover;
     volatile int ok=0;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
         const unsigned char *store=(const unsigned char *)(uintptr_t)glyph_load64(image+GLYPH_STORE_AT);
         char value[64];
-        *p1=store ? glyph_style_index(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value))) : -1;
-        *p2=store ? glyph_style_index(glyph_setting(store,glyph_key("Pad Style P2"),value,sizeof(value))) : -1;
-        *p2_open=glyph_row_open(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P2"));
+        *saved_p1=store ? glyph_style_index(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value))) : -1;
+        const char *row1=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P1"));
+        const char *row2=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P2"));
+        *live_p1=glyph_style_index(row1);
+        *live_p2=glyph_style_index(row2);
+        *rows_open=row1 || row2;
         ok=1;
     }
     runtime_fault_recover=NULL;
     return ok;
 }
-/* Whether t->at still holds the whole texels of t->shown. */
-static int still_there(const Texture *t) {
+/* Whether copy i still holds the whole texels of its style. */
+static int still_there(const Texture *t, int i) {
     sigjmp_buf recover;
     volatile int ok=0;
-    if (!t->at || t->shown<0 || !t->data[t->shown]) return 0;
+    const int style=t->at_style[i];
+    if (!t->at[i] || style<0 || !t->data[style]) return 0;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
-        ok=glyph_verify(t->at,t->data[t->shown]+t->spec.skip,t->size[t->shown]);
+        ok=glyph_verify(t->at[i],t->data[style]+t->spec.skip,t->size[style]);
     }
     runtime_fault_recover=NULL;
     return ok;
 }
-/* Writes style `want` over t's texels once they are checked to be t->shown's; 1 when done. */
-static int write_style(Texture *t, int want) {
+/* Whether copies are known and every one is still as it was left. */
+static int all_there(const Texture *t) {
+    for (int i=0;i<t->copies;++i) if (!still_there(t,i)) return 0;
+    return t->copies>0;
+}
+/* Writes style `want` over copy i once its texels are checked to be its style's; 1 when done. */
+static int write_style(Texture *t, int i, int want) {
     sigjmp_buf recover;
     volatile int ok=0;
     const size_t n=t->size[want];
-    if (!t->at || t->shown<0 || t->size[t->shown]!=n) return 0;
+    const int style=t->at_style[i];
+    if (!t->at[i] || style<0 || t->size[style]!=n) return 0;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
-        if (glyph_verify(t->at,t->data[t->shown]+t->spec.skip,n)) {
-            memcpy(t->at,t->data[want]+t->spec.skip,n);
+        if (glyph_verify(t->at[i],t->data[style]+t->spec.skip,n)) {
+            memcpy(t->at[i],t->data[want]+t->spec.skip,n);
             ok=1;
         }
     }
@@ -171,12 +185,31 @@ static void locate(Texture *t) {
     for (int s=0;s<GLYPH_STYLES;++s)
         blocks[s]=t->data[s] && (!t->reloaded || s==launch_style) ? t->data[s]+t->spec.skip : NULL;
     t->reloaded=0;
-    int which=-1;
-    t->at=(unsigned char *)runtime_memory_find(blocks,t->size,t->sig_at,GLYPH_STYLES,&which);
-    t->shown=t->at ? which : -1;
-    if (t->at) printf("Runtime: glyphs: %s @0x%llx found as %s at %p\n",t->spec.guest,(unsigned long long)t->spec.offset,
-                      glyph_style_names[which],(void *)t->at);
+    uintptr_t found[GLYPH_MAX_COPIES];
+    t->copies=runtime_memory_find_all(blocks,t->size,t->sig_at,GLYPH_STYLES,found,t->at_style,GLYPH_MAX_COPIES);
+    for (int i=0;i<t->copies;++i) {
+        t->at[i]=(unsigned char *)found[i];
+        printf("Runtime: glyphs: %s @0x%llx found as %s at %p (copy %d of %d)\n",t->spec.guest,
+               (unsigned long long)t->spec.offset,glyph_style_names[t->at_style[i]],(void *)t->at[i],i+1,t->copies);
+    }
+    t->shown=glyph_copies_style(t->at_style,t->copies);
 }
+/* Writes `want` over every copy not holding it, each checked right before its write; a copy that
+ * changed under us is dropped. The copies left all hold `want`; returns how many. */
+static int write_copies(Texture *t, int want) {
+    const int n=t->copies;
+    int kept=0;
+    for (int i=0;i<n;++i) {
+        if (t->at_style[i]!=want && !write_style(t,i,want)) continue;
+        t->at[kept]=t->at[i];
+        t->at_style[kept++]=want;
+    }
+    t->copies=kept;
+    if (kept) printf("Runtime: glyphs: %s @0x%llx now %s (%d of %d copies)\n",t->spec.guest,
+                     (unsigned long long)t->spec.offset,glyph_style_names[want],kept,n);
+    return kept;
+}
+static const char *style_or_dash(int style) { return style>=0 ? glyph_style_names[style] : "-"; }
 static void *glyph_thread(void *unused) {
     (void)unused;
     unsigned char *image;
@@ -187,11 +220,18 @@ static void *glyph_thread(void *unused) {
         return NULL;
     }
     printf("Runtime: glyph switch on (%d textures, %s at start)\n",texture_count,glyph_style_names[launch_style]);
+    int last_want=-2, was_open=0;
     for (;;) {
         glyph_pause_ns(250000000ull);
-        int p1=-1, p2=-1, p2_open=0;
-        if (!read_state(image,&p1,&p2,&p2_open)) continue;
-        const int want=glyph_wanted(p1,p2,p2_open);
+        int saved_p1=-1, live_p1=-1, live_p2=-1, rows_open=0;
+        if (!read_state(image,&saved_p1,&live_p1,&live_p2,&rows_open)) continue;
+        const int want=glyph_wanted_live(live_p1,live_p2,saved_p1);
+        if (want!=last_want)
+            printf("Runtime: glyphs: wanted %s (live P1 %s, live P2 %s, saved P1 %s)\n",style_or_dash(want),
+                   style_or_dash(live_p1),style_or_dash(live_p2),style_or_dash(saved_p1));
+        last_want=want;
+        const int opened=rows_open && !was_open;
+        was_open=rows_open;
         const uint64_t now=glyph_now();
         for (int i=0;i<texture_count;++i) {
             Texture *t=&textures[i];
@@ -200,14 +240,22 @@ static void *glyph_thread(void *unused) {
             const uint64_t read=__atomic_load_n(&t->read_at,__ATOMIC_ACQUIRE);
             if (read && now>read && now-read>1500000000ull) {
                 __atomic_store_n(&t->read_at,0,__ATOMIC_RELEASE);
-                t->at=NULL; t->shown=launch_style; t->failed_for=-2;
+                t->copies=0; t->shown=launch_style; t->failed_for=-2;
                 t->reloaded=1; t->retry_at=0;
             }
+            /* A Controller type row just opened (a menu screen, never a race): the copies are found
+             * now, so the row's first change shows at once. A search that finds none leaves the
+             * state as it was (the rules below then apply as before). */
+            if (opened && now>=t->retry_at && !all_there(t)) {
+                const int reloaded=t->reloaded, shown=t->shown;
+                locate(t);
+                if (!t->copies) { t->reloaded=reloaded; t->shown=shown; }
+            }
             if (want<0 || !t->data[want] || t->shown==want || t->failed_for==want || now<t->retry_at) continue;
-            if (!still_there(t)) {
+            if (!all_there(t)) {
                 const int reloaded=t->reloaded;
-                locate(t);          /* the only search: the wanted style changed, the place is unknown */
-                if (!t->at) {
+                locate(t);          /* the only search: the wanted style changed, a place is unknown */
+                if (!t->copies) {
                     /* After a read the game may still be unpacking it: one more try 2 s later. */
                     if (reloaded && !t->retry_at) { t->retry_at=now+2000000000ull; t->reloaded=1; }
                     else t->failed_for=want;
@@ -215,12 +263,11 @@ static void *glyph_thread(void *unused) {
                 }
                 if (t->shown==want) continue;
             }
-            if (write_style(t,want)) {
+            if (write_copies(t,want)) {
                 t->shown=want;
                 t->failed_for=-2;
-                printf("Runtime: glyphs: %s @0x%llx now %s\n",t->spec.guest,(unsigned long long)t->spec.offset,glyph_style_names[want]);
             } else {
-                t->at=NULL;         /* changed under us: searched for again at the next change */
+                t->shown=-1;        /* all changed under us: searched for again at the next change */
                 t->failed_for=want;
             }
         }

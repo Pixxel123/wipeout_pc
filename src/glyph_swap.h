@@ -79,8 +79,17 @@ static inline int glyph_style_index(const char *value) {
     for (int i=0; value && i<GLYPH_STYLES; ++i) if (!strcmp(value,glyph_style_names[i])) return i;
     return -1;
 }
-/* The style the prompts should show: player 2's on its own Controls screen, else player 1's. */
-static inline int glyph_wanted(int p1, int p2, int p2_open) { return p2_open && p2>=0 ? p2 : p1; }
+/* The style the prompts should show: an open Controller type row's live value (player 2's before
+ * player 1's; one Controls screen is open at a time), else player 1's saved setting. Each is a
+ * glyph_style_index, -1 when absent. */
+static inline int glyph_wanted_live(int live_p1, int live_p2, int saved_p1) {
+    return live_p2>=0 ? live_p2 : live_p1>=0 ? live_p1 : saved_p1;
+}
+/* The style all n copies of a texture hold, or -1 when they differ or there are none. */
+static inline int glyph_copies_style(const int *styles, int n) {
+    for (int i=1;i<n;++i) if (styles[i]!=styles[0]) return -1;
+    return n>0 ? styles[0] : -1;
+}
 static inline int glyph_verify(const void *at, const void *texels, size_t n) { return !memcmp(at,texels,n); }
 /* A GOW3_GLYPH_SWAP line: guest archive, offset, packed length, header length (hex), then
  * style=file fields; tab-separated. 1 when it reads and names at least one known style. */

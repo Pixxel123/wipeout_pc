@@ -58,7 +58,15 @@ int main(void) {
 
     assert(glyph_style_index("playstation")==0 && glyph_style_index("xbox")==1 && glyph_style_index("nintendo")==2);
     assert(glyph_style_index("motion off")==-1 && glyph_style_index(NULL)==-1);
-    assert(glyph_wanted(1,0,1)==0 && glyph_wanted(1,0,0)==1 && glyph_wanted(1,-1,1)==1 && glyph_wanted(-1,-1,0)==-1);
+    /* Live row values first (P2's row before P1's), else the saved P1. */
+    assert(glyph_wanted_live(-1,0,1)==0);   /* P2's row open */
+    assert(glyph_wanted_live(2,-1,1)==2);   /* P1's row open */
+    assert(glyph_wanted_live(2,0,1)==0);    /* both: P2's */
+    assert(glyph_wanted_live(-1,-1,1)==1);  /* no row: saved P1 */
+    assert(glyph_wanted_live(-1,-1,-1)==-1);
+    const int same[3]={1,1,1}, mixed[3]={1,0,1};
+    assert(glyph_copies_style(same,3)==1 && glyph_copies_style(mixed,3)==-1 && glyph_copies_style(same,0)==-1);
+    assert(glyph_copies_style(mixed,1)==1);
 
     GlyphTexture t;
     const char *line="/app0/data08.psarc\t7439dc50\t16ab0\t100\tplaystation=/a b/ps.gnf\txbox=/a b/x.gnf\n";

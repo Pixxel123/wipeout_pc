@@ -838,12 +838,13 @@ int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, i
     read_unlock();
     return found;
 }
-/* The first place in mapped guest memory that holds one of `count` byte blocks whole, found by
- * 64 bytes of each at sig_at[i]; *which is that block's index. 0 when none is there. Faults (a
- * region unmapped or protected meanwhile) skip the region. A full search reads every mapping
- * once: call it only when needed, from a runtime thread. Linux reads only pages already in memory
- * (mincore), so the search commits none of the guest's untouched memory; a block must lie whole in
- * one run of such pages (a texture the GPU uploaded is in memory). */
+/* The places in mapped guest memory that hold one of `count` byte blocks whole, found by 64 bytes
+ * of each at sig_at[i], up to max of them: addresses[k] and which[k] (that block's index); returns
+ * how many. The search goes on past a hit (after the matched block). Faults (a region unmapped or
+ * protected meanwhile) skip the region. A full search reads every mapping once: call it only when
+ * needed, from a runtime thread. Linux reads only pages already in memory (mincore), so the search
+ * commits none of the guest's untouched memory; a block must lie whole in one run of such pages (a
+ * texture the GPU uploaded is in memory). */
 static const unsigned char *find_bytes(const unsigned char *p, size_t n, const unsigned char *needle, size_t k) {
 #ifdef _WIN32 /* MinGW has no memmem */
     for (const unsigned char *end=p+n; p && (size_t)(end-p)>=k; ++p) {
@@ -856,64 +857,67 @@ static const unsigned char *find_bytes(const unsigned char *p, size_t n, const u
     return memmem(p,n,needle,k);
 #endif
 }
-/* The first of the blocks whole in [lo,hi), as runtime_memory_find; call it under fault recovery. */
-static uintptr_t find_in(uintptr_t lo, uintptr_t hi, const unsigned char *const *blocks, const size_t *sizes,
-                         const size_t *sig_at, int count, int *which) {
-    for (int b=0; b<count; ++b) {
+/* The blocks whole in [lo,hi), as runtime_memory_find_all, appended after the n already found;
+ * returns the new count. Call it under fault recovery. */
+static int find_in(uintptr_t lo, uintptr_t hi, const unsigned char *const *blocks, const size_t *sizes,
+                   const size_t *sig_at, int count, uintptr_t *addresses, int *which, int n, int max) {
+    for (int b=0; b<count && n<max; ++b) {
         if (!blocks[b] || sizes[b]<sig_at[b]+64) continue;
         const unsigned char *p=(const unsigned char *)lo, *stop=(const unsigned char *)hi;
-        while (p<stop && (p=find_bytes(p,(size_t)(stop-p),blocks[b]+sig_at[b],64))) {
+        while (n<max && p<stop && (p=find_bytes(p,(size_t)(stop-p),blocks[b]+sig_at[b],64))) {
             const uintptr_t base=(uintptr_t)p-sig_at[b];
             if (base>=lo && base+sizes[b]<=hi && !memcmp((const void *)base,blocks[b],sizes[b])) {
-                *which=b;
-                return base;
+                addresses[n]=base;
+                which[n++]=b;
+                p=(const unsigned char *)(base+sizes[b]+sig_at[b]); /* a next copy starts after this one */
+                continue;
             }
             ++p;
         }
     }
-    return 0;
+    return n;
 }
-uintptr_t runtime_memory_find(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
-                              int count, int *which) {
-    volatile uintptr_t address=0, hit=0;
-    volatile int found=-1;
+int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
+                            int count, uintptr_t *addresses, int *which, int max) {
+    volatile uintptr_t address=0;
+    volatile int found=0;
     sigjmp_buf recover;
     uintptr_t start, end;
     int mapped;
-    while (!hit && runtime_memory_region(address,&start,&end,&mapped) && end>address) {
+    while (found<max && runtime_memory_region(address,&start,&end,&mapped) && end>address) {
         const volatile uintptr_t lo=start, hi=end; /* kept across the recovery jump */
         if (mapped) {
             if (!sigsetjmp(recover,0)) {
                 runtime_fault_recover=&recover;
-                int b=-1;
+                int n=found;
 #ifdef _WIN32
                 /* No residency query here: the search commits the region's untouched pages. */
-                const uintptr_t at=find_in(lo,hi,blocks,sizes,sig_at,count,&b);
+                n=find_in(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
 #else
                 /* Runs of resident pages, 512 pages (2 MiB of 4 KiB pages) per query; a run goes on
                  * across queries. A failed query counts as pages not in memory. */
                 static size_t page;
                 if (!page) page=(size_t)sysconf(_SC_PAGESIZE);
                 unsigned char resident[512];
-                uintptr_t at=0, run=0;
+                uintptr_t run=0;
                 int in_run=0;
-                for (uintptr_t chunk=lo & ~(uintptr_t)(page-1); chunk<hi && !at; ) {
-                    const size_t n=hi-chunk<512*page ? (size_t)(hi-chunk) : 512*page;
-                    const int queried=!mincore((void *)chunk,n,resident);
-                    for (size_t i=0; i*page<n && !at; ++i) {
+                for (uintptr_t chunk=lo & ~(uintptr_t)(page-1); chunk<hi && n<max; ) {
+                    const size_t len=hi-chunk<512*page ? (size_t)(hi-chunk) : 512*page;
+                    const int queried=!mincore((void *)chunk,len,resident);
+                    for (size_t i=0; i*page<len && n<max; ++i) {
                         const uintptr_t pg=chunk+i*page;
                         if (queried && (resident[i] & 1)) {
                             if (!in_run) { run=pg>lo ? pg : lo; in_run=1; }
                         } else if (in_run) {
-                            at=find_in(run,pg,blocks,sizes,sig_at,count,&b);
+                            n=find_in(run,pg,blocks,sizes,sig_at,count,addresses,which,n,max);
                             in_run=0;
                         }
                     }
-                    chunk+=n;
+                    chunk+=len;
                 }
-                if (!at && in_run) at=find_in(run,hi,blocks,sizes,sig_at,count,&b);
+                if (n<max && in_run) n=find_in(run,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
 #endif
-                if (at) { hit=at; found=b; }
+                found=n; /* a fault in the region drops its hits */
                 runtime_fault_recover=NULL;
             } else {
                 runtime_fault_recover=NULL;
@@ -921,8 +925,7 @@ uintptr_t runtime_memory_find(const unsigned char *const *blocks, const size_t *
         }
         address=hi;
     }
-    if (which) *which=found;
-    return hit;
+    return found;
 }
 /* GPU page tracking: restrict host access, never beyond the guest's own protection. */
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write) {
