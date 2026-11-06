@@ -294,14 +294,68 @@ def build(game, out, style, pad_map='', given=None):
     return psarc.cached_lines(Path(out) / 'wipeout_glyphs', key, make)
 
 
+SWAP_STYLES = ('playstation', 'xbox', 'nintendo')
+
+
+def variants(game, out, pad_map='', given=None):
+    """GOW3_GLYPH_SWAP lines (src/runtime_glyphs.c): for the newest copy of the button font's atlas
+    and of each tab picture, where its packed bytes are in the archive (the runtime looks for the
+    texture again after the game reads them) and a file of each style's texture, the original for
+    playstation, written in out/glyph_swap. Fields are tab-separated (paths may hold spaces):
+    archive, offset, packed length, header length (all hex), then style=file for each style."""
+    found = psarc.archives(game, given)
+
+    def make(folder):
+        newest = {}
+        for name, path in found:
+            with psarc.Archive(path) as archive:
+                for entry in (FONT_ATLAS, *TABS):
+                    if archive.find(entry) is not None:
+                        newest[entry] = (name, path)
+        lines = []
+        for entry, (name, path) in sorted(newest.items()):
+            with psarc.Archive(path) as archive:
+                i = archive.find(entry)
+                original = archive.read(i)
+                font = archive.find(FONT_MAP)
+                font = archive.read(font) if font is not None else None
+                offset = archive.entries[i]['offset']
+                packed = sum(stored for stored, _length in archive.blocks(i))
+            files = []
+            for style in SWAP_STYLES:
+                data = original if style == 'playstation' else redrawn(entry, original, style, pad_map, font)
+                if not data:
+                    continue
+                file = Path(folder) / f'{Path(name).stem}-{Path(entry).stem}-{style}.gnf'
+                file.write_bytes(data)
+                files.append(f'{style}={file.resolve()}')
+            if len(files) > 1:
+                lines.append('\t'.join([f'/app0/{name}', f'{offset:x}', f'{packed:x}', f'{gnf.HEADER:x}', *files]) + '\n')
+        return lines
+    key = [VERSION, pad_map, [name for name, _p in found], psarc.stamp(p for _n, p in found)]
+    return psarc.cached_lines(Path(out) / 'glyph_swap', key, make)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, required=True, help='adds its changes to OUT/file_patches.txt')
-    parser.add_argument('--style', choices=('xbox', 'nintendo'), required=True)
+    parser.add_argument('--style', choices=('xbox', 'nintendo'))
+    parser.add_argument('--swap-config', type=Path, help='writes GOW3_GLYPH_SWAP lines (all styles) to this file')
     parser.add_argument('--pad-map', default='', help='GOW3_PAD_MAP')
     psarc.add_archive_option(parser)
     args = parser.parse_args()
+    if args.swap_config:
+        try:
+            lines = variants(args.game, args.out, args.pad_map, args.archive)
+        except Exception as error:  # noqa: BLE001  (icons only: whatever fails, the game starts)
+            print(f'Glyphs: {error}; the prompts keep the style chosen at start', flush=True)
+            lines = []
+        args.swap_config.write_text(''.join(lines))
+        print(f'Glyphs: {len(lines)} textures switch while the game runs', flush=True)
+        return
+    if not args.style:
+        parser.error('--style or --swap-config is required')
     try:
         lines = build(args.game, args.out, args.style, args.pad_map, args.archive)
     except Exception as error:  # noqa: BLE001  (icons only: whatever fails, the game starts)

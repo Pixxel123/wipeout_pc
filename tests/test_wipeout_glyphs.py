@@ -126,6 +126,31 @@ class WipeoutGlyphTests(unittest.TestCase):
             remapped = wipeout_glyphs.build(game, out, 'xbox', 'triangle=a')
             self.assertNotEqual(remapped, lines)
 
+    def test_variants_name_each_styles_texture(self):
+        atlas = Image.new('L', (256, 128), 0)
+        atlas.paste(ring(), (8, 8))
+        fnt = font({'0': (8, 8, 104, 104)})
+        gnf_file = gnf.Texture(texture(1, 256, 128, 256, 1)).replaced(atlas)
+        with tempfile.TemporaryDirectory() as folder:
+            game, out = Path(folder) / 'game', Path(folder) / 'out'
+            game.mkdir()
+            for name in ('data00.psarc', 'data08.psarc'):
+                archive(game / name, {wipeout_glyphs.FONT_MAP: fnt, wipeout_glyphs.FONT_ATLAS: gnf_file}, packed=False)
+            lines = wipeout_glyphs.variants(game, out)
+            self.assertEqual(len(lines), 1)
+            guest, offset, length, skip, *files = lines[0].rstrip('\n').split('\t')
+            self.assertEqual((guest, skip), ('/app0/data08.psarc', '100'))
+            styles = dict(f.split('=', 1) for f in files)
+            self.assertEqual(sorted(styles), ['nintendo', 'playstation', 'xbox'])
+            with psarc.Archive(game / 'data08.psarc') as a:
+                i = a.find(wipeout_glyphs.FONT_ATLAS)
+                self.assertEqual(int(offset, 16), a.entries[i]['offset'])
+                self.assertEqual(int(length, 16), sum(stored for stored, _l in a.blocks(i)))
+            self.assertEqual(Path(styles['playstation']).read_bytes(), gnf_file)
+            self.assertEqual(Path(styles['xbox']).read_bytes(),
+                             wipeout_glyphs.redrawn(wipeout_glyphs.FONT_ATLAS, gnf_file, 'xbox', '', fnt))
+            self.assertEqual(wipeout_glyphs.variants(game, out), lines)  # cached
+
     def test_no_archive_no_patches(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertEqual(wipeout_glyphs.build(folder, Path(folder) / 'out', 'xbox'), [])
