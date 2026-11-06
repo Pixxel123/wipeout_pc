@@ -88,8 +88,9 @@ def saved_style(savedata, title, name):
 
 def add_settings(savedata, title, style):
     """Gives every save that lacks them both players' settings, valued `style` (the launcher's
-    controller type, or playstation); returns the files changed. Written through a temporary file,
-    so an interrupted write leaves the old save."""
+    controller type, or playstation); returns the files changed. Written through a temporary file
+    on the disk before it replaces the save, so an interrupted write leaves the old save. A save
+    that cannot be read or written is left as it is; the others still get theirs."""
     style = style if style in STYLES else 'playstation'
     changed = []
     for path in saves(savedata, title):
@@ -101,7 +102,32 @@ def add_settings(savedata, title, style):
         if new is None or new is data:
             continue
         temp = path.with_name(path.name + '.tmp')
-        temp.write_bytes(new)
-        os.replace(temp, path)
+        try:
+            with open(temp, 'wb') as f:
+                f.write(new)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, path)
+        except OSError:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
         changed.append(path)
     return changed
+
+
+def settings_ready(savedata, title):
+    """Whether the Controller type rows can be shown: no save yet (the game's settings then come
+    from the layouts, the rows' included), or every save reads as a DATA.BIN holding both
+    players' settings. The game saves a row's value without checking that the setting exists, so
+    a row must not be on screen while a save lacks it."""
+    for path in saves(savedata, title):
+        try:
+            found = records(path.read_bytes())
+        except OSError:
+            return False
+        if found is None or not set(PLAYERS) <= {name for _o, name, _v in found}:
+            return False
+    return True

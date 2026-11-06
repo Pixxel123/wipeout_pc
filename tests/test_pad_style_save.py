@@ -63,6 +63,56 @@ class SaveTests(unittest.TestCase):
             self.assertEqual(other.read_bytes(), b'not a save')
             self.assertEqual(save.add_settings(folder, 'CUSA07671', 'playstation'), [])  # already there
 
+    def test_a_save_with_one_setting_gets_only_the_other(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / '1' / 'CUSA07671' / 'PROFILE03' / 'DATA.BIN'
+            path.parent.mkdir(parents=True)
+            one = file(record('Language', '1'), record('Pad Style P1', 'nintendo'))
+            path.write_bytes(one)
+            self.assertFalse(save.settings_ready(folder, 'CUSA07671'))
+            self.assertEqual(save.add_settings(folder, 'CUSA07671', 'xbox'), [path])
+            new = path.read_bytes()
+            self.assertEqual(new, one + record('Pad Style P2', 'xbox'))
+            self.assertEqual(len(new), len(one) + 0x68 + 0x40)
+            self.assertEqual(save.saved_style(folder, 'CUSA07671', 'Pad Style P1'), 'nintendo')
+            self.assertTrue(save.settings_ready(folder, 'CUSA07671'))
+
+    def test_a_save_that_cannot_be_read_or_written_does_not_stop_the_others(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder) / '1' / 'CUSA07671'
+            unreadable = base / 'PROFILE01' / 'DATA.BIN'
+            unreadable.mkdir(parents=True)  # a folder where the save should be: reading it fails
+            unwritable = base / 'PROFILE02' / 'DATA.BIN'
+            unwritable.parent.mkdir(parents=True)
+            unwritable.write_bytes(SAVE)
+            (base / 'PROFILE02' / 'DATA.BIN.tmp').mkdir()  # the temporary file cannot be made
+            good = base / 'PROFILE03' / 'DATA.BIN'
+            good.parent.mkdir(parents=True)
+            good.write_bytes(SAVE)
+            self.assertEqual(save.saves(folder, 'CUSA07671'), [unreadable, unwritable, good])
+            self.assertEqual(save.add_settings(folder, 'CUSA07671', 'xbox'), [good])
+            self.assertTrue(unreadable.is_dir())
+            self.assertEqual(unwritable.read_bytes(), SAVE)
+            self.assertEqual([n for _o, n, _v in save.records(good.read_bytes())][-2:], list(save.PLAYERS))
+            self.assertFalse((base / 'PROFILE03' / 'DATA.BIN.tmp').exists())
+            self.assertFalse(save.settings_ready(folder, 'CUSA07671'))
+
+    def test_settings_ready(self):
+        both = file(record('Language', '1'), record('Pad Style P1', 'xbox'), record('Pad Style P2', 'playstation'))
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertTrue(save.settings_ready(folder, 'CUSA07671'))  # no save yet
+            first = Path(folder) / '1' / 'CUSA07671' / 'PROFILE03' / 'DATA.BIN'
+            first.parent.mkdir(parents=True)
+            first.write_bytes(both)
+            self.assertTrue(save.settings_ready(folder, 'CUSA07671'))
+            second = Path(folder) / '1' / 'CUSA07671' / 'PROFILE04' / 'DATA.BIN'
+            second.parent.mkdir(parents=True)
+            for data in (SAVE, b'not a save', file(record('Pad Style P2', 'xbox'))):
+                second.write_bytes(data)
+                self.assertFalse(save.settings_ready(folder, 'CUSA07671'), data[:16])
+            second.write_bytes(both)
+            self.assertTrue(save.settings_ready(folder, 'CUSA07671'))
+
 
 if __name__ == '__main__':
     unittest.main()
