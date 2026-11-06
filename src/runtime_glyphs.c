@@ -124,7 +124,8 @@ static int known_build(const unsigned char *image) {
     return ok;
 }
 /* Guest reads under fault recovery: 0 when a fault stopped them. The live values are those of
- * open Controller type rows (-1 when not open), rows_open whether either row is open. */
+ * open Controller type rows (-1 when not open), rows_open whether either row is open (registered
+ * with a count, whatever its value pointers hold at that moment). */
 static int read_state(const unsigned char *image, int *saved_p1, int *live_p1, int *live_p2, int *rows_open) {
     sigjmp_buf recover;
     volatile int ok=0;
@@ -137,7 +138,8 @@ static int read_state(const unsigned char *image, int *saved_p1, int *live_p1, i
         const char *row2=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P2"));
         *live_p1=glyph_style_index(row1);
         *live_p2=glyph_style_index(row2);
-        *rows_open=row1 || row2;
+        *rows_open=glyph_row_open(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P1")) ||
+                   glyph_row_open(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P2"));
         ok=1;
     }
     runtime_fault_recover=NULL;
@@ -186,7 +188,10 @@ static void locate(Texture *t) {
         blocks[s]=t->data[s] && (!t->reloaded || s==launch_style) ? t->data[s]+t->spec.skip : NULL;
     t->reloaded=0;
     uintptr_t found[GLYPH_MAX_COPIES];
+    const uint64_t start=glyph_now();
     t->copies=runtime_memory_find_all(blocks,t->size,t->sig_at,GLYPH_STYLES,found,t->at_style,GLYPH_MAX_COPIES);
+    printf("Runtime: glyphs: search %s @0x%llx: %d copies in %.1f ms\n",t->spec.guest,(unsigned long long)t->spec.offset,
+           t->copies,(double)(glyph_now()-start)/1e6);
     for (int i=0;i<t->copies;++i) {
         t->at[i]=(unsigned char *)found[i];
         printf("Runtime: glyphs: %s @0x%llx found as %s at %p (copy %d of %d)\n",t->spec.guest,
@@ -245,11 +250,12 @@ static void *glyph_thread(void *unused) {
             }
             /* A Controller type row just opened (a menu screen, never a race): the copies are found
              * now, so the row's first change shows at once. A search that finds none leaves the
-             * state as it was (the rules below then apply as before). */
+             * state as it was and nothing more is searched this tick. */
             if (opened && now>=t->retry_at && !all_there(t)) {
                 const int reloaded=t->reloaded, shown=t->shown;
                 locate(t);
-                if (!t->copies) { t->reloaded=reloaded; t->shown=shown; }
+                if (!t->copies) { t->reloaded=reloaded; t->shown=shown; continue; }
+                t->failed_for=-2;   /* found: an earlier failed search no longer applies */
             }
             if (want<0 || !t->data[want] || t->shown==want || t->failed_for==want || now<t->retry_at) continue;
             if (!all_there(t)) {

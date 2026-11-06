@@ -69,7 +69,7 @@ static inline int glyph_commit(unsigned char *store, uint32_t key, const char *v
     for (int i=0; node && i<GLYPH_MAX_NODES; ++i, node=(unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
         if (glyph_load32(node)!=key) continue;
         const uint32_t capacity=glyph_load32(node+0x4c), length=(uint32_t)n;
-        if (n>capacity) return 0;
+        if (n>capacity || capacity>4096) return 0; /* a larger capacity is a corrupt node */
         memcpy(node+0x68,value,n);
         memset(node+0x68+n,0,capacity-n);
         memcpy(node+0x48,&length,4);

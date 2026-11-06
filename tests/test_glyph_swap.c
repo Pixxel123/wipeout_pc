@@ -55,6 +55,13 @@ int main(void) {
     put32(b+0x4c,9);
     assert(!glyph_commit(store,glyph_key("Pad Style P1"),"playstation")); /* 12 bytes > capacity 9 */
     assert(glyph_load32(b+0x48)==9 && !strcmp((const char *)b+0x68,"nintendo"));
+    b[0x68+9]=0x55;
+    assert(glyph_commit(store,glyph_key("Pad Style P1"),"nintendo"));    /* 9 bytes == capacity 9 */
+    assert(glyph_load32(b+0x48)==9 && !strcmp((const char *)b+0x68,"nintendo") && b[0x68+9]==0x55);
+    put32(b+0x4c,4097);                                                    /* corrupt: refused */
+    assert(!glyph_commit(store,glyph_key("Pad Style P1"),"xbox"));
+    assert(glyph_load32(b+0x48)==9 && !strcmp((const char *)b+0x68,"nintendo"));
+    put32(b+0x4c,9);
     unsigned char before_a[sizeof(a)], before_b[sizeof(b)];
     memcpy(before_a,a,sizeof(a)); memcpy(before_b,b,sizeof(b));
     assert(!glyph_commit(store,glyph_key("Pad Style P2"),"xbox"));       /* missing: nothing written */
