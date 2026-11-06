@@ -10,6 +10,10 @@ struct Size {
     uint32_t width = 1920, height = 1080;
     bool operator==(const Size&) const = default;
 };
+/// The game's own 1920x1080 render (no render resolution patch).
+constexpr bool NativeRender(Size size) {
+    return size == Size{};
+}
 inline Size ForPreset(int preset, Size output) {
     // Even dimensions for half-resolution effects; match the preset labels exactly.
     constexpr std::array<double, 5> scales{1.0, 1.5, 1.7, 2.0, 3.0};
@@ -17,8 +21,7 @@ inline Size ForPreset(int preset, Size output) {
     return {uint32_t(std::max(1l, std::lround(output.width / scale / 2)) * 2),
             uint32_t(std::max(1l, std::lround(output.height / scale / 2)) * 2)};
 }
-/// 1 for an image of the guest's size, 2 for exactly half of it (the game's half-resolution
-/// post targets; the scene must halve exactly), else 0.
+/// 1 for the guest's size, 2 for exactly half of it (the scene must halve too), else 0.
 constexpr uint32_t SizeDivisor(Size image, Size guest, Size scene, bool half_res = true) {
     if (image == guest) return 1;
     return half_res && image.width * 2 == guest.width && image.height * 2 == guest.height &&

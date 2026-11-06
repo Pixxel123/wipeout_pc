@@ -191,7 +191,6 @@ GraphicsPipeline::GraphicsPipeline(
         .pDynamicStates = dynamic_states.data(),
     };
 
-    // gow3: the guest's render size for FragCoord of reduced passes (spec constants 0 and 1).
     static constexpr std::array<vk::SpecializationMapEntry, 2> guest_entries{{
         {.constantID = 0, .offset = 0, .size = sizeof(u32)},
         {.constantID = 1, .offset = sizeof(u32), .size = sizeof(u32)},

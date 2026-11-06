@@ -1086,7 +1086,7 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     settings.window_width = width;
     settings.window_height = height;
     if (settings.output_native && !Gow3Settings::FixedRenderSession() &&
-        settings.game_width == 1920 && settings.game_height == 1080) {
+        SceneResolution::NativeRender({u32(settings.game_width), u32(settings.game_height)})) {
         const auto [w, h] = OutputResolution::Frame(width, height);
         if (w) {
             expected_frame_width = w;

@@ -152,11 +152,7 @@ private:
     [[nodiscard]] bool Scaled() const;
     /// A target of the patched render size: the game allocates it with aligned dimensions
     /// (a 1916x1078 scene in 1916x1080 targets).
-    [[nodiscard]] bool RenderTarget(u32 w, u32 h) const {
-        if (!scaled_session) return w == guest_width && h == guest_height;
-        return w >= render_width && h >= render_height && w < render_width + 8 &&
-               h < render_height + 8;
-    }
+    [[nodiscard]] bool RenderTarget(u32 w, u32 h) const;
     /// The scene's size inside a `w` x `h` render target: the game's viewport.
     [[nodiscard]] std::array<u32, 2> SceneSize(u32 w, u32 h) const;
     // The scene color is drawn into a reduced SceneTargets proxy (live presets).
@@ -218,7 +214,6 @@ private:
     u32 out_width = 0, out_height = 0;     ///< output size of the context
     bool context_hdr = true;
     u32 target_width = 1920, target_height = 1080; ///< output size of scaled presets
-    u32 guest_width = 1920, guest_height = 1080;   ///< the session's render size
     u64 ui_trigger_vs = 0x34e8a281;
     VideoCore::ImageId ldr_target{};
     VideoCore::ImageId ui_color{}, ui_depth{};

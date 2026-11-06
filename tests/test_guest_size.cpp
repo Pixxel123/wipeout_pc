@@ -23,5 +23,7 @@ int main() {
     // Presets keep even sides at any aspect (Balanced is 1/1.7).
     assert((ForPreset(2, {3440, 1440}) == Size{2024, 848}));
     assert((ForPreset(3, {2560, 1080}) == Size{1280, 540}));
+    static_assert(NativeRender({1920, 1080}) && !NativeRender({2560, 1080}) &&
+                  !NativeRender({1920, 1200}));
     std::puts("Guest size: PASS (scene and half-resolution divisors)");
 }

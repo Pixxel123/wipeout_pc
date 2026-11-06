@@ -187,11 +187,8 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (const char* hash = std::getenv("GOW3_UI_TRIGGER_VS")) {
         ui_trigger_vs = std::strtoull(hash, nullptr, 16);
     }
-    {
-        const auto guest = SceneResolution::Guest();
-        guest_width = target_width = guest.width;
-        guest_height = target_height = guest.height;
-    }
+    target_width = scene_targets.Guest().width;
+    target_height = scene_targets.Guest().height;
     if (const char* res = std::getenv("GOW3_OUTPUT_RES")) {
         u32 w = 0, h = 0;
         if (std::strcmp(res, "native") == 0) {
@@ -205,8 +202,8 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     // Explicit resolution overrides retain the old compatibility path. Normal presets
     // keep guest allocations/UI native and change only host raster targets at frame boundaries.
     scaled_session = std::getenv("GOW3_RENDER_RES") && std::getenv("GOW3_RENDER_RES")[0];
-    render_width = guest_width;
-    render_height = guest_height;
+    render_width = scene_targets.Guest().width;
+    render_height = scene_targets.Guest().height;
     if (const char* res = std::getenv("GOW3_RENDER_RES")) {
         u32 w = 0, h = 0;
         if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
@@ -311,11 +308,10 @@ bool TemporalUpscaler::OnFrameStart() {
     const bool active = Active();
     const bool jitter_on = active && settings.jitter && !Gow3Toggle::Disabled(1u << 25);
     const int upscaler = settings.upscaler.load();
-    // gow3: other render resolutions output at their own size (D1); the fixed rows and
-    // "Native (window)" are for the game's own 1920x1080 render.
-    const auto guest = SceneResolution::Guest();
+    // gow3: the fixed rows and "Native (window)" are for the native render only.
+    const auto guest = scene_targets.Guest();
     u32 output_width = target_width, output_height = target_height;
-    if (settings.output_native && guest == SceneResolution::Size{}) {
+    if (settings.output_native && SceneResolution::NativeRender(guest)) {
         const auto [w, h] = OutputResolution::Output(settings.window_width, settings.window_height,
                                                      settings.game_width, settings.game_height);
         if (w && native_settled.Update(w, h)) {
@@ -385,7 +381,7 @@ bool TemporalUpscaler::OnFrameStart() {
     // CameraMotion::OnDisplayPass has already cleared Depth(). Use the context's render
     // size, which survives the frame boundary (Performance 960 -> 1920 needs 32 phases).
     const u32 phases = Scaled() ? Motion::JitterPhases(render_width, target_width)
-        : Motion::JitterPhases(scene_targets.Size().width, guest_width);
+        : Motion::JitterPhases(scene_targets.Size().width, scene_targets.Guest().width);
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
     return changed;
@@ -1367,12 +1363,20 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 float TemporalUpscaler::SceneMipBias() const {
     if (!Active() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) return 0.0f;
     const float render = float(Gow3Settings::Get().active_render_width.load());
-    const float output = float(Scaled() ? target_width : guest_width);
+    const float output = float(Scaled() ? target_width : scene_targets.Guest().width);
     return render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
 }
 
+bool TemporalUpscaler::RenderTarget(u32 w, u32 h) const {
+    const auto guest = scene_targets.Guest();
+    if (!scaled_session) return w == guest.width && h == guest.height;
+    return w >= render_width && h >= render_height && w < render_width + 8 &&
+           h < render_height + 8;
+}
+
 bool TemporalUpscaler::Scaled() const {
-    return scaled_session || target_width != guest_width || target_height != guest_height;
+    return scaled_session || target_width != scene_targets.Guest().width ||
+           target_height != scene_targets.Guest().height;
 }
 
 void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {

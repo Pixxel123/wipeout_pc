@@ -115,8 +115,7 @@ struct Values {
     /// restores the previous startup options when a launch never cleared it.
     std::atomic<bool> restart_unconfirmed{false};
     int startup_render_resolution = 0, startup_engine_fps = 120;
-    /// The game's render size this session (the startup render resolution): the guest size the
-    /// upscaler's scene proxies and outputs are relative to.
+    /// The game's render size this session (the startup render resolution).
     int startup_render_width = 1920, startup_render_height = 1080;
     /// The engine rate this launch really runs at (run.py's GOW3_ENGINE_FPS): 60 when the frame
     /// rate patch does not apply to this game build.
