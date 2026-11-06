@@ -9,11 +9,16 @@
 #include "video_core/host_shaders/depth_stencil_resample_frag.h"
 #include "video_core/host_shaders/depth_stencil_bits_frag.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
+#include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include <cstdio>
 #include <cstdlib>
 
 namespace Vulkan {
+SceneResolution::Size SceneResolution::Guest() {
+    const auto& s = Gow3Settings::Get();
+    return {uint32_t(s.startup_render_width), uint32_t(s.startup_render_height)};
+}
 SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r,
                            VideoCore::TextureCache& t)
     : SceneTargets(i, s, r, [&t](VideoCore::ImageId id, u64 uid) {

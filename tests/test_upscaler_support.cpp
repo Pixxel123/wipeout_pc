@@ -6,6 +6,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <unistd.h>
+#include <utility>
 #include "gow3_settings.h"
 
 int main() {
@@ -96,6 +97,23 @@ int main() {
         write_config("output_res=2560x1440\n");
         Load();
         assert(!s.output_native && s.output_res == 2);
+    }
+    // The guest size of the session: the startup render resolution, built-in or a mod's.
+    {
+        const auto guest = [&](const char* text) {
+            FILE* config = std::fopen(path, "w");
+            assert(config);
+            std::fputs(text, config);
+            std::fclose(config);
+            Load();
+            return std::pair{s.startup_render_width, s.startup_render_height};
+        };
+        assert(guest("render_resolution=native\n") == std::pair(1920, 1080));
+        assert(guest("render_resolution=2560x1080\n") == std::pair(2560, 1080));
+        assert(guest("render_resolution=4K\n") == std::pair(3840, 2160));
+        setenv("GOW3_EXTRA_RESOLUTIONS", "3840x1080", 1);
+        assert(guest("render_resolution=3840x1080\n") == std::pair(3840, 1080));
+        unsetenv("GOW3_EXTRA_RESOLUTIONS");
     }
     std::remove(path);
     std::puts("Upscaler support: saved choices and FSR 3.1 fallback PASS");

@@ -16,6 +16,7 @@
 #include "gow3_overlay.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
+#include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
@@ -665,6 +666,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // gow3: the guest display buffer, before the upscaler's override ("Native (window)").
     Gow3Settings::Get().game_width = int(attribute.attrib.width);
     Gow3Settings::Get().game_height = int(attribute.attrib.height);
+    static bool mismatch_logged = false;
+    if (const auto guest = SceneResolution::Guest(); !mismatch_logged &&
+        (attribute.attrib.width != guest.width || attribute.attrib.height != guest.height)) {
+        mismatch_logged = true;
+        std::printf("Render resolution: the game shows %ux%u, not the expected %ux%u (patch not "
+                    "applied?): upscaling stays off\n", attribute.attrib.width,
+                    attribute.attrib.height, guest.width, guest.height);
+    }
     Gow3Settings::Get().rcas_applied =
         fsr_settings.use_rcas &&
         Gow3Graphics::FsrPassRuns(fsr_settings.enable, true, int(image_size.width), int(image_size.height),

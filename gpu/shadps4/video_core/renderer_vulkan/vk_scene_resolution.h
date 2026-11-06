@@ -112,4 +112,9 @@ private:
     vk::UniquePipelineLayout resample_layout;
     std::vector<std::pair<std::pair<vk::Format, bool>, vk::UniquePipeline>> resample_pipelines;
 };
+
+namespace SceneResolution {
+/// gow3: the session's guest size (the startup render resolution patch).
+Size Guest();
+} // namespace SceneResolution
 } // namespace Vulkan

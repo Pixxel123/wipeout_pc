@@ -234,6 +234,11 @@ void Load() {
     v.startup_output_res = v.output_res;
     v.startup_live_resolution = v.live_resolution;
     v.startup_render_resolution = v.render_resolution;
+    const auto names = Gow3Graphics::ResolutionNames();
+    const auto [render_width, render_height] = Gow3Graphics::ResolutionSize(
+        names[std::clamp(v.render_resolution.load(), 0, int(names.size()) - 1)]);
+    v.startup_render_width = render_width;
+    v.startup_render_height = render_height;
     v.startup_engine_fps = v.engine_fps;
     const char* applied = std::getenv("GOW3_ENGINE_FPS");
     v.applied_engine_fps = applied && applied[0] ? Gow3Graphics::ParseEngineFps(std::atoi(applied))
