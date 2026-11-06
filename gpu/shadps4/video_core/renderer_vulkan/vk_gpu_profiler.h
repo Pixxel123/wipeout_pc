@@ -61,7 +61,10 @@ private:
     void Collect(u32 slice);
     void Print();
 
-    static constexpr u32 NumSlices = 4;
+    /// Frames of timestamps in flight: a slice is read and reused NumSlices frames later, and a
+    /// frame whose slice the GPU has not finished by then goes unmeasured (`skipped`). With 4, a
+    /// GPU-bound frame queue skipped many frames.
+    static constexpr u32 NumSlices = 8;
     static constexpr u32 SliceQueries = 4096;
     static inline GpuProfiler* instance_ptr = nullptr;
 
@@ -82,6 +85,11 @@ private:
     };
     std::unordered_map<u64, Total> totals;
     u64 frames = 0;
+    u64 skipped = 0; ///< frames in the window without timestamps (the GPU was behind)
+    /// Wall time between frame starts in the window, to compare the GPU ms per frame against.
+    double wall_ms = 0;
+    u64 wall_frames = 0;
+    std::chrono::steady_clock::time_point last_frame{};
     u64 current = 0;
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
