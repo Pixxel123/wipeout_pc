@@ -5,7 +5,7 @@
 // post-processing combine pass, with the scene depth and camera motion vectors, and writes the
 // result back so the game's own post, tonemap and UI continue unchanged (Native AA preset).
 //
-// Guest targets stay at 1920x1080. Host scene targets use output/preset dimensions,
+// Guest targets stay at the render resolution. Host scene targets use output/preset dimensions,
 // resized at frame boundaries. At 1080p HDR reconstruction precedes post; other outputs
 // reconstruct tonemapped scene proxies before output-size UI/display composition.
 // GOW3_RENDER_RES retains the older startup-patched guest-resolution path.
@@ -153,7 +153,7 @@ private:
     /// A target of the patched render size: the game allocates it with aligned dimensions
     /// (a 1916x1078 scene in 1916x1080 targets).
     [[nodiscard]] bool RenderTarget(u32 w, u32 h) const {
-        if (!scaled_session) return w == 1920 && h == 1080;
+        if (!scaled_session) return w == guest_width && h == guest_height;
         return w >= render_width && h >= render_height && w < render_width + 8 &&
                h < render_height + 8;
     }
@@ -218,6 +218,7 @@ private:
     u32 out_width = 0, out_height = 0;     ///< output size of the context
     bool context_hdr = true;
     u32 target_width = 1920, target_height = 1080; ///< output size of scaled presets
+    u32 guest_width = 1920, guest_height = 1080;   ///< the session's render size
     u64 ui_trigger_vs = 0x34e8a281;
     VideoCore::ImageId ldr_target{};
     VideoCore::ImageId ui_color{}, ui_depth{};

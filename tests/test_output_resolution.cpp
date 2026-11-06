@@ -44,5 +44,11 @@ int main() {
     for (uint32_t w = 1280; w < 2560; w += 16) {
         assert(!drag.Update(w, w * 9 / 16));
     }
-    std::puts("Output resolution: PASS (frame fit, output cap, game aspect, settling)");
+    // The fixed rows apply at the native render; other render resolutions output at their own size.
+    assert(FixedOrGuest(1280, 720, 1920, 1080) == Size(1280, 720));
+    assert(FixedOrGuest(3840, 2160, 1920, 1080) == Size(3840, 2160));
+    assert(FixedOrGuest(1920, 1080, 2560, 1440) == Size(2560, 1440));
+    assert(FixedOrGuest(1280, 720, 1920, 1200) == Size(1920, 1200));
+    assert(FixedOrGuest(1920, 1080, 3840, 2160) == Size(3840, 2160));
+    std::puts("Output resolution: PASS (frame fit, output cap, game aspect, settling, render size)");
 }

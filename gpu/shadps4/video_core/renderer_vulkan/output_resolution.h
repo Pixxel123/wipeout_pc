@@ -54,6 +54,14 @@ inline std::pair<uint32_t, uint32_t> Output(uint32_t window_width, uint32_t wind
     return {w, h};
 }
 
+/// A fixed Output resolution row applies to the game's own 1920x1080 render; any other render
+/// resolution outputs at its own size (the presets render below it and upscale back).
+inline std::pair<uint32_t, uint32_t> FixedOrGuest(uint32_t fixed_width, uint32_t fixed_height,
+                                                  uint32_t guest_width, uint32_t guest_height) {
+    if (guest_width == 1920 && guest_height == 1080) return {fixed_width, fixed_height};
+    return {guest_width, guest_height};
+}
+
 /// True once a size has held for kStableFrames calls: a window drag changes the size every
 /// frame, and each applied output rebuilds the upscaler and its targets.
 class Settled {
