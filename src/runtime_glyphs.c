@@ -6,8 +6,9 @@
  * value of an open Controller type row and the game's setting "Pad Style P1" (src/glyph_swap.h):
  * an open row's value is shown as it changes, else the saved P1. When the wanted style changes it
  * finds each texture's copies in guest memory by their bytes (runtime_memory_find_all, up to
- * GLYPH_MAX_COPIES) and writes the wanted style's texels over each. Plain writes, as the game's
- * own: the GPU's page tracking uploads the texture again. Smooth play first: nothing is searched
+ * GLYPH_MAX_COPIES) and writes the wanted style's texels over each, through the backing view with
+ * the range invalidated for the GPU (runtime_memory_write_guest): a page the guest keeps read-only
+ * cannot stop it, and a texture smaller than a page is uploaded again whatever its first texels. Smooth play first: nothing is searched
  * or written unless the wanted style changed, a row has just opened (a menu screen) or the game
  * has just read a texture from its archive (then the texture may have moved), and a copy is
  * written only where its whole texels were just checked to be the version thought to be there. Offsets are CUSA07671's (glyph_swap.h);
@@ -22,7 +23,9 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { GLYPH_MAX_TEXTURES=8, GLYPH_MAX_COPIES=4 };
+/* Copies: the drawn one and stale ones in freed load buffers, which hold the same bytes; every one
+ * is written, so a few stale ones cannot keep the drawn one from being found. */
+enum { GLYPH_MAX_TEXTURES=8, GLYPH_MAX_COPIES=16 };
 #define GLYPH_GUARD_AT 0x87f142
 #define GLYPH_STORE_AT 0x10ea398
 #define GLYPH_TABLE_AT 0x11ac4c8
@@ -168,22 +171,13 @@ static int all_there(const Texture *t) {
     for (int i=0;i<t->copies;++i) if (!still_there(t,i)) return 0;
     return t->copies>0;
 }
-/* Writes style `want` over copy i once its texels are checked to be its style's; 1 when done. */
+/* Writes style `want` over copy i once its texels are checked to be its style's; 1 when done. The
+ * check reads under fault recovery; the write takes the memory lock, so it comes after. */
 static int write_style(Texture *t, int i, int want) {
-    sigjmp_buf recover;
-    volatile int ok=0;
     const size_t n=t->size[want];
     const int style=t->at_style[i];
-    if (!t->at[i] || style<0 || t->size[style]!=n) return 0;
-    if (!sigsetjmp(recover,0)) {
-        runtime_fault_recover=&recover;
-        if (glyph_verify(t->at[i],t->data[style]+t->spec.skip,n)) {
-            memcpy(t->at[i],t->data[want]+t->spec.skip,n);
-            ok=1;
-        }
-    }
-    runtime_fault_recover=NULL;
-    return ok;
+    if (!t->at[i] || style<0 || t->size[style]!=n || !still_there(t,i)) return 0;
+    return runtime_memory_write_guest((uintptr_t)t->at[i],t->data[want]+t->spec.skip,n);
 }
 static void locate(Texture *t) {
     const unsigned char *blocks[GLYPH_STYLES];
@@ -236,9 +230,15 @@ static void *glyph_thread(void *unused) {
         int saved_p1=-1, live_p1=-1, live_p2=-1, rows_open=0;
         if (!read_state(image,&saved_p1,&live_p1,&live_p2,&rows_open)) continue;
         const int want=glyph_wanted_live(live_p1,live_p2,saved_p1);
-        if (want!=last_want)
+        if (rows_open!=was_open)
+            printf("Runtime: glyphs: Controller type row %s (live P1 %s, live P2 %s, saved P1 %s)\n",
+                   rows_open ? "open" : "closed",style_or_dash(live_p1),style_or_dash(live_p2),style_or_dash(saved_p1));
+        if (want!=last_want) {
             printf("Runtime: glyphs: wanted %s (live P1 %s, live P2 %s, saved P1 %s)\n",style_or_dash(want),
                    style_or_dash(live_p1),style_or_dash(live_p2),style_or_dash(saved_p1));
+            /* A new choice: a style whose search failed before is looked for again. */
+            for (int i=0;i<texture_count;++i) textures[i].failed_for=-2;
+        }
         last_want=want;
         const int opened=rows_open && !was_open;
         was_open=rows_open;

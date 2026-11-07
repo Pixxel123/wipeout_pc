@@ -122,6 +122,8 @@ uint64_t runtime_memory_flexible_available(void);
 unsigned char *runtime_image_base(void);
 int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
                             int count, uintptr_t *addresses, int *which, int max);
+int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size);
+int runtime_memory_write_guest(uintptr_t address, const void *data, uint64_t size);
 /* Starts the live glyph switch (GOW3_GLYPH_SWAP); call after runtime_file_configure. */
 void runtime_glyphs_start(void);
 /* Files whose reads `read` is told of (guest path, offset, length); set before the game starts. */

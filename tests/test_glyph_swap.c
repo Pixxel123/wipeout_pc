@@ -1,4 +1,5 @@
 #include "glyph_swap.h"
+#include "memory_find.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -6,7 +7,39 @@
 static void put64(unsigned char *p, uint64_t v) { memcpy(p,&v,8); }
 static void put32(unsigned char *p, uint32_t v) { memcpy(p,&v,4); }
 
+/* memory_find_aligned: aligned copies of any block in one pass, unaligned ones skipped. */
+static void test_find_aligned(void) {
+    enum { BLOCK=3*4096 };
+    static unsigned char memory[64*4096] __attribute__((aligned(4096)));
+    static unsigned char x[BLOCK], y[BLOCK];
+    for (int i=0;i<BLOCK;++i) { x[i]=(unsigned char)(i*7+1); y[i]=(unsigned char)(i*13+5); }
+    const unsigned char *blocks[3]={x,NULL,y};
+    const size_t sizes[3]={BLOCK,0,BLOCK}, sig[3]={4096,0,8192};
+    memset(memory,0,sizeof(memory));
+    memcpy(memory+256,x,BLOCK);            /* aligned: found */
+    memcpy(memory+5*4096+16,x,BLOCK);      /* a stale copy off the boundary: skipped */
+    memcpy(memory+9*4096+512,y,BLOCK);     /* the other block, aligned: found */
+    memcpy(memory+14*4096,x,BLOCK-1);      /* not whole: skipped */
+    memcpy(memory+20*4096+768,x,BLOCK);    /* aligned again: found */
+    memcpy(memory+60*4096,y,4096);         /* cut off by the range's end: skipped */
+    uintptr_t at[8]; int which[8];
+    const uintptr_t lo=(uintptr_t)memory, hi=lo+61*4096;
+    int n=memory_find_aligned(lo,hi,blocks,sizes,sig,3,at,which,0,8);
+    assert(n==3);
+    assert(at[0]==lo+256 && which[0]==0);
+    assert(at[1]==lo+9*4096+512 && which[1]==2);
+    assert(at[2]==lo+20*4096+768 && which[2]==0);
+    /* Appended after the hits already found, never past max. */
+    assert(memory_find_aligned(lo,hi,blocks,sizes,sig,3,at,which,6,8)==8 && at[6]==lo+256 && at[7]==lo+9*4096+512);
+    /* A block that starts before the range is not taken for one inside it. */
+    assert(memory_find_aligned(lo+512,hi,blocks,sizes,sig,3,at,which,0,8)==2 && at[0]==lo+9*4096+512);
+    /* A signature off the alignment cannot be looked for this way. */
+    const size_t odd[3]={100,0,8192+4};
+    assert(memory_find_aligned(lo,hi,blocks,sizes,odd,3,at,which,0,8)==0);
+}
+
 int main(void) {
+    test_find_aligned();
     assert(glyph_key("Motion Sensitivity")==0x1b432e78u);
     assert(glyph_key("Pad Style")==0xdde7131fu);
     assert(glyph_key("FE_Pad Style")==0xedb96967u);

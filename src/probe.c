@@ -1475,7 +1475,8 @@ int main(int argc, char **argv) {
     const char *load_log = getenv("GOW3_LOAD_LOG"); /* 0: off; 1: errors only; 2: slots only (tests) */
     if ((!strcmp(hooks_serial, "CUSA07671") || !strcmp(hooks_serial, "CUSA05670")) && !(load_log && *load_log == '0'))
         install_wipeout_logs(segments, ns, load_log && *load_log == '1' ? 1 : load_log && *load_log == '2' ? 2 : 3);
-    if (!strcmp(hooks_serial, "CUSA07671")) install_controller_accept(segments, ns);
+    /* The EU build has the same code (scripts/game_profiles.py); the hook checks the site's bytes. */
+    if (!strcmp(hooks_serial, "CUSA07671") || !strcmp(hooks_serial, "CUSA05670")) install_controller_accept(segments, ns);
     if (isa_table) {
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {
