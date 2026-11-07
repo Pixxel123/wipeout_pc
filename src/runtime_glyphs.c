@@ -132,6 +132,7 @@ static int table_indirect, table_counted;
 static pthread_mutex_t table_lock=PTHREAD_MUTEX_INITIALIZER;
 static int field_style(const unsigned char *field);
 static int accept_hooked; /* probe.c installed the Accept hook (runtime_glyphs_accept_hooked) */
+static int accepted;      /* the Accept hook committed a Controller type */
 
 /* Each guarded read in a function of its own, under fault recovery with the caller's own recovery
  * point kept: 0 when a fault stopped it. */
@@ -532,7 +533,8 @@ static void *glyph_thread(void *unused) {
     printf("Runtime: glyph switch on (%d textures, %s at start, follows the Controller type row once it is open; Accept %s)\n",
            texture_count,glyph_style_names[launch_style],
            __atomic_load_n(&accept_hooked,__ATOMIC_ACQUIRE) ? "hooked" : "not hooked: a row's value is kept as it changes");
-    int last_want=-2, was_open=0, row_seen=0, last_live[2]={-1,-1}, active=-1;
+    int last_want=-2, was_open=0, row_seen=0, last_live[2]={-1,-1}, active=-1, armed=0, last_saved[2]={-2,-2};
+    uint64_t mounted_at=0;
     char last_text[2][80]={"",""};
     for (;;) {
         glyph_pause_ns(250000000ull);
@@ -554,22 +556,33 @@ static void *glyph_thread(void *unused) {
                 if (live[p]>=0 && live[p]!=saved[p] && commit_row(image,p,live[p]))
                     printf("Runtime: Controller type P%d kept: %s\n",p+1,glyph_style_names[live[p]]);
         }
-        /* Until a Controller type row has been open the prompts stay as loaded: run.py chose them from
-         * the save, and before the profile is loaded the setting holds the row's default. A table
-         * without counts may show both screens' rows at once: the one changed last is followed. */
+        /* The prompts stay as loaded (run.py chose them from the save) until the game's profile is
+         * in: before it the setting holds the row's default. From then the saved setting is
+         * followed (an Accept changes it), and an open row's value while it is open. Armed by the
+         * profile's save being mounted 2 s ago, a Controller type row being open, or an Accept. A
+         * table without counts may show both screens' rows at once: the one changed last is
+         * followed. */
+        const uint64_t now_ns=glyph_now();
+        if (!mounted_at && runtime_savedata_mounts()) mounted_at=now_ns;
+        for (int p=0;p<2;++p)
+            if (saved[p]!=last_saved[p]) {
+                if (last_saved[p]!=-2 || saved[p]>=0) printf("Runtime: glyphs: saved P%d now %s\n",p+1,style_or_dash(saved[p]));
+                last_saved[p]=saved[p];
+            }
         const int live[2]={live_p1,live_p2};
         for (int p=0;p<2;++p) {
             if (live[p]>=0 && last_live[p]>=0 && live[p]!=last_live[p]) active=p;
             last_live[p]=live[p];
         }
-        int want;
-        if (__atomic_load_n(&table_counted,__ATOMIC_ACQUIRE)) {
-            row_seen|=rows_open;
-            want=row_seen ? glyph_wanted_live(live_p1,live_p2,saved_p1) : -1;
-        } else {
-            row_seen|=active>=0;
-            want=!row_seen ? -1 : live[active]>=0 ? live[active] : saved_p1;
+        const int counted=__atomic_load_n(&table_counted,__ATOMIC_ACQUIRE);
+        row_seen|=counted ? rows_open : active>=0;
+        if (!armed && (row_seen || __atomic_load_n(&accepted,__ATOMIC_ACQUIRE) || (mounted_at && now_ns-mounted_at>2000000000ull))) {
+            armed=1;
+            printf("Runtime: glyphs: following the Controller type (saved P1 %s)\n",style_or_dash(saved_p1));
         }
+        int want=-1;
+        if (armed)
+            want=counted ? glyph_wanted_live(live_p1,live_p2,saved_p1) : active>=0 && live[active]>=0 ? live[active] : saved_p1;
         if (rows_open!=was_open)
             printf("Runtime: glyphs: Controller type row %s (live P1 %s, live P2 %s, saved P1 %s)\n",
                    rows_open ? "open" : "closed",style_or_dash(live_p1),style_or_dash(live_p2),style_or_dash(saved_p1));
@@ -665,7 +678,10 @@ ABI void runtime_glyphs_accept(void) {
     for (int p=0;p<2;++p) style[p]=field_style(fields[p]);
     for (int p=0;p<2;++p) {
         if (style[p]<0) continue;
-        if (commit_row(image,p,style[p])) printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_style_names[style[p]]);
+        if (commit_row(image,p,style[p])) {
+            __atomic_store_n(&accepted,1,__ATOMIC_RELEASE);
+            printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_style_names[style[p]]);
+        }
         else printf("Runtime: Controller type P%d not kept (%s: no setting it fits in)\n",p+1,glyph_style_names[style[p]]);
     }
 }

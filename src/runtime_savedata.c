@@ -391,5 +391,12 @@ static const RuntimeExport exports[]={
     {"sceSaveDataSetSaveDataMemory",memory_set},
 };
 uintptr_t runtime_savedata_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
+/* How many save data mounts the game has made (the first is its profile being loaded). */
+size_t runtime_savedata_mounts(void) {
+    pthread_mutex_lock(&lock);
+    const size_t n=mounts_done;
+    pthread_mutex_unlock(&lock);
+    return n;
+}
 void runtime_savedata_report(void) { printf("Runtime: save data mounts=%zu, memory writes=%zu\n",mounts_done,memory_writes); }
 

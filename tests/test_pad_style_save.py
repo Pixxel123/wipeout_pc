@@ -1,4 +1,5 @@
 import struct
+import os
 import tempfile
 import unittest
 import zlib
@@ -62,6 +63,20 @@ class SaveTests(unittest.TestCase):
             self.assertEqual(save.saved_style(folder, 'CUSA07671', 'Pad Style P2'), 'xbox')
             self.assertEqual(other.read_bytes(), b'not a save')
             self.assertEqual(save.add_settings(folder, 'CUSA07671', 'playstation'), [])  # already there
+
+    def test_the_profile_saved_last_gives_the_style(self):
+        # PROFILE01 sorts first, but the game last saved PROFILE03: its choice is the one shown.
+        with tempfile.TemporaryDirectory() as folder:
+            paths = {}
+            for name, style, when in (('PROFILE01', 'xbox', 1_000_000), ('PROFILE03', 'playstation', 2_000_000)):
+                path = Path(folder) / '1' / 'CUSA07671' / name / 'DATA.BIN'
+                path.parent.mkdir(parents=True)
+                path.write_bytes(file(record('Pad Style P1', style)))
+                os.utime(path, (when, when))
+                paths[name] = path
+            self.assertEqual(save.saved_style(folder, 'CUSA07671', 'Pad Style P1'), 'playstation')
+            os.utime(paths['PROFILE01'], (3_000_000, 3_000_000))
+            self.assertEqual(save.saved_style(folder, 'CUSA07671', 'Pad Style P1'), 'xbox')
 
     def test_a_save_with_one_setting_gets_only_the_other(self):
         with tempfile.TemporaryDirectory() as folder:

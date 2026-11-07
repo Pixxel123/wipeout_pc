@@ -75,8 +75,14 @@ def saves(savedata, title):
 
 
 def saved_style(savedata, title, name):
-    """The first save's value of setting `name`, or None."""
-    for path in saves(savedata, title):
+    """The value of setting `name` in the profile save written last (the one the game uses: a
+    player with several profiles plays the last one saved), or None."""
+    def written(path):
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return 0
+    for path in sorted(saves(savedata, title), key=written, reverse=True):
         try:
             found = records(path.read_bytes())
         except OSError:
