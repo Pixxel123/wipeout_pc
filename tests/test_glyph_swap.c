@@ -88,6 +88,12 @@ static void test_find_checks(void) {
     assert(!glyph_table_slot(table,3,p1));                                /* misaligned pointer */
     put64(table+8*3,0);
     assert(!glyph_table_slot(table,3,p1) && glyph_field_style(NULL)==-1);
+    /* A table whose counts say nothing: the row is found by its key and value pointer alone. */
+    put64(table+8*3,(uint64_t)(uintptr_t)&field); put32(table+0x1000+4*3,0);
+    assert(!glyph_row_field(table,p1) && glyph_row_field_any(table,p1)==(const unsigned char *)&field);
+    put64(table+8*3,(uint64_t)(uintptr_t)&field+4);
+    assert(!glyph_row_field_any(table,p1));                               /* misaligned: not a pointer */
+    put64(table+8*3,0); put32(table+0x1000+4*3,1);
     assert(glyph_value_style("XBOX")==1 && glyph_value_style("DEFAULT")==0 && glyph_value_style("nintendo")==2);
     assert(glyph_value_style("Xbox")==-1 && glyph_value_style(NULL)==-1);
 }

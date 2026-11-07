@@ -854,22 +854,27 @@ static int find_in(uintptr_t lo, uintptr_t hi, const unsigned char *const *block
                    const size_t *sig_at, int count, uintptr_t *addresses, int *which, int n, int max) {
     return memory_find_aligned(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
 }
-int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
-                            int count, uintptr_t *addresses, int *which, int max) {
+/* Calls scan(lo, hi, ctx, n) over the mapped guest regions of at most max_region bytes (Linux: over
+ * the runs of their pages already in memory, so untouched memory is never committed; Windows has no
+ * residency query and reads the whole region), while fewer than max hits are found; scan returns
+ * the new count of hits. A fault (a region unmapped or protected meanwhile) drops that region's
+ * hits. The caller's fault recovery point is kept. */
+typedef int (*GuestScan)(uintptr_t lo, uintptr_t hi, void *ctx, int n);
+static int scan_guest(GuestScan scan, void *ctx, int max, uint64_t max_region) {
     volatile uintptr_t address=0;
     volatile int found=0;
     sigjmp_buf recover;
+    sigjmp_buf *const outer=runtime_fault_recover;
     uintptr_t start, end;
     int mapped;
     while (found<max && runtime_memory_region(address,&start,&end,&mapped) && end>address) {
         const volatile uintptr_t lo=start, hi=end; /* kept across the recovery jump */
-        if (mapped) {
+        if (mapped && hi-lo<=max_region) {
             if (!sigsetjmp(recover,0)) {
                 runtime_fault_recover=&recover;
                 int n=found;
 #ifdef _WIN32
-                /* No residency query here: the search commits the region's untouched pages. */
-                n=find_in(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
+                n=scan(lo,hi,ctx,n);
 #else
                 /* Runs of resident pages, 512 pages (2 MiB of 4 KiB pages) per query; a run goes on
                  * across queries. A failed query counts as pages not in memory. */
@@ -886,23 +891,52 @@ int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *si
                         if (queried && (resident[i] & 1)) {
                             if (!in_run) { run=pg>lo ? pg : lo; in_run=1; }
                         } else if (in_run) {
-                            n=find_in(run,pg,blocks,sizes,sig_at,count,addresses,which,n,max);
+                            n=scan(run,pg,ctx,n);
                             in_run=0;
                         }
                     }
                     chunk+=len;
                 }
-                if (n<max && in_run) n=find_in(run,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
+                if (n<max && in_run) n=scan(run,hi,ctx,n);
 #endif
-                found=n; /* a fault in the region drops its hits */
-                runtime_fault_recover=NULL;
-            } else {
-                runtime_fault_recover=NULL;
+                found=n;
             }
+            runtime_fault_recover=outer;
         }
         address=hi;
     }
     return found;
+}
+typedef struct { const unsigned char *const *blocks; const size_t *sizes, *sig_at; int count; uintptr_t *addresses; int *which, max; } BlockScan;
+static int scan_blocks(uintptr_t lo, uintptr_t hi, void *ctx, int n) {
+    const BlockScan *b=ctx;
+    return find_in(lo,hi,b->blocks,b->sizes,b->sig_at,b->count,b->addresses,b->which,n,b->max);
+}
+int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
+                            int count, uintptr_t *addresses, int *which, int max) {
+    BlockScan b={blocks,sizes,sig_at,count,addresses,which,max};
+    return scan_guest(scan_blocks,&b,max,UINT64_MAX);
+}
+typedef struct { const uint32_t *values; int count, align; uintptr_t *addresses; int *which, max; } WordScan;
+static int scan_words(uintptr_t lo, uintptr_t hi, void *ctx, int n) {
+    const WordScan *w=ctx;
+    const uintptr_t step=(uintptr_t)w->align;
+    for (uintptr_t p=(lo+step-1) & ~(step-1); p+4<=hi && n<w->max; p+=step) {
+        uint32_t v;
+        memcpy(&v,(const void *)p,4);
+        for (int k=0;k<w->count;++k)
+            if (v==w->values[k]) { w->addresses[n]=p; w->which[n++]=k; break; }
+    }
+    return n;
+}
+/* The places in mapped guest memory regions of at most max_region bytes where a u32 at an
+ * `align`-byte boundary (4 or 8) is one of values[count]: addresses and which (the value's
+ * index), up to max; returns how many. As runtime_memory_find_all: resident pages only on Linux,
+ * from a runtime thread or, rarely, the game thread (a whole search reads every such region). */
+int runtime_memory_find_u32(const uint32_t *values, int count, int align, uint64_t max_region,
+                            uintptr_t *addresses, int *which, int max) {
+    WordScan w={values,count,align==8 ? 8 : 4,addresses,which,max};
+    return scan_guest(scan_words,&w,max,max_region);
 }
 /* A write into guest memory from a runtime thread, as the guest's own would land for the GPU:
  * through the backing view (neither the guest's protection nor the GPU's page tracking can fault

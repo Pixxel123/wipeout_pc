@@ -118,6 +118,16 @@ static inline const unsigned char *glyph_row_field(const unsigned char *table, u
         if (glyph_table_slot(table,i,key)) return (const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
     return NULL;
 }
+/* The value pointer of the row with this key whatever its count (a table whose counts do not say
+ * which rows are open), or NULL. */
+static inline const unsigned char *glyph_row_field_any(const unsigned char *table, uint32_t key) {
+    for (int i=0;i<GLYPH_ROWS;++i) {
+        if ((uint32_t)glyph_load64(table+0x800+8*i)!=key) continue;
+        const uint64_t field=glyph_load64(table+8*i);
+        if (field && !(field & 7)) return (const unsigned char *)(uintptr_t)field;
+    }
+    return NULL;
+}
 /* The style a row's text names: a style (an entry's value) or an entry's label as the row writes
  * them (scripts/controller_row.py: FE_DEFAULT is PlayStation, XBOX is Xbox); -1 otherwise. */
 static inline int glyph_value_style(const char *text) {
