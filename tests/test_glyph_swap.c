@@ -38,8 +38,52 @@ static void test_find_aligned(void) {
     assert(memory_find_aligned(lo,hi,blocks,sizes,odd,3,at,which,0,8)==0);
 }
 
+/* What finds the settings store and the open rows' table in a build whose offsets moved (01.09). */
+static void test_find_checks(void) {
+    static unsigned char store[0x600], a[0xb0] __attribute__((aligned(8))), b[0xb0] __attribute__((aligned(8)));
+    put64(store+0x580,(uint64_t)(uintptr_t)a);
+    put32(a,glyph_key("Language")); put32(a+0x48,2); put32(a+0x4c,0x40); memcpy(a+0x68,"1",2);
+    put64(a+0x50,(uint64_t)(uintptr_t)b);
+    put32(b,glyph_key("Pad Style P1")); put32(b+0x48,5); put32(b+0x4c,0x40); memcpy(b+0x68,"xbox",5); put64(b+0x50,0);
+    assert(glyph_node_style(b)==1 && glyph_node_style(a)==-1);
+    assert(glyph_store_holds(store,glyph_key("Pad Style P1"),2048));
+    assert(!glyph_store_holds(store,glyph_key("Pad Style P1"),1));        /* past the walk's limit */
+    assert(!glyph_store_holds(store,glyph_key("Pad Style P2"),2048));     /* no such setting */
+    memcpy(b+0x68,"purple",7); put32(b+0x48,7);
+    assert(!glyph_store_holds(store,glyph_key("Pad Style P1"),2048));     /* not a style */
+    memcpy(b+0x68,"xbox",5); put32(b+0x48,5); put32(b+0x4c,4);
+    assert(!glyph_store_holds(store,glyph_key("Pad Style P1"),2048));     /* longer than its capacity */
+    put32(b+0x4c,0x40); b[0x68+4]='!';
+    assert(!glyph_store_holds(store,glyph_key("Pad Style P1"),2048));     /* no NUL */
+    b[0x68+4]=0;
+    put64(a+0x50,(uint64_t)(uintptr_t)b+1);
+    assert(!glyph_store_holds(store,glyph_key("Pad Style P1"),2048));     /* a misaligned node: not a list */
+    put64(a+0x50,(uint64_t)(uintptr_t)b);
+    assert(glyph_store_holds(store,glyph_key("Pad Style P1"),2048));
+
+    static unsigned char table[0x1400] __attribute__((aligned(8)));
+    static const char xbox[]="xbox", other[]="Normal";
+    uint64_t field=(uint64_t)(uintptr_t)xbox;
+    const uint32_t p1=glyph_key("FE_Pad Style P1");
+    put64(table+0x800+8*3,p1); put32(table+0x1000+4*3,1); put64(table+8*3,(uint64_t)(uintptr_t)&field);
+    assert(glyph_table_slot(table,3,p1));
+    assert(!glyph_table_slot(table,2,p1) && !glyph_table_slot(table,3,glyph_key("FE_Pad Style P2")));
+    assert(!glyph_table_slot(table,-1,p1) && !glyph_table_slot(table,GLYPH_ROWS,p1));
+    put32(table+0x1000+4*3,0);
+    assert(!glyph_table_slot(table,3,p1));                                /* not open */
+    put32(table+0x1000+4*3,1);
+    field=(uint64_t)(uintptr_t)other;
+    assert(!glyph_table_slot(table,3,p1));                                /* another row's kind of value */
+    field=0;
+    assert(!glyph_table_slot(table,3,p1));
+    field=(uint64_t)(uintptr_t)xbox;
+    put64(table+8*3,0);
+    assert(!glyph_table_slot(table,3,p1));
+}
+
 int main(void) {
     test_find_aligned();
+    test_find_checks();
     assert(glyph_key("Motion Sensitivity")==0x1b432e78u);
     assert(glyph_key("Pad Style")==0xdde7131fu);
     assert(glyph_key("FE_Pad Style")==0xedb96967u);

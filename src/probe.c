@@ -46,6 +46,7 @@ static uint64_t import_count;
 static unsigned char *image;
 static uint64_t image_size;
 unsigned char *runtime_image_base(void) { return image; }
+uint64_t runtime_image_size(void) { return image_size; }
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
@@ -993,23 +994,33 @@ static unsigned char *controller_accept_stub(unsigned char *p, const unsigned ch
     memcpy(p, original, length); p += length;
     return put_jump(p, resume);
 }
-static void install_controller_accept(Segment *segments, uint64_t count) {
-    enum { SITE = 0x548590, LENGTH = 11 };
+static void install_controller_accept(Segment *segments, uint64_t count, uint64_t size) {
+    enum { LENGTH = 11 };
     static const unsigned char original[LENGTH] = {
         0x49, 0x8b, 0x85, 0x08, 0x02, 0x00, 0x00,  /* mov rax,[r13+208h] */
         0x83, 0x48, 0x60, 0x02};                   /* or dword [rax+60h],2 */
-    if (!mapped(segments, count, SITE, LENGTH) || memcmp(image + SITE, original, LENGTH)) {
-        printf("Controller type: Accept hook unavailable (code differs in this eboot.bin)\n");
-        return;
+    /* 01.07's site, else the same two instructions where another build (01.09) moved them, when
+     * they occur once in the image: elsewhere they could be another screen's. */
+    static const Gow3Signature accept_site = {"49 8b 85 08 02 00 00 83 48 60 02", 0};
+    uint64_t site = 0x548590;
+    if (!mapped(segments, count, site, LENGTH) || memcmp(image + site, original, LENGTH)) {
+        site = gow3_signature_find(image, size, &accept_site);
+        if (site == UINT64_MAX || !mapped(segments, count, site, LENGTH)) {
+            printf("Controller type: Accept hook unavailable (its code is not found once in this eboot.bin); "
+                   "a row's value is kept as it changes\n");
+            return;
+        }
+        printf("Controller type: Accept site at 0x%" PRIx64 " in this eboot.bin\n", site);
     }
     unsigned char *stub = allocate(page_size);
-    controller_accept_stub(stub, original, LENGTH, (uintptr_t)runtime_glyphs_accept, (uintptr_t)(image + SITE + LENGTH));
+    controller_accept_stub(stub, original, LENGTH, (uintptr_t)runtime_glyphs_accept, (uintptr_t)(image + site + LENGTH));
     protect(stub, page_size, 5);
     /* rel32 jump: the stub is in the low mapping right after the image (allocate). */
-    if (!install_jump(SITE, LENGTH, stub)) {
+    if (!install_jump(site, LENGTH, stub)) {
         printf("Controller type: Accept hook unavailable (hook outside relative-jump range)\n");
         return;
     }
+    runtime_glyphs_accept_hooked();
     printf("Controller type: Accept commits the rows\n");
 }
 
@@ -1476,7 +1487,7 @@ int main(int argc, char **argv) {
     if ((!strcmp(hooks_serial, "CUSA07671") || !strcmp(hooks_serial, "CUSA05670")) && !(load_log && *load_log == '0'))
         install_wipeout_logs(segments, ns, load_log && *load_log == '1' ? 1 : load_log && *load_log == '2' ? 2 : 3);
     /* The EU build has the same code (scripts/game_profiles.py); the hook checks the site's bytes. */
-    if (!strcmp(hooks_serial, "CUSA07671") || !strcmp(hooks_serial, "CUSA05670")) install_controller_accept(segments, ns);
+    if (!strcmp(hooks_serial, "CUSA07671") || !strcmp(hooks_serial, "CUSA05670")) install_controller_accept(segments, ns, size);
     if (isa_table) {
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {

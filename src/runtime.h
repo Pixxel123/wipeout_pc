@@ -130,4 +130,9 @@ void runtime_glyphs_start(void);
 void runtime_file_watch(int (*wants)(const char *guest), void (*read)(const char *guest, int64_t at, int64_t n));
 /* WipEout's Controls screen Accept (probe.c hook, game thread): commits the Controller type rows. */
 ABI void runtime_glyphs_accept(void);
+void runtime_glyphs_accept_hooked(void);
+/* The size of the game's mapped image (probe.c). */
+uint64_t runtime_image_size(void);
+/* The guest mapping or gap around address: [start,end), mapped; 0 past the last mapping. */
+int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped);
 #endif

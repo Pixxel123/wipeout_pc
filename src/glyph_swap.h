@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef GOW3_GLYPH_SWAP_H
 #define GOW3_GLYPH_SWAP_H
-/* The side-effect-free parts of src/runtime_glyphs.c (WipEout CUSA07671, image offsets):
+/* The side-effect-free parts of src/runtime_glyphs.c (WipEout; image offsets of CUSA07671 01.07,
+ * which another build such as 01.09 moves: runtime_glyphs.c then finds the store and the table by
+ * what they hold, glyph_store_holds and glyph_table_slot):
  * - the game's hash of setting and row names: CRC-32 (0xedb88320) from 0, inverted (0x401a08);
  * - its settings list: store at u64 [0x10ea398], head at store+0x580, node +0 u32 key, +0x48 u32
  *   value length with its NUL, +0x4c u32 capacity of the value, +0x50 next, +0x68 the value;
@@ -80,6 +82,36 @@ static inline int glyph_commit(unsigned char *store, uint32_t key, const char *v
 static inline int glyph_style_index(const char *value) {
     for (int i=0; value && i<GLYPH_STYLES; ++i) if (!strcmp(value,glyph_style_names[i])) return i;
     return -1;
+}
+/* The value of node's setting when it is a known style (glyph_style_index), else -1: a value whose
+ * length (with its NUL) fits its capacity and the node. */
+static inline int glyph_node_style(const unsigned char *node) {
+    const uint32_t length=glyph_load32(node+0x48), capacity=glyph_load32(node+0x4c);
+    char value[16];
+    if (!length || length>capacity || capacity>4096 || length>sizeof(value)) return -1;
+    memcpy(value,node+0x68,length);
+    if (value[length-1]) return -1;
+    return glyph_style_index(value);
+}
+/* Whether `store` looks like the game's settings store: its list (walked at most max_nodes, every
+ * node pointer 8-aligned) holds the setting with this key and a known style as its value. For
+ * finding the store in a build whose offsets differ; the caller recovers from faults. */
+static inline int glyph_store_holds(const unsigned char *store, uint32_t key, int max_nodes) {
+    const unsigned char *node=(const unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
+    for (int n=0; node && n<max_nodes; ++n, node=(const unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
+        if ((uintptr_t)node & 7) return 0;
+        if (glyph_load32(node)==key) return glyph_node_style(node)>=0;
+    }
+    return 0;
+}
+/* Whether slot i of `table` is an open row with this key whose value is a known style: what the
+ * table of rows on open screens holds while a Controller type row is shown. */
+static inline int glyph_table_slot(const unsigned char *table, int i, uint32_t key) {
+    if (i<0 || i>=GLYPH_ROWS || (uint32_t)glyph_load64(table+0x800+8*i)!=key || !glyph_load32(table+0x1000+4*i)) return 0;
+    const unsigned char *field=(const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
+    if (!field || ((uintptr_t)field & 7)) return 0;
+    const char *value=(const char *)(uintptr_t)glyph_load64(field);
+    return value && glyph_style_index(value)>=0;
 }
 /* The style the prompts should show: an open Controller type row's live value (player 2's before
  * player 1's; one Controls screen is open at a time), else player 1's saved setting. Each is a
