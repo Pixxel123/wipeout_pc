@@ -96,6 +96,12 @@ static void load_config(const char *path) {
             if (n) printf("Runtime: glyphs: config line skipped: %.*s\n",n<80 ? n : 80,line);
             continue;
         }
+        /* Two names of one archive entry (the controller sheet's 2x and 1x pictures can share their
+         * bytes) are one texture. */
+        int seen=0;
+        for (int i=0;i<texture_count && !seen;++i)
+            seen=textures[i].spec.offset==t->spec.offset && !strcasecmp(textures[i].spec.guest,t->spec.guest);
+        if (seen) { memset(t,0,sizeof(*t)); continue; }
         int styles=0;
         for (int s=0;s<GLYPH_STYLES;++s) {
             if (!t->spec.files[s][0]) continue;
@@ -226,7 +232,10 @@ static void find_places(const unsigned char *image, uint64_t now) {
         unsigned char word[8];
         if (size>GLYPH_STORE_AT+8 && image_read(image,GLYPH_STORE_AT,word,8)) {
             const uint64_t store=glyph_load64(word);
-            if (store && store_ok((const unsigned char *)(uintptr_t)store)) at=GLYPH_STORE_AT;
+            if (store && store_ok((const unsigned char *)(uintptr_t)store)) {
+                at=GLYPH_STORE_AT;
+                printf("Runtime: glyphs: settings store at image+0x%llx (01.07's place)\n",(unsigned long long)at);
+            }
         }
         if (at<0) at=find_store(image,size);
         if (at>=0) __atomic_store_n(&store_at,at,__ATOMIC_RELEASE);
@@ -234,7 +243,10 @@ static void find_places(const unsigned char *image, uint64_t now) {
     if (__atomic_load_n(&table_at,__ATOMIC_ACQUIRE)<0 && now>=table_next && size) {
         table_next=now+1000000000ull;
         int64_t at=-1;
-        if (size>GLYPH_TABLE_AT+0x1000+4*GLYPH_ROWS && table_ok(image+GLYPH_TABLE_AT,-1)) at=GLYPH_TABLE_AT;
+        if (size>GLYPH_TABLE_AT+0x1000+4*GLYPH_ROWS && table_ok(image+GLYPH_TABLE_AT,-1)) {
+            at=GLYPH_TABLE_AT;
+            printf("Runtime: glyphs: open rows table at image+0x%llx (01.07's place)\n",(unsigned long long)at);
+        }
         if (at<0) at=find_table(image,size);
         if (at>=0) __atomic_store_n(&table_at,at,__ATOMIC_RELEASE);
     }
@@ -243,12 +255,46 @@ static void find_places(const unsigned char *image, uint64_t now) {
  * open Controller type rows (-1 when not open), rows_open whether either row is open (registered
  * with a count, whatever its value pointers hold at that moment). A place not known yet reads as
  * nothing there. */
-static int read_state(const unsigned char *image, int saved[2], int *live_p1, int *live_p2, int *rows_open) {
+/* Up to 24 characters of the text at `from` into `to` (unprintable ones as '?'); 1 when read. */
+static int copy_text(const char *from, char to[25]) {
+    for (int i=0; i<24 && from[i]; ++i) to[i]=from[i]>=32 && from[i]<127 ? from[i] : '?', to[i+1]=0;
+    return 1;
+}
+static __attribute__((noinline)) int guarded_text(const char *from, char to[25]) {
+    volatile int ok;
+    to[0]=0;
+    GLYPH_GUARDED(ok,copy_text(from,to));
+    return ok;
+}
+/* What an open row's value pointer holds, for the log: the text it points at and the text at it. */
+static void describe_field(const unsigned char *field, char *out, size_t cap) {
+    char pointed[25]="", inline_text[25]="";
+    unsigned char word[8];
+    if (guarded_text((const char *)field,inline_text) && image_read(field,0,word,8)) {
+        const uint64_t string=glyph_load64(word);
+        if (string && !(string>>47)) guarded_text((const char *)(uintptr_t)string,pointed);
+    }
+    snprintf(out,cap,"-> \"%s\", at it \"%s\"",pointed,inline_text);
+}
+/* The style of an open row's value (glyph_field_style), each reading under fault recovery of its
+ * own: the first 8 bytes at the pointer may be text, not an address. */
+static __attribute__((noinline)) int field_style(const unsigned char *field) {
+    volatile int pointed, at;
+    if (!field) return -1;
+    GLYPH_GUARDED(pointed,glyph_pointed_style(field)+2);
+    if (pointed>=2) return pointed-2;
+    GLYPH_GUARDED(at,glyph_inline_style(field)+2);
+    return at>=2 ? at-2 : -1;
+}
+/* text: each open row's value pointer as describe_field reads it ("" when not open). */
+static int read_state(const unsigned char *image, int saved[2], int *live_p1, int *live_p2, int *rows_open, char text[2][80]) {
     sigjmp_buf recover;
     volatile int ok=0;
+    const unsigned char *volatile fields[2]={NULL,NULL};
     const int64_t store_off=__atomic_load_n(&store_at,__ATOMIC_ACQUIRE), table_off=__atomic_load_n(&table_at,__ATOMIC_ACQUIRE);
     saved[0]=saved[1]=*live_p1=*live_p2=-1;
     *rows_open=0;
+    text[0][0]=text[1][0]=0;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
         const unsigned char *store=store_off<0 ? NULL : (const unsigned char *)(uintptr_t)glyph_load64(image+store_off);
@@ -259,14 +305,19 @@ static int read_state(const unsigned char *image, int saved[2], int *live_p1, in
         }
         if (table_off>=0) {
             const unsigned char *table=image+table_off;
-            *live_p1=glyph_style_index(glyph_row_value(table,glyph_key("FE_Pad Style P1")));
-            *live_p2=glyph_style_index(glyph_row_value(table,glyph_key("FE_Pad Style P2")));
+            fields[0]=glyph_row_field(table,glyph_key("FE_Pad Style P1"));
+            fields[1]=glyph_row_field(table,glyph_key("FE_Pad Style P2"));
             *rows_open=glyph_row_open(table,glyph_key("FE_Pad Style P1")) || glyph_row_open(table,glyph_key("FE_Pad Style P2"));
         }
         ok=1;
     }
     runtime_fault_recover=NULL;
-    return ok;
+    if (!ok) return 0;
+    /* What the values hold, each read guarded on its own (a fault there is no fault of the rest). */
+    for (int p=0;p<2;++p) if (fields[p]) describe_field(fields[p],text[p],80);
+    *live_p1=field_style(fields[0]);
+    *live_p2=field_style(fields[1]);
+    return 1;
 }
 /* Writes the value of player p's open row into its setting (as the Accept hook): 1 when written. */
 static int commit_row(const unsigned char *image, int p, int style) {
@@ -350,15 +401,23 @@ static void *glyph_thread(void *unused) {
     unsigned char *image;
     while (!(image=runtime_image_base())) glyph_pause_ns(1000000000ull);
     glyph_pause_ns(2000000000ull);
-    printf("Runtime: glyph switch on (%d textures, %s at start; Accept %s)\n",texture_count,glyph_style_names[launch_style],
+    printf("Runtime: glyph switch on (%d textures, %s at start, follows the Controller type row once it is open; Accept %s)\n",
+           texture_count,glyph_style_names[launch_style],
            __atomic_load_n(&accept_hooked,__ATOMIC_ACQUIRE) ? "hooked" : "not hooked: a row's value is kept as it changes");
-    int last_want=-2, was_open=0;
+    int last_want=-2, was_open=0, row_seen=0;
+    char last_text[2][80]={"",""};
     for (;;) {
         glyph_pause_ns(250000000ull);
         find_places(image,glyph_now());
         int saved[2], live_p1=-1, live_p2=-1, rows_open=0;
-        if (!read_state(image,saved,&live_p1,&live_p2,&rows_open)) continue;
+        char text[2][80];
+        if (!read_state(image,saved,&live_p1,&live_p2,&rows_open,text)) continue;
         const int saved_p1=saved[0];
+        for (int p=0;p<2;++p)
+            if (strcmp(text[p],last_text[p])) {
+                if (text[p][0]) printf("Runtime: glyphs: P%d row value %s (%s)\n",p+1,text[p],style_or_dash(p ? live_p2 : live_p1));
+                strcpy(last_text[p],text[p]);
+            }
         /* No Accept hook in this build (its code moved, probe.c): the row's value is written into
          * its setting as it changes, so it stays after the screen is left (Cancel keeps it too). */
         if (!__atomic_load_n(&accept_hooked,__ATOMIC_ACQUIRE)) {
@@ -367,7 +426,10 @@ static void *glyph_thread(void *unused) {
                 if (live[p]>=0 && live[p]!=saved[p] && commit_row(image,p,live[p]))
                     printf("Runtime: Controller type P%d kept: %s\n",p+1,glyph_style_names[live[p]]);
         }
-        const int want=glyph_wanted_live(live_p1,live_p2,saved_p1);
+        /* Until a Controller type row has been open the prompts stay as loaded: run.py chose them from
+         * the save, and before the profile is loaded the setting holds the row's default. */
+        row_seen|=rows_open;
+        const int want=row_seen ? glyph_wanted_live(live_p1,live_p2,saved_p1) : -1;
         if (rows_open!=was_open)
             printf("Runtime: glyphs: Controller type row %s (live P1 %s, live P2 %s, saved P1 %s)\n",
                    rows_open ? "open" : "closed",style_or_dash(live_p1),style_or_dash(live_p2),style_or_dash(saved_p1));
@@ -437,14 +499,16 @@ ABI void runtime_glyphs_accept(void) {
         return;
     }
     static const char *const rows[2]={"FE_Pad Style P1","FE_Pad Style P2"};
-    volatile int style[2]={-1,-1};
+    const unsigned char *volatile fields[2]={NULL,NULL};
+    int style[2];
     sigjmp_buf recover;
     sigjmp_buf *const outer=runtime_fault_recover;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
-        for (int p=0;p<2;++p) style[p]=glyph_style_index(glyph_row_value(image+table_off,glyph_key(rows[p])));
+        for (int p=0;p<2;++p) fields[p]=glyph_row_field(image+table_off,glyph_key(rows[p]));
     }
     runtime_fault_recover=outer;
+    for (int p=0;p<2;++p) style[p]=field_style(fields[p]);
     for (int p=0;p<2;++p) {
         if (style[p]<0) continue;
         if (commit_row(image,p,style[p])) printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_style_names[style[p]]);

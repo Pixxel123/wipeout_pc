@@ -104,14 +104,43 @@ static inline int glyph_store_holds(const unsigned char *store, uint32_t key, in
     }
     return 0;
 }
-/* Whether slot i of `table` is an open row with this key whose value is a known style: what the
- * table of rows on open screens holds while a Controller type row is shown. */
+/* Whether slot i of `table` is an open row with this key: its key, a count and a value pointer, as
+ * the table of rows on open screens holds while a Controller type row is shown. What the value
+ * points at is read with glyph_value_style. */
 static inline int glyph_table_slot(const unsigned char *table, int i, uint32_t key) {
     if (i<0 || i>=GLYPH_ROWS || (uint32_t)glyph_load64(table+0x800+8*i)!=key || !glyph_load32(table+0x1000+4*i)) return 0;
-    const unsigned char *field=(const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
-    if (!field || ((uintptr_t)field & 7)) return 0;
-    const char *value=(const char *)(uintptr_t)glyph_load64(field);
-    return value && glyph_style_index(value)>=0;
+    const uint64_t field=glyph_load64(table+8*i);
+    return field && !(field & 7);
+}
+/* The value pointer of the open row with this key (what its slot points at), or NULL. */
+static inline const unsigned char *glyph_row_field(const unsigned char *table, uint32_t key) {
+    for (int i=0;i<GLYPH_ROWS;++i)
+        if (glyph_table_slot(table,i,key)) return (const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
+    return NULL;
+}
+/* The style a row's text names: a style (an entry's value) or an entry's label as the row writes
+ * them (scripts/controller_row.py: FE_DEFAULT is PlayStation, XBOX is Xbox); -1 otherwise. */
+static inline int glyph_value_style(const char *text) {
+    const int style=glyph_style_index(text);
+    if (style>=0 || !text) return style;
+    if (!strcmp(text,"FE_DEFAULT") || !strcmp(text,"DEFAULT")) return 0;
+    if (!strcmp(text,"XBOX")) return 1;
+    return -1;
+}
+/* The style the string an open row's value pointer points at names (the selected entry's value),
+ * or -1. Reads where the pointer's first 8 bytes point: the runtime calls it under fault recovery. */
+static inline int glyph_pointed_style(const unsigned char *field) {
+    const uint64_t string=field ? glyph_load64(field) : 0;
+    return string && !(string>>47) ? glyph_value_style((const char *)(uintptr_t)string) : -1;
+}
+/* The style the text at the value pointer itself names, or -1. */
+static inline int glyph_inline_style(const unsigned char *field) {
+    return field ? glyph_value_style((const char *)field) : -1;
+}
+/* The value's style: the string it points at, else the text at it. */
+static inline int glyph_field_style(const unsigned char *field) {
+    const int style=glyph_pointed_style(field);
+    return style>=0 ? style : glyph_inline_style(field);
 }
 /* The style the prompts should show: an open Controller type row's live value (player 2's before
  * player 1's; one Controls screen is open at a time), else player 1's saved setting. Each is a

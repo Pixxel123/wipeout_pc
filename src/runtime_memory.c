@@ -840,53 +840,22 @@ int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, i
     return found;
 }
 /* The places in mapped guest memory that hold one of `count` byte blocks whole, found by 64 bytes
- * of each at sig_at[i], up to max of them: addresses[k] and which[k] (that block's index); returns
- * how many. The search goes on past a hit (after the matched block). Faults (a region unmapped or
- * protected meanwhile) skip the region. A full search reads every mapping once: call it only when
- * needed, from a runtime thread. Linux reads only pages already in memory (mincore), so the search
- * commits none of the guest's untouched memory; a block must lie whole in one run of such pages (a
- * texture the GPU uploaded is in memory).
- * One pass looks for every block at once, at 256-byte boundaries only: the GPU reads a texture
- * from a 256-byte aligned address (a T# holds its base in 256-byte units), so the copy that is
- * drawn is there, and the stale copies left in freed load buffers mostly are not. Only when that
- * finds nothing is every byte searched, a block at a time (signatures at multiples of 4096 from a
- * block's start keep an aligned block's signature aligned). */
-static const unsigned char *find_bytes(const unsigned char *p, size_t n, const unsigned char *needle, size_t k) {
-#ifdef _WIN32 /* MinGW has no memmem */
-    for (const unsigned char *end=p+n; p && (size_t)(end-p)>=k; ++p) {
-        p=memchr(p,needle[0],(size_t)(end-p)-k+1);
-        if (!p) return NULL;
-        if (!memcmp(p,needle,k)) return p;
-    }
-    return NULL;
-#else
-    return memmem(p,n,needle,k);
-#endif
-}
-/* The blocks whole in [lo,hi), as runtime_memory_find_all, appended after the n already found;
- * returns the new count. Call it under fault recovery. aligned: only blocks that start at a
- * FIND_ALIGN boundary, all blocks in one pass. */
+ * of each at sig_at[i] (a multiple of 256), up to max of them: addresses[k] and which[k] (that
+ * block's index); returns how many. Only blocks that start at a 256-byte boundary are looked for,
+ * every block in one pass (src/memory_find.h): the GPU reads a texture from a 256-byte aligned
+ * address (a T# holds its base in 256-byte units), so the copy that is drawn is there, and the
+ * stale copies left in freed load buffers mostly are not. A block not in memory yet (a texture
+ * not loaded) costs one pass, not a byte-by-byte search. The search goes on past a hit. Faults (a
+ * region unmapped or protected meanwhile) skip the region. A full search reads every mapping once:
+ * call it only when needed, from a runtime thread. Linux reads only pages already in memory
+ * (mincore), so the search commits none of the guest's untouched memory; a block must lie whole in
+ * one run of such pages (a texture the GPU uploaded is in memory). */
 static int find_in(uintptr_t lo, uintptr_t hi, const unsigned char *const *blocks, const size_t *sizes,
-                   const size_t *sig_at, int count, uintptr_t *addresses, int *which, int n, int max, int aligned) {
-    if (aligned) return memory_find_aligned(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
-    for (int b=0; b<count && n<max; ++b) {
-        if (!blocks[b] || sizes[b]<sig_at[b]+64) continue;
-        const unsigned char *p=(const unsigned char *)lo, *stop=(const unsigned char *)hi;
-        while (n<max && p<stop && (p=find_bytes(p,(size_t)(stop-p),blocks[b]+sig_at[b],64))) {
-            const uintptr_t base=(uintptr_t)p-sig_at[b];
-            if (base>=lo && base+sizes[b]<=hi && !memcmp((const void *)base,blocks[b],sizes[b])) {
-                addresses[n]=base;
-                which[n++]=b;
-                p=(const unsigned char *)(base+sizes[b]+sig_at[b]); /* a next copy starts after this one */
-                continue;
-            }
-            ++p;
-        }
-    }
-    return n;
+                   const size_t *sig_at, int count, uintptr_t *addresses, int *which, int n, int max) {
+    return memory_find_aligned(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
 }
-static int find_pass(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
-                     int count, uintptr_t *addresses, int *which, int max, int aligned) {
+int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
+                            int count, uintptr_t *addresses, int *which, int max) {
     volatile uintptr_t address=0;
     volatile int found=0;
     sigjmp_buf recover;
@@ -900,7 +869,7 @@ static int find_pass(const unsigned char *const *blocks, const size_t *sizes, co
                 int n=found;
 #ifdef _WIN32
                 /* No residency query here: the search commits the region's untouched pages. */
-                n=find_in(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max,aligned);
+                n=find_in(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
 #else
                 /* Runs of resident pages, 512 pages (2 MiB of 4 KiB pages) per query; a run goes on
                  * across queries. A failed query counts as pages not in memory. */
@@ -917,13 +886,13 @@ static int find_pass(const unsigned char *const *blocks, const size_t *sizes, co
                         if (queried && (resident[i] & 1)) {
                             if (!in_run) { run=pg>lo ? pg : lo; in_run=1; }
                         } else if (in_run) {
-                            n=find_in(run,pg,blocks,sizes,sig_at,count,addresses,which,n,max,aligned);
+                            n=find_in(run,pg,blocks,sizes,sig_at,count,addresses,which,n,max);
                             in_run=0;
                         }
                     }
                     chunk+=len;
                 }
-                if (n<max && in_run) n=find_in(run,hi,blocks,sizes,sig_at,count,addresses,which,n,max,aligned);
+                if (n<max && in_run) n=find_in(run,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
 #endif
                 found=n; /* a fault in the region drops its hits */
                 runtime_fault_recover=NULL;
@@ -934,11 +903,6 @@ static int find_pass(const unsigned char *const *blocks, const size_t *sizes, co
         address=hi;
     }
     return found;
-}
-int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
-                            int count, uintptr_t *addresses, int *which, int max) {
-    const int found=find_pass(blocks,sizes,sig_at,count,addresses,which,max,1);
-    return found ? found : find_pass(blocks,sizes,sig_at,count,addresses,which,max,0);
 }
 /* A write into guest memory from a runtime thread, as the guest's own would land for the GPU:
  * through the backing view (neither the guest's protection nor the GPU's page tracking can fault

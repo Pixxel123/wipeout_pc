@@ -62,23 +62,34 @@ static void test_find_checks(void) {
     assert(glyph_store_holds(store,glyph_key("Pad Style P1"),2048));
 
     static unsigned char table[0x1400] __attribute__((aligned(8)));
-    static const char xbox[]="xbox", other[]="Normal";
+    static const char xbox[]="xbox", label[]="FE_DEFAULT", other[]="Normal";
     uint64_t field=(uint64_t)(uintptr_t)xbox;
     const uint32_t p1=glyph_key("FE_Pad Style P1");
     put64(table+0x800+8*3,p1); put32(table+0x1000+4*3,1); put64(table+8*3,(uint64_t)(uintptr_t)&field);
     assert(glyph_table_slot(table,3,p1));
     assert(!glyph_table_slot(table,2,p1) && !glyph_table_slot(table,3,glyph_key("FE_Pad Style P2")));
     assert(!glyph_table_slot(table,-1,p1) && !glyph_table_slot(table,GLYPH_ROWS,p1));
+    assert(glyph_row_field(table,p1)==(const unsigned char *)&field && !glyph_row_field(table,glyph_key("FE_Pad Style P2")));
     put32(table+0x1000+4*3,0);
-    assert(!glyph_table_slot(table,3,p1));                                /* not open */
+    assert(!glyph_table_slot(table,3,p1) && !glyph_row_field(table,p1)); /* not open */
     put32(table+0x1000+4*3,1);
+    /* The row is open whatever its value; what the value names is read separately. */
+    assert(glyph_field_style(glyph_row_field(table,p1))==1);              /* -> the entry's value */
+    field=(uint64_t)(uintptr_t)label;
+    assert(glyph_field_style(glyph_row_field(table,p1))==0);              /* -> the entry's label */
     field=(uint64_t)(uintptr_t)other;
-    assert(!glyph_table_slot(table,3,p1));                                /* another row's kind of value */
-    field=0;
-    assert(!glyph_table_slot(table,3,p1));
-    field=(uint64_t)(uintptr_t)xbox;
+    assert(glyph_table_slot(table,3,p1) && glyph_field_style(glyph_row_field(table,p1))==-1);
+    /* The text at the pointer itself (its first 8 bytes are no address, so nothing is followed). */
+    static char inline_value[16] __attribute__((aligned(8)))="FE_DEFAULT";
+    put64(table+8*3,(uint64_t)(uintptr_t)inline_value);
+    assert(glyph_pointed_style(glyph_row_field(table,p1))==-1 && glyph_inline_style(glyph_row_field(table,p1))==0);
+    assert(glyph_field_style(glyph_row_field(table,p1))==0);
+    put64(table+8*3,(uint64_t)(uintptr_t)&field+1);
+    assert(!glyph_table_slot(table,3,p1));                                /* misaligned pointer */
     put64(table+8*3,0);
-    assert(!glyph_table_slot(table,3,p1));
+    assert(!glyph_table_slot(table,3,p1) && glyph_field_style(NULL)==-1);
+    assert(glyph_value_style("XBOX")==1 && glyph_value_style("DEFAULT")==0 && glyph_value_style("nintendo")==2);
+    assert(glyph_value_style("Xbox")==-1 && glyph_value_style(NULL)==-1);
 }
 
 int main(void) {

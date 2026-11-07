@@ -29,7 +29,7 @@ import gnf
 import psarc
 
 VERSION = 4  # of the drawing and the patches: a change rebuilds the cached ones
-DUAL_VERSION = 1  # of the dual layout and its two sheets
+DUAL_VERSION = 2  # of the dual layout and its two sheets
 STYLES = ('playstation', 'xbox')
 SHARE = 'SelectButton'  # the DualShock 4's Share highlight: the Xbox drawing has no such button
 SVG = Path(__file__).resolve().parent / 'art' / 'xbox_controller.svg'
@@ -566,9 +566,10 @@ def _dual_changes(holders, row=True):
                             sheet = sheet.resize((texture.width, texture.height), Image.LANCZOS)
                         encoded[key] = texture.replaced(sheet)
                     variants[style] = encoded[key]
-                if (archive_name, archive, i) == copies[-1]:
-                    swaps.append((archive_name, archive.entries[i]['offset'],
-                                  sum(stored for stored, _length in archive.blocks(i)), variants))
+                offset = archive.entries[i]['offset']
+                # Two names of one entry (the 2x and 1x sheets can share their bytes): one texture.
+                if (archive_name, archive, i) == copies[-1] and all((a, o) != (archive_name, offset) for a, o, _l, _v in swaps):
+                    swaps.append((archive_name, offset, sum(stored for stored, _length in archive.blocks(i)), variants))
             repacked = {}
             for style, data in variants.items():
                 if data not in repacked:
@@ -584,7 +585,8 @@ def _dual_changes(holders, row=True):
                   'its copies are left as they are', flush=True)
             continue
         for (_name, style), parts in files.items():
-            result[style].setdefault(archive_name, []).extend(parts)
+            kept = result[style].setdefault(archive_name, [])
+            kept.extend(change for change in parts if change not in kept)  # one entry under two names
     return result, swaps
 
 
