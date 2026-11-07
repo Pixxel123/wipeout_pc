@@ -1240,6 +1240,7 @@ int main(int argc, char **argv) {
     }
     if (app0) {
         runtime_file_configure(app0, user_dir ? user_dir : "user");
+        runtime_glyphs_start(); /* WipEout's live controller glyphs and picture (GOW3_GLYPH_SWAP) */
         for (int i = 0; i < mount_count; ++i) {
             const char *eq = strchr(mounts[i], '=');
             char guest[64];

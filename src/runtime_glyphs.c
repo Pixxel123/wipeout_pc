@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* Live controller glyphs (WipEout, the Controls screens' Controller type rows):
- * GOW3_GLYPH_SWAP=<file> names the button font's atlas and tab textures and a file of each style's
- * version (scripts/wipeout_glyphs.py --swap-config). A thread reads four times a second the live
+/* Live controller glyphs and picture (WipEout, the Controls screens' Controller type rows):
+ * GOW3_GLYPH_SWAP=<file> names the button font's atlas and tab textures and the Controls screen's
+ * controller sheets, and a file of each style's version (scripts/wipeout_glyphs.py and
+ * scripts/xbox_controls.py --swap-config). A thread reads four times a second the live
  * value of an open Controller type row and the game's setting "Pad Style P1" (src/glyph_swap.h):
  * an open row's value is shown as it changes, else the saved P1. When the wanted style changes it
  * finds each texture's copies in guest memory by their bytes (runtime_memory_find_all, up to
@@ -37,6 +38,7 @@ typedef struct {
     int shown;           /* the style all copies hold (as loaded while none is known), or -1 */
     int failed_for;      /* the wanted style a search last failed for, or -2 */
     uint64_t read_at;    /* ns of the last read of its archive range; 0 when handled */
+    int start;           /* the style the game's file patches load: launch_style, else playstation */
     int reloaded;        /* read again since the last search: only the start style is looked for */
     uint64_t retry_at;   /* ns of the one more search after a failed one following a read; 0 none */
 } Texture;
@@ -101,7 +103,10 @@ static void load_config(const char *path) {
             ++styles;
         }
         if (styles<2) { for (int s=0;s<GLYPH_STYLES;++s) free(t->data[s]); memset(t,0,sizeof(*t)); continue; }
-        t->shown=launch_style; t->failed_for=-2; /* as loaded: where is found only when needed */
+        /* A texture without the launch style's version (the controller sheet has no Nintendo one)
+         * starts as PlayStation, as run.py loads it. */
+        t->start=t->data[launch_style] ? launch_style : 0;
+        t->shown=t->start; t->failed_for=-2; /* as loaded: where is found only when needed */
         ++texture_count;
     }
     fclose(f);
@@ -185,7 +190,7 @@ static void locate(Texture *t) {
     /* Just read again, the texture holds the start style: a copy of another style written earlier
      * may still be in memory and must not be taken for it. */
     for (int s=0;s<GLYPH_STYLES;++s)
-        blocks[s]=t->data[s] && (!t->reloaded || s==launch_style) ? t->data[s]+t->spec.skip : NULL;
+        blocks[s]=t->data[s] && (!t->reloaded || s==t->start) ? t->data[s]+t->spec.skip : NULL;
     t->reloaded=0;
     uintptr_t found[GLYPH_MAX_COPIES];
     const uint64_t start=glyph_now();
@@ -245,7 +250,7 @@ static void *glyph_thread(void *unused) {
             const uint64_t read=__atomic_load_n(&t->read_at,__ATOMIC_ACQUIRE);
             if (read && now>read && now-read>1500000000ull) {
                 __atomic_store_n(&t->read_at,0,__ATOMIC_RELEASE);
-                t->copies=0; t->shown=launch_style; t->failed_for=-2;
+                t->copies=0; t->shown=t->start; t->failed_for=-2;
                 t->reloaded=1; t->retry_at=0;
             }
             /* A Controller type row just opened (a menu screen, never a race): the copies are found
@@ -308,11 +313,11 @@ ABI void runtime_glyphs_accept(void) {
         else printf("Runtime: Controller type P%d not kept (%s: no setting it fits in)\n",p+1,glyph_style_names[style[p]]);
     }
 }
-int runtime_glyphs_watches(const char *guest) {
+static int glyphs_watches(const char *guest) {
     for (int i=0;i<texture_count;++i) if (!strcasecmp(textures[i].spec.guest,guest)) return 1;
     return 0;
 }
-void runtime_glyphs_read(const char *guest, int64_t at, int64_t n) {
+static void glyphs_read(const char *guest, int64_t at, int64_t n) {
     for (int i=0;i<texture_count;++i) {
         Texture *t=&textures[i];
         if (at<(int64_t)(t->spec.offset+t->spec.length) && at+n>(int64_t)t->spec.offset && !strcasecmp(t->spec.guest,guest))
@@ -326,6 +331,9 @@ void runtime_glyphs_start(void) {
     launch_style=glyph_style_index(getenv("GOW3_GLYPH_STYLE"));
     if (launch_style<0) launch_style=0;
     load_config(path);
+    printf("Runtime: glyphs: %d textures from %s\n",texture_count,path);
+    if (!texture_count) return;
+    runtime_file_watch(glyphs_watches,glyphs_read);
     pthread_t thread;
-    if (texture_count && !pthread_create(&thread,NULL,glyph_thread,NULL)) pthread_detach(thread);
+    if (!pthread_create(&thread,NULL,glyph_thread,NULL)) pthread_detach(thread);
 }

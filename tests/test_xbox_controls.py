@@ -280,6 +280,220 @@ class BuildTest(unittest.TestCase):
             self.assertFalse((out / 'file_patches.txt').exists())
 
 
+# Where a DualShock 4's highlights could be on the screen (x y width height), all different.
+PS_PLACES = {'CrossButton': (570, 223, 45, 45), 'CircleButton': (615, 183, 45, 45), 'SquareButton': (525, 183, 45, 45),
+             'TriangleButton': (570, 143, 45, 45), 'L1Button': (110, 73, 110, 30), 'R1Button': (570, 73, 110, 30),
+             'L2Button': (120, 33, 90, 40), 'R2Button': (580, 33, 90, 40), 'L3Button': (230, 263, 90, 90),
+             'R3Button': (470, 263, 90, 90), 'SelectButton': (240, 123, 30, 40)}
+# Their sprites on the game's sheet (U V TxtrWidth TxtrHeight): above and below the controller.
+PS_SPRITES = {name: (10 + 90 * (n % 10), 10 if n < 10 else 900, 60, 60) for n, name in enumerate(sorted(PS_PLACES))}
+
+
+def ps_layout(body=('10.50', '33.00'), places=PS_PLACES):
+    """layout() with each highlight at its own place and sprite, as the game's file has them."""
+    text = layout(body=body).decode('latin1')
+    old = 'x="529.50" y="219.75" width="67.50" Height="57.75" U="692" V="889"'
+
+    def place(match):
+        x, y, w, h = places[match.group(1)]
+        u, v, tw, th = PS_SPRITES[match.group(1)]
+        return (match.group(0).replace(old, f'x="{x:.2f}" y="{y:.2f}" width="{w:.2f}" Height="{h:.2f}" U="{u}" V="{v}"')
+                .replace('TxtrWidth="170" TxtrHeight="115"', f'TxtrWidth="{tw}" TxtrHeight="{th}"'))
+    return re.sub(r'name="(\w+)"[^\r]*\r\n[^\r]*', place, text).encode('latin1')
+
+
+def ps_sheet():
+    """The game's sheet, as an image: the controller grey, each sprite its own colour."""
+    from PIL import Image, ImageDraw
+    sheet = Image.new('RGBA', (1024, 1024), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sheet)
+    draw.rectangle((0, 270, 1023, 825), fill=(128, 128, 128, 255))
+    for n, (u, v, w, h) in enumerate(PS_SPRITES.values()):
+        draw.rectangle((u, v, u + w - 1, v + h - 1), fill=(20 * n, 255, 0, 255))
+    return sheet
+
+
+def image_replaced(texture, image):
+    """gnf.Texture.replaced, fast: noise seeded by the image, so each style's sheet has its own."""
+    import hashlib
+    import random
+    rng = random.Random(hashlib.md5(image.tobytes()).digest())
+    return texture.data[:gnf.HEADER] + bytes(rng.getrandbits(8) for _ in range(len(texture.data) - gnf.HEADER))
+
+
+class DualTest(unittest.TestCase):
+    """Both controllers on one layout: the picture follows the Controller type row (--swap-config)."""
+
+    def test_each_highlight_covers_its_button_on_both_controllers(self):
+        text = ps_layout().decode('latin1')
+        _sheet, sprites = xc.draw_sheet()
+        slots = xc.dual_layout(text, sprites)
+        self.assertEqual(set(slots), set(xc.PARTS) | {'SelectButton'})
+        bu, bv, bw, bh, x0, y0, k = xc.body_placement(text)
+        taken = []
+        for name, ((x, y, w, h), (u, v, tw, th), boxes) in slots.items():
+            # The place covers the DualShock 4's highlight and the Xbox one.
+            px, py, pw, ph = PS_PLACES[name]
+            self.assertTrue(x <= px + 1e-6 and y <= py + 1e-6 and px + pw <= x + w + 1e-6 and py + ph <= y + h + 1e-6, name)
+            if name in sprites:
+                _u, _v, sw, sh, sx, sy = sprites[name]
+                xx, xy = x0 + (sx - bu) * k, y0 + (sy - bv) * k
+                self.assertTrue(x <= xx + 1e-6 and y <= xy + 1e-6 and xx + sw * k <= x + w + 1e-6 and xy + sh * k <= y + h + 1e-6, name)
+                self.assertEqual(set(boxes), {'playstation', 'xbox'})
+            else:
+                self.assertEqual(set(boxes), {'playstation'})  # Share: the Xbox has none
+            # Texels and screen units as the controller's (k), the slot clear of it and the others.
+            self.assertAlmostEqual(w / tw, k, places=6)
+            self.assertAlmostEqual(h / th, k, places=6)
+            self.assertTrue(v + th <= bv or v >= bv + bh, f'{name} overlaps the controller')
+            self.assertTrue(0 <= u and u + tw <= 1024 and 0 <= v and v + th <= 1024, name)
+            for other in taken:
+                self.assertFalse(u < other[2] and other[0] < u + tw and v < other[3] and other[1] < v + th, name)
+            taken.append((u, v, u + tw, v + th))
+            for dx, dy, bw_, bh_ in boxes.values():
+                self.assertTrue(0 <= dx and dx + bw_ <= tw and 0 <= dy and dy + bh_ <= th, name)
+
+    def test_highlights_drawn_smaller_when_they_do_not_fit_at_full_size(self):
+        # Every DualShock 4 highlight far from its Xbox button: big places, which fit only smaller.
+        far = {name: (5, 380, 40, 40) if n % 2 else (740, 40, 30, 30) for n, name in enumerate(sorted(PS_PLACES))}
+        text = ps_layout(places=far).decode('latin1')
+        _sheet, sprites = xc.draw_sheet()
+        slots = xc.dual_layout(text, sprites)
+        k = xc.body_placement(text)[6]
+        ratios = {round(w / tw, 6) for (_x, _y, w, _h), (_u, _v, tw, _th), _b in slots.values()}
+        self.assertEqual(len(ratios), 1)
+        self.assertGreater(ratios.pop(), k)  # fewer texels a screen unit
+
+    def test_the_two_sheets(self):
+        text = ps_layout().decode('latin1')
+        slots, sheets = xc.dual(text, ps_sheet())
+        self.assertEqual(set(sheets), {'playstation', 'xbox'})
+        ps, xbox = sheets['playstation'], sheets['xbox']
+        # The game's controller on one, the Xbox drawing on the other, in the same place.
+        self.assertEqual(ps.getpixel((512, 600)), (128, 128, 128, 255))
+        self.assertEqual(xbox.getpixel((512, 600))[3], 255)
+        self.assertNotEqual(xbox.getpixel((512, 600)), (128, 128, 128, 255))
+        # The game's sprites moved into their slots; nothing left where they were.
+        for n, name in enumerate(PS_SPRITES):
+            (_x, _y, _w, _h), (u, v, _tw, _th), boxes = slots[name]
+            dx, dy, w, h = boxes['playstation']
+            self.assertEqual(ps.getpixel((u + dx + w // 2, v + dy + h // 2)), (20 * n, 255, 0, 255), name)
+        for u, v, w, h in PS_SPRITES.values():
+            centre = (u + w // 2, v + h // 2)
+            if not any(su <= centre[0] < su + tw and sv <= centre[1] < sv + th
+                       for _s, (su, sv, tw, th), _b in slots.values()):
+                self.assertEqual(ps.getpixel(centre)[3], 0, centre)
+        # The Xbox sheet's Share slot is empty: its highlight shows nothing.
+        _s, (u, v, tw, th), _b = slots['SelectButton']
+        self.assertEqual(xbox.crop((u, v, u + tw, v + th)).getchannel('A').getextrema(), (0, 0))
+        _s, (u, v, tw, th), boxes = slots['CrossButton']
+        self.assertGreater(xbox.crop((u, v, u + tw, v + th)).getchannel('A').getextrema()[1], 0)
+        # The layout's tags take the places and slots, the same length.
+        new = xc.relayout_dual(text.encode('latin1'), slots)
+        self.assertEqual(len(new), len(text))
+        moved = xc.highlights(new.decode('latin1'))
+        for name, ((x, y, w, h), (u, v, tw, th), _b) in slots.items():
+            for got, want in zip(moved[name], (x, y, w, h, u, v, tw, th)):
+                self.assertAlmostEqual(got, want, delta=0.01, msg=name)
+
+    def test_screens_that_place_a_highlight_differently_are_refused(self):
+        text = ps_layout().decode('latin1')
+        first, second, _rest = text.split('</Screen>\r\n')
+        other = second.replace('x="580.00" y="33.00"', 'x="581.00" y="33.00"')
+        with self.assertRaisesRegex(ValueError, 'differently'):
+            xc.highlights(first + '</Screen>\r\n' + other + '</Screen>\r\n')
+
+
+class DualBuildTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(gnf.Texture, 'replaced', image_replaced)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        image = mock.patch.object(gnf.Texture, 'image', lambda texture, level=0: ps_sheet())
+        image.start()
+        self.addCleanup(image.stop)
+
+    def game(self, folder, xml=None):
+        game = Path(folder) / 'game'
+        game.mkdir()
+        archive(game / 'data08.psarc', {TEXTURE: texture(41, 1024, 1024, fill=None),
+                                        'data/fe/images/other.gnf': bytes(5000)})
+        archive(game / 'data09.psarc', {xc.LAYOUT: xml or rows(ps_layout())}, packed=False)
+        return game
+
+    def run_main(self, game, out, *options):
+        (out / 'file_patches.txt').write_text('')
+        with redirect_stdout(io.StringIO()) as printed, \
+                mock.patch.object(sys, 'argv', ['x', str(game), '--out', str(out), *options]):
+            xc.main()
+        return printed.getvalue(), (out / 'file_patches.txt').read_text().splitlines()
+
+    def patched(self, game, folder, lines, name):
+        mine = [line for line in lines if line.startswith(f'/app0/{name} ')]
+        target = Path(folder) / name
+        target.write_bytes(apply((game / name).read_bytes(), mine))
+        return target
+
+    def test_both_styles_share_the_layout_and_the_swap_file_has_both_sheets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            game, out = self.game(folder), Path(folder) / 'out'
+            out.mkdir()
+            swap = out / 'glyph_swap.txt'
+            swap.write_text('glyphs line\n')  # wipeout_glyphs.py's, kept
+            seen = {}
+            for style in ('playstation', 'xbox'):
+                printed, lines = self.run_main(game, out, '--style', style, '--swap-config', str(swap))
+                self.assertIn(f'Controller picture: {style} at start, follows the Controller type row', printed)
+                sheet = read(self.patched(game, folder, lines, 'data08.psarc'), TEXTURE)
+                xml = read(self.patched(game, folder, lines, 'data09.psarc'), xc.LAYOUT)
+                seen[style] = sheet, xml
+                self.assertIn(b'name="Pad Style P1"', xml)
+                self.assertNotIn(b'x="-999"', xml)  # Share stays where it is on both
+            self.assertEqual(seen['playstation'][1], seen['xbox'][1])
+            self.assertNotEqual(seen['playstation'][0], seen['xbox'][0])
+            entries = swap.read_text().splitlines()
+            self.assertEqual(entries[0], 'glyphs line')
+            # Two runs appended one line each; both name the newest sheet and each style's file,
+            # which is what the game reads once that style's patches are in.
+            self.assertEqual(len(entries), 3)
+            self.assertEqual(entries[1], entries[2])
+            fields = entries[1].split('\t')
+            with psarc.Archive(game / 'data08.psarc') as a:
+                i = a.find(TEXTURE)
+                self.assertEqual(fields[:4], ['/app0/data08.psarc', f"{a.entries[i]['offset']:x}",
+                                              f'{sum(s for s, _l in a.blocks(i)):x}', f'{gnf.HEADER:x}'])
+            files = dict(field.split('=', 1) for field in fields[4:])
+            self.assertEqual(set(files), {'playstation', 'xbox'})
+            for style, path in files.items():
+                self.assertEqual(Path(path).read_bytes(), seen[style][0], style)
+            # Cached: both styles from one drawing.
+            with mock.patch.object(xc, 'draw_sheet', side_effect=AssertionError('drawn again')):
+                lines, swaps = xc.build_dual(game, out, 'xbox')
+            self.assertEqual(swaps, [entries[1] + '\n'])
+            self.assertEqual(read(self.patched(game, folder, lines, 'data08.psarc'), TEXTURE), seen['xbox'][0])
+
+    def test_a_layout_it_cannot_use_falls_back_to_the_rows_or_the_xbox_picture(self):
+        with tempfile.TemporaryDirectory() as folder:
+            # The fixture's highlights all share one sprite: the slots fit, but a missing tag does not.
+            game, out = self.game(folder, rows(layout(names=('CrossButton',) + tuple(xc.PARTS)[1:]))), Path(folder) / 'out'
+            out.mkdir()
+            swap = out / 'glyph_swap.txt'
+            printed, lines = self.run_main(game, out, '--style', 'playstation', '--swap-config', str(swap))
+            self.assertIn('Controller picture:', printed)
+            self.assertIn('Controller type row: on the Controls screens', printed)
+            xml = read(self.patched(game, folder, lines, 'data09.psarc'), xc.LAYOUT)
+            self.assertIn(b'name="Pad Style P1"', xml)
+            self.assertFalse(any(line.startswith('/app0/data08.psarc ') for line in lines))  # the game's picture
+            self.assertFalse(swap.exists() and swap.read_text())
+
+
+def rows(xml):
+    """A layout with the Thrust Sensitivity sliders the rows replace (tests/test_controller_row.py)."""
+    from test_controller_row import P1, P2
+    first, second, _rest = xml.split(b'</Screen>\r\n')
+    return first + P1 + b'</Screen>\r\n' + second + P2 + b'</Screen>\r\n'
+
+
 class ArchiveListTest(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.object(gnf.Texture, 'replaced', fast_replaced)

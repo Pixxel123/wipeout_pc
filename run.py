@@ -162,14 +162,17 @@ def launch_style(env, savedata, title):
     return style if style in pad_style_save.STYLES else 'playstation'
 
 
-def row_scripts(style, ready):
+def row_scripts(style, ready, swap):
     """[(script, options)] that draw WipEout's Controls screens' controller picture and put the
-    Controller type rows on them; the Xbox picture's layout carries the rows (one patch per entry).
+    Controller type rows on them; the picture's layout carries the rows (one patch per entry).
     ready: whether the saves hold the rows' settings (scripts/pad_style_save.py). The game saves a
-    row's value without checking that its setting exists, so without them there are no rows."""
-    if style == 'xbox':
-        return [('xbox_controls.py', [] if ready else ['--no-row'])]
-    return [('controller_row.py', [])] if ready else []
+    row's value without checking that its setting exists, so without them there are no rows. With
+    the rows the picture follows them while the game runs: both controllers' sheets go into the
+    GOW3_GLYPH_SWAP file `swap`, and the one of `style` (PlayStation for Nintendo, which has no
+    picture of its own) is shown at start."""
+    if not ready:
+        return [('xbox_controls.py', ['--no-row'])] if style == 'xbox' else []
+    return [('xbox_controls.py', ['--style', 'xbox' if style == 'xbox' else 'playstation', '--swap-config', str(swap)])]
 
 
 def backup_saves(user_dir, env):
@@ -322,11 +325,13 @@ def main():
             if style in ('xbox', 'nintendo'):
                 optional_script('wipeout_glyphs.py', game, '--out', out, '--style', style,
                                 '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
-            for script, options in row_scripts(style, ready):
-                optional_script(script, game, '--out', out, *options, *psarcs)
-            optional_script('wipeout_glyphs.py', game, '--out', out, '--swap-config', out / 'glyph_swap.txt',
+            # The swap file first (written anew), then the controller picture adds its sheets to it.
+            swap = out / 'glyph_swap.txt'
+            optional_script('wipeout_glyphs.py', game, '--out', out, '--swap-config', swap,
                             '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
-            env['GOW3_GLYPH_SWAP'] = str(out / 'glyph_swap.txt')
+            for script, options in row_scripts(style, ready, swap):
+                optional_script(script, game, '--out', out, *options, *psarcs)
+            env['GOW3_GLYPH_SWAP'] = str(swap)
             env['GOW3_GLYPH_STYLE'] = style  # what the file patches above load (src/runtime_glyphs.c)
             derived += ['GOW3_GLYPH_SWAP', 'GOW3_GLYPH_STYLE']
         env['GOW3_FILE_PATCHES'] = str(out / 'file_patches.txt')

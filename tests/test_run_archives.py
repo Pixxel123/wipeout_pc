@@ -39,14 +39,16 @@ class RunArchiveTests(unittest.TestCase):
                 self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'xbox'}, folder, 'CUSA07671'), 'xbox')
 
     def test_the_rows_need_their_settings_in_the_save(self):
-        self.assertEqual(run.row_scripts('playstation', True), [('controller_row.py', [])])
-        self.assertEqual(run.row_scripts('nintendo', True), [('controller_row.py', [])])
-        self.assertEqual(run.row_scripts('xbox', True), [('xbox_controls.py', [])])
+        swap = Path('out') / 'glyph_swap.txt'
+        # With them: one picture that follows the rows, the launch style's shown first.
+        both = ['--swap-config', str(swap)]
+        self.assertEqual(run.row_scripts('playstation', True, swap), [('xbox_controls.py', ['--style', 'playstation', *both])])
+        self.assertEqual(run.row_scripts('nintendo', True, swap), [('xbox_controls.py', ['--style', 'playstation', *both])])
+        self.assertEqual(run.row_scripts('xbox', True, swap), [('xbox_controls.py', ['--style', 'xbox', *both])])
         # Without them: no rows, but the Xbox picture is still drawn.
-        self.assertEqual(run.row_scripts('playstation', False), [])
-        self.assertEqual(run.row_scripts('nintendo', False), [])
-        self.assertEqual(run.row_scripts('xbox', False), [('xbox_controls.py', ['--no-row'])])
-
+        self.assertEqual(run.row_scripts('playstation', False, swap), [])
+        self.assertEqual(run.row_scripts('nintendo', False, swap), [])
+        self.assertEqual(run.row_scripts('xbox', False, swap), [('xbox_controls.py', ['--no-row'])])
 
 if __name__ == '__main__':
     unittest.main()

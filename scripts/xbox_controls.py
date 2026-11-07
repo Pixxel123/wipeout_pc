@@ -10,7 +10,13 @@ button the selected action uses is drawn again, tinted blue, from its own sprite
 sheet). The Xbox controller (art/xbox_controller.svg) is drawn into the same place; its sprites
 go where the sheet has room, and each tag gets their places. The archives are not written: the
 changed entries are packed into the bytes the originals take and applied as runtime file patches
-(scripts/psarc.py); the sheet keeps the game's format (BC7, scripts/gnf.py)."""
+(scripts/psarc.py); the sheet keeps the game's format (BC7, scripts/gnf.py).
+
+With --swap-config the screen follows the Controller type row while the game runs: dual_layout()
+gives each highlight one place on the screen that covers its button on both controllers, and two
+sheets are drawn for that layout, the DualShock 4 (the game's own sheet, its sprites moved) and the
+Xbox controller. The launch style's sheet is patched in, and both are written for
+src/runtime_glyphs.c, which writes the row's style over the sheet in memory."""
 import argparse
 import contextlib
 import math
@@ -23,6 +29,9 @@ import gnf
 import psarc
 
 VERSION = 4  # of the drawing and the patches: a change rebuilds the cached ones
+DUAL_VERSION = 1  # of the dual layout and its two sheets
+STYLES = ('playstation', 'xbox')
+SHARE = 'SelectButton'  # the DualShock 4's Share highlight: the Xbox drawing has no such button
 SVG = Path(__file__).resolve().parent / 'art' / 'xbox_controller.svg'
 TEXTURES = ('data/fe/images/controls_ps3.2x.gnf', 'data/fe/images/controls_ps3.gnf')
 LAYOUT = 'data/plugins/frontend/gui/controls_definition_ps4.xml'
@@ -269,33 +278,168 @@ def relayout(xml, sprites):
     the body tag says); the Share highlight, which the Xbox drawing has no sprite for, moved off
     the screen. The same length; its tabs (indentation only) become spaces, which pack smaller, so
     the changed numbers fit."""
+    bu, bv, _tw, _th, x0, y0, k = body_placement(xml.decode('latin1'))
+    places = {SHARE: ({'x': -999, 'y': -999}, {})}  # its size kept (a zero-sized quad is degenerate)
+    for name, (u, v, w, h, x, y) in sprites.items():
+        places[name] = ({'x': x0 + (x - bu) * k, 'y': y0 + (y - bv) * k, 'width': w * k, 'Height': h * k,
+                         'U': u, 'V': v}, {'TxtrWidth': w, 'TxtrHeight': h})
+    return _retag(xml, places, set(PARTS) | {SHARE})
+
+
+HIGHLIGHT = re.compile(r'(<Image name="(\w+)"[^>]*>\s*<Values\s+)(x="[^"]*"\s+y="[^"]*"\s+width="[^"]*"\s+'
+                       r'Height="[^"]*"\s+U="[^"]*"\s+V="[^"]*")([^\n]*?)(TxtrWidth="[^"]*"\s+TxtrHeight="[^"]*")')
+
+
+def _retag(xml, places, required):
+    """The layout file with the highlight tags of `places` ({name: (screen and sheet values, sheet
+    size values)}) rewritten, the same length; ValueError unless every `required` tag is there.
+    Its tabs (indentation only) become spaces, which pack smaller, so the changed numbers fit."""
     text = xml.decode('latin1')
-    bu, bv, _tw, _th, x0, y0, k = body_placement(text)
     if re.search(r'=\s*"[^"]*\t', text):  # a value starts after =" and ends at the next quote
         raise ValueError('a tab inside an attribute value; the layout is not rewritten')
     text = text.replace('\t', ' ')
-    tags = re.compile(r'(<Image name="(\w+)"[^>]*>\s*<Values\s+)(x="[^"]*"\s+y="[^"]*"\s+width="[^"]*"\s+'
-                      r'Height="[^"]*"\s+U="[^"]*"\s+V="[^"]*")([^\n]*?)(TxtrWidth="[^"]*"\s+TxtrHeight="[^"]*")')
     seen = set()
 
     def change(match):
         name = match.group(2)
-        if name == 'SelectButton':
-            # Its size kept (a zero-sized image is a degenerate quad), placed off the screen.
-            where = {'x': -999, 'y': -999}
-            size = {}
-        elif name in sprites:
-            u, v, w, h, x, y = sprites[name]
-            where = {'x': x0 + (x - bu) * k, 'y': y0 + (y - bv) * k, 'width': w * k, 'Height': h * k, 'U': u, 'V': v}
-            size = {'TxtrWidth': w, 'TxtrHeight': h}
-        else:
+        if name not in places:
             return match.group(0)
         seen.add(name)
-        return match.group(1) + _rewrite(match.group(3), where) + match.group(4) + _rewrite(match.group(5), size)
-    new = tags.sub(change, text)
-    if seen != set(PARTS) | {'SelectButton'}:
-        raise ValueError(f'the layout lacks {sorted(set(PARTS) | {"SelectButton"} - seen)}')
+        where, size = places[name]
+        try:
+            return match.group(1) + _rewrite(match.group(3), where) + match.group(4) + _rewrite(match.group(5), size)
+        except ValueError:
+            # A longer number in one part (a 2-digit TxtrWidth becoming 3): the whole tag's room,
+            # what the other numbers' fewer decimals free, is used.
+            return match.group(1) + _rewrite(match.group(3) + match.group(4) + match.group(5), {**where, **size})
+    new = HIGHLIGHT.sub(change, text)
+    if not required <= seen:
+        raise ValueError(f'the layout lacks {sorted(required - seen)}')
     return new.encode('latin1')
+
+
+# ------------------------------------------------------------------------------- both controllers
+
+def highlights(text):
+    """{name: (x, y, width, height, u, v, tw, th)} of the layout's highlight tags: where each is on
+    the screen and the sprite of the sheet it shows. ValueError when the screens' copies differ."""
+    found = {}
+    for match in HIGHLIGHT.finditer(text):
+        values = dict(re.findall(r'(\w+)="([^"]*)"', match.group(3) + ' ' + match.group(5)))
+        try:
+            place = tuple(float(values[name]) for name in ('x', 'y', 'width', 'Height', 'U', 'V', 'TxtrWidth', 'TxtrHeight'))
+        except (KeyError, ValueError):
+            raise ValueError(f'the highlight {match.group(2)} is not as expected') from None
+        if found.setdefault(match.group(2), place) != place:
+            raise ValueError(f'the Controls screens place the highlight {match.group(2)} differently')
+    return found
+
+
+def _shelves(sizes, rooms, gap=8):
+    """{name: (u, v)} placing {name: (w, h)} in rows inside `rooms` [(top, bottom)] of the sheet,
+    the tallest first; None when they do not all fit."""
+    places, rows = {}, [[2, top, top, bottom] for top, bottom in rooms]  # x, row top, row bottom, room end
+    for name, (w, h) in sorted(sizes.items(), key=lambda item: (-item[1][1], item[0])):
+        for row in rows:
+            if row[0] + w > SIZE - 2:  # a new row below this one, if the room has space
+                row[:3] = [2, row[2] + gap, row[2] + gap]
+            if row[0] + w <= SIZE - 2 and row[1] + h <= row[3]:
+                places[name] = (row[0], row[1])
+                row[0] += w + gap
+                row[2] = max(row[2], row[1] + h)
+                break
+        else:
+            return None
+    return places
+
+
+def dual_layout(text, sprites):
+    """{name: (screen, slot, boxes)} for a layout that works with both sheets. screen (x, y, width,
+    height) covers the highlight's place on both controllers: the layout's (DualShock 4) and the Xbox
+    sprite's (layout()'s sprites, placed as relayout() does). slot (u, v, w, h) is its sprite on both
+    sheets, and boxes {style: (dx, dy, w, h)} where in the slot each controller's button goes (the
+    Xbox has no Share). The slots fill the room above and below the controller; they are drawn
+    smaller when they would not fit at the controller's own scale. ValueError when they never fit."""
+    bu, bv, bw, bh, x0, y0, k = body_placement(text)
+    ps = highlights(text)
+    missing = (set(PARTS) | {SHARE}) - set(ps)
+    if missing:
+        raise ValueError(f'the layout lacks {sorted(missing)}')
+    rects = {}
+    for name in sorted(set(PARTS) | {SHARE}):
+        own = {'playstation': ps[name][:4]}
+        if name in sprites:
+            _u, _v, w, h, x, y = sprites[name]
+            own['xbox'] = (x0 + (x - bu) * k, y0 + (y - bv) * k, w * k, h * k)
+        left = min(r[0] for r in own.values())
+        top = min(r[1] for r in own.values())
+        right = max(r[0] + r[2] for r in own.values())
+        bottom = max(r[1] + r[3] for r in own.values())
+        rects[name] = (left, top, right - left, bottom - top, own)
+    rooms = [(2, bv - 2), (bv + bh + 2, SIZE - 2)]
+    for share in (1, 0.85, 0.7, 0.6, 0.5, 0.4):
+        density = share / k  # texels a screen unit
+        sizes = {name: (math.ceil(r[2] * density), math.ceil(r[3] * density)) for name, r in rects.items()}
+        places = _shelves(sizes, rooms)
+        if places is not None:
+            break
+    else:
+        raise ValueError('no room on the sheet for the highlights of both controllers')
+    result = {}
+    for name, (left, top, _w, _h, own) in rects.items():
+        (u, v), (w, h) = places[name], sizes[name]
+        boxes = {}
+        for style, (x, y, rw, rh) in own.items():
+            dx, dy = round((x - left) * density), round((y - top) * density)
+            boxes[style] = (dx, dy, max(1, min(w - dx, round(rw * density))), max(1, min(h - dy, round(rh * density))))
+        result[name] = ((left, top, w / density, h / density), (u, v, w, h), boxes)
+    return result
+
+
+def relayout_dual(xml, slots):
+    """The layout with each highlight at its dual_layout() place and slot, the same length."""
+    places = {name: ({'x': x, 'y': y, 'width': w, 'Height': h, 'U': u, 'V': v}, {'TxtrWidth': tw, 'TxtrHeight': th})
+              for name, ((x, y, w, h), (u, v, tw, th), _boxes) in slots.items()}
+    return _retag(xml, places, set(places))
+
+
+def dual(text, original, shapes=None):
+    """(slots, {style: 1024x1024 RGBA sheet}) for the layout file's text: dual_layout()'s slots, and
+    each controller's sheet: its controller in the layout's box (the game's DualShock 4 from
+    `original`, the game's sheet as an image, or the Xbox drawing) and each highlight's sprite in its
+    slot, at that controller's box (scaled when the slots are drawn smaller)."""
+    from PIL import Image
+    placement = body_placement(text)
+    bu, bv, bw, bh = placement[:4]
+    if original.size != (SIZE, SIZE):
+        original = original.resize((SIZE, SIZE), Image.LANCZOS)
+    original = original.convert('RGBA')
+    drawn, sprites = draw_sheet(shapes, box=(bu, bv, bw, bh))
+    slots = dual_layout(text, sprites)
+    ps = highlights(text)
+    pieces = {'playstation': lambda name: original.crop(_box(ps[name][4:])),
+              'xbox': lambda name: drawn.crop(_box(sprites[name][:4]))}
+    sheets = {}
+    for style, piece in pieces.items():
+        source = original if style == 'playstation' else drawn
+        sheet = Image.new('RGBA', (SIZE, SIZE), PAPER + (0,))
+        sheet.paste(source.crop((bu, bv, bu + bw, bv + bh)), (bu, bv))
+        for name, (_screen, (u, v, _w, _h), boxes) in slots.items():
+            if style not in boxes:
+                continue
+            dx, dy, w, h = boxes[style]
+            sprite = piece(name)
+            if sprite.size != (w, h):
+                sprite = sprite.resize((w, h), Image.LANCZOS)
+            sheet.paste(sprite, (u + dx, v + dy))
+        sheets[style] = sheet
+    return slots, sheets
+
+
+def _box(place):
+    """The crop box of (u, v, w, h)."""
+    u, v, w, h = (int(round(n)) for n in place)
+    return u, v, u + w, v + h
 
 
 # ------------------------------------------------------------------------------- patches
@@ -373,16 +517,146 @@ def build(game, out, given=None, row=True):
     return psarc.cached_lines(Path(out) / 'xbox_controls', key, make)
 
 
+def dual_changes(game, given=None, row=True):
+    """({style: {archive: [(offset, original, new)]}}, swaps) for the dual layout (and with `row`,
+    the Controller type rows) and each style's sheet. swaps: [(archive, offset, packed length,
+    {style: texture bytes})], the newest copy of each sheet texture. An archive changes only when
+    all its copies fit for both styles; the newest copy of a file must fit, or ValueError."""
+    with contextlib.ExitStack() as opened:
+        holders = {name: [] for name in (*TEXTURES, LAYOUT)}
+        for archive_name, path in psarc.archives(game, given):
+            archive = opened.enter_context(psarc.Archive(path))
+            for name in holders:
+                i = archive.find(name)
+                if i is not None:
+                    holders[name].append((archive_name, archive, i))
+        return _dual_changes(holders, row)
+
+
+def _dual_changes(holders, row=True):
+    from PIL import Image
+    if not holders[LAYOUT] or not any(holders[name] for name in TEXTURES):
+        raise ValueError("the Controls screen's picture or layout was not found")
+    layouts = {archive_name: archive.read(i) for archive_name, archive, i in holders[LAYOUT]}
+    if len({body_placement(xml.decode('latin1')) for xml in layouts.values()}) > 1:
+        raise ValueError('the copies of the layout place the controller differently')
+    # The game's newest layout and its largest sheet: what the DualShock 4 sheet is made from.
+    text = layouts[holders[LAYOUT][-1][0]].decode('latin1')
+    _n, archive, i = next(holders[name][-1] for name in TEXTURES if holders[name])
+    slots, sheets = dual(text, gnf.Texture(archive.read(i)).image())
+    encoded = {}  # (style, length, header) -> the style's sheet in a texture of that shape
+    newest = {copies[-1][0] for copies in holders.values() if copies}
+    packed = {}  # archive -> {(file, style): its changes, or None when they do not fit}
+    swaps = []
+    for name, copies in holders.items():
+        for archive_name, archive, i in copies:
+            if name == LAYOUT:
+                xml = layouts[archive_name]
+                new = relayout_dual(controller_row.add_row(xml) if row else xml, slots)
+                variants = dict.fromkeys(STYLES, new)
+            else:
+                original = archive.read(i)
+                texture = gnf.Texture(original)
+                variants = {}
+                for style in STYLES:
+                    key = (style, len(original), original[:gnf.HEADER])
+                    if key not in encoded:
+                        sheet = sheets[style]
+                        if sheet.size != (texture.width, texture.height):
+                            sheet = sheet.resize((texture.width, texture.height), Image.LANCZOS)
+                        encoded[key] = texture.replaced(sheet)
+                    variants[style] = encoded[key]
+                if (archive_name, archive, i) == copies[-1]:
+                    swaps.append((archive_name, archive.entries[i]['offset'],
+                                  sum(stored for stored, _length in archive.blocks(i)), variants))
+            repacked = {}
+            for style, data in variants.items():
+                if data not in repacked:
+                    repacked[data] = archive.repack(i, data)
+                packed.setdefault(archive_name, {})[(name, style)] = parts = repacked[data]
+                if parts is None and archive_name in newest:
+                    raise ValueError(f'{archive_name} {name}: the {style} version does not fit in its place')
+    result = {style: {} for style in STYLES}
+    for archive_name, files in packed.items():
+        missing = sorted({name for (name, _style), parts in files.items() if parts is None})
+        if missing:
+            print(f'Controller picture: {archive_name}: no room for {", ".join(missing)}; '
+                  'its copies are left as they are', flush=True)
+            continue
+        for (_name, style), parts in files.items():
+            result[style].setdefault(archive_name, []).extend(parts)
+    return result, swaps
+
+
+def build_dual(game, out, style, given=None, row=True):
+    """(file patch lines of `style`, GOW3_GLYPH_SWAP lines of the sheets), cached in
+    out/controls_dual (both styles at once) until the drawing, the rows or the archives change."""
+    found = psarc.archives(game, given)
+
+    def make(folder):
+        changed, swaps = dual_changes(game, given, row)
+        lines = []
+        for each in STYLES:
+            (folder / each).mkdir()
+            lines += [f'{each}\t{line}' for name, parts in changed[each].items()
+                      for line in psarc.patch_lines(name, parts, folder / each)]
+        (folder / 'swap').mkdir()
+        for archive_name, offset, length, variants in swaps:
+            files = []
+            for each, data in variants.items():
+                file = folder / 'swap' / f'{Path(archive_name).stem}-{offset:x}-{each}.gnf'
+                file.write_bytes(data)
+                files.append(f'{each}={file.resolve()}')
+            lines.append('swap\t' + '\t'.join([f'/app0/{archive_name}', f'{offset:x}', f'{length:x}',
+                                                f'{gnf.HEADER:x}', *files]) + '\n')
+        return lines
+    key = [DUAL_VERSION, VERSION, controller_row.VERSION, row, psarc.stamp([SVG]), [name for name, _p in found],
+           psarc.stamp(p for _n, p in found)]
+    lines = psarc.cached_lines(Path(out) / 'controls_dual', key, make)
+    split = [line.split('\t', 1) for line in lines]
+    return [line for kind, line in split if kind == style], [line for kind, line in split if kind == 'swap']
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, required=True, help='adds its changes to OUT/file_patches.txt')
     parser.add_argument('--no-row', action='store_true',
                         help='without the Controller type rows (the save cannot take their settings)')
+    parser.add_argument('--style', choices=STYLES, default='xbox', help='the controller shown at start')
+    parser.add_argument('--swap-config', type=Path,
+                        help='both controllers: the picture follows the Controller type row while the game runs; '
+                             'the sheets are added to this GOW3_GLYPH_SWAP file')
     psarc.add_archive_option(parser)
     args = parser.parse_args()
+    row = not args.no_row
+    if args.swap_config:
+        try:
+            lines, swaps = build_dual(args.game, args.out, args.style, args.archive, row)
+        except Exception as error:  # noqa: BLE001  (a picture only: whatever fails, the game starts)
+            print(f'Controller picture: {error}; it does not follow the Controller type row', flush=True)
+        else:
+            with open(args.out / 'file_patches.txt', 'a') as f:
+                f.writelines(lines)
+            with open(args.swap_config, 'a') as f:
+                f.writelines(swaps)
+            print(f'Controller picture: {args.style} at start, follows the Controller type row '
+                  f'({len(lines)} changes, {len(swaps)} sheets; game files untouched)', flush=True)
+            return
+        if args.style == 'playstation':  # the game's own picture, with the rows (as before)
+            if not row:
+                return
+            try:
+                lines = controller_row.build(args.game, args.out, args.archive)
+            except Exception as error:  # noqa: BLE001  (a menu row: whatever fails, the game starts)
+                print(f'Controller type row: {error}; the Controls screens stay as they are', flush=True)
+                return
+            with open(args.out / 'file_patches.txt', 'a') as f:
+                f.writelines(lines)
+            print(f'Controller type row: on the Controls screens ({len(lines)} changes; game files untouched)', flush=True)
+            return
     try:
-        lines = build(args.game, args.out, args.archive, row=not args.no_row)
+        lines = build(args.game, args.out, args.archive, row=row)
     except Exception as error:  # noqa: BLE001  (a picture only: whatever fails, the game starts)
         print(f'Xbox controller: {error}; the Controls screen keeps the DualShock 4', flush=True)
         return

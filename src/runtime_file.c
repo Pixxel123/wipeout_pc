@@ -94,6 +94,16 @@ void runtime_file_unmount(const char *guest) {
 typedef struct { char guest[128]; int64_t offset; size_t length; unsigned char *original, *data; uint64_t fnv; int state; } FilePatch;
 static FilePatch file_patches[64];
 static size_t file_patch_count;
+/* A reader of some guest files' reads (src/runtime_glyphs.c: the game read a texture again), set
+ * before the game starts (runtime_file_watch). A registration rather than weak stubs: on Windows
+ * (PE) a weak definition in this file can be the one its own calls bind to, which left the live
+ * glyphs off. */
+static int (*watch_wants)(const char *guest);
+static void (*watch_read)(const char *guest,int64_t at,int64_t n);
+void runtime_file_watch(int (*wants)(const char *guest),void (*read)(const char *guest,int64_t at,int64_t n)) {
+    watch_read=read;
+    watch_wants=wants && read ? wants : NULL;
+}
 static int hex_bytes(const char *hex,unsigned char *out,size_t max) {
     size_t n=strlen(hex);
     if (n%2 || n/2>max) return -1;
@@ -194,7 +204,6 @@ void runtime_file_configure(const char *app0,const char *user) {
     runtime_file_mount("/app0",app0);
     runtime_file_mount("/hostapp",app0);
     load_file_patches();
-    runtime_glyphs_start();
     const char *writable[]={"temp0","download0","data"};
     mkdir(user,0755);
     for (int i=0;i<3;++i) {
@@ -357,7 +366,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     if (fd<0) { pthread_mutex_unlock(&lock); if (host>=0) close(host); free_listing(dir); return -EMFILE; }
     files[fd]=(File){.used=1,.host=host,.dir=dir,
                      .patched=file_patch_count && host>=0 && game_path(guest) && file_patches_check(guest,host),
-                     .glyphs=host>=0 && runtime_glyphs_watches(guest)};
+                     .glyphs=host>=0 && watch_wants && watch_wants(guest)};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
@@ -429,7 +438,7 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     const int64_t n=bounce_read(h,buffer,size,-1);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,(int)-n); return n; }
     if (f && f->patched) file_patches_apply(f->path,buffer,at,n);
-    if (f && f->glyphs) runtime_glyphs_read(f->path,at,n);
+    if (f && f->glyphs) watch_read(f->path,at,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -440,7 +449,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,(int)-n); return n; }
     const File *f=get(fd);
     if (f && f->patched) file_patches_apply(f->path,buffer,offset,n);
-    if (f && f->glyphs) runtime_glyphs_read(f->path,offset,n);
+    if (f && f->glyphs) watch_read(f->path,offset,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -649,8 +658,4 @@ void runtime_file_report(void) {
     printf("Runtime: files opened=%zu, reads=%zu (%llu bytes), writes=%zu, not found=%zu\n",
            opens,reads,(unsigned long long)bytes_read,writes,missing);
 }
-/* Tests link this file without src/runtime_glyphs.c. */
-__attribute__((weak)) void runtime_glyphs_start(void) {}
-__attribute__((weak)) int runtime_glyphs_watches(const char *guest) { (void)guest; return 0; }
-__attribute__((weak)) void runtime_glyphs_read(const char *guest, int64_t at, int64_t n) { (void)guest; (void)at; (void)n; }
 

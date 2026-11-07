@@ -122,9 +122,10 @@ uint64_t runtime_memory_flexible_available(void);
 unsigned char *runtime_image_base(void);
 int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
                             int count, uintptr_t *addresses, int *which, int max);
+/* Starts the live glyph switch (GOW3_GLYPH_SWAP); call after runtime_file_configure. */
 void runtime_glyphs_start(void);
-int runtime_glyphs_watches(const char *guest);
-void runtime_glyphs_read(const char *guest, int64_t at, int64_t n);
+/* Files whose reads `read` is told of (guest path, offset, length); set before the game starts. */
+void runtime_file_watch(int (*wants)(const char *guest), void (*read)(const char *guest, int64_t at, int64_t n));
 /* WipEout's Controls screen Accept (probe.c hook, game thread): commits the Controller type rows. */
 ABI void runtime_glyphs_accept(void);
 #endif
