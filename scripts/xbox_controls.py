@@ -27,8 +27,9 @@ import xml.etree.ElementTree as ET
 import controller_row
 import gnf
 import psarc
+import wipeout_glyphs
 
-VERSION = 4  # of the drawing and the patches: a change rebuilds the cached ones
+VERSION = 5  # of the drawing and the patches: a change rebuilds the cached ones
 DUAL_VERSION = 2  # of the dual layout and its two sheets
 STYLES = ('playstation', 'xbox')
 SHARE = 'SelectButton'  # the DualShock 4's Share highlight: the Xbox drawing has no such button
@@ -174,6 +175,31 @@ def _paint(image, shapes, place):
         image.paste(area, (x0, y0))
 
 
+def _rooms(box):
+    """[(top, bottom)] of the sheet's room above and below the controller in `box` (U V width height)."""
+    _u, v, _w, h = box
+    return [(2, v - 2), (v + h + 2, SIZE - 2)]
+
+
+def _shelves(sizes, rooms, gap=8):
+    """{name: (u, v)} placing {name: (w, h)} in rows inside `rooms` [(top, bottom)] of the sheet,
+    the tallest first, `gap` apart (so the smaller mip levels keep them apart too); None when they
+    do not all fit."""
+    places, rows = {}, [[2, top, top, bottom] for top, bottom in rooms]  # x, row top, row bottom, room end
+    for name, (w, h) in sorted(sizes.items(), key=lambda item: (-item[1][1], item[0])):
+        for row in rows:
+            if row[0] + w > SIZE - 2:  # a new row below this one, if the room has space
+                row[:3] = [2, row[2] + gap, row[2] + gap]
+            if row[0] + w <= SIZE - 2 and row[1] + h <= row[3]:
+                places[name] = (row[0], row[1])
+                row[0] += w + gap
+                row[2] = max(row[2], row[1] + h)
+                break
+        else:
+            return None
+    return places
+
+
 def layout(shapes, box=BODY_BOX):
     """(place, sprites): place maps document points to texels of the controller on the sheet, in
     `box` (U V width height); sprites are {part: (u, v, w, h, x, y)}, a part's sprite on the sheet
@@ -186,18 +212,16 @@ def layout(shapes, box=BODY_BOX):
     ox, oy = bu + (bw - (x1 - x0) * scale) / 2 - x0 * scale, bv + (bh - (y1 - y0) * scale) / 2 - y0 * scale
     place = lambda p: (p[0] * scale + ox, p[1] * scale + oy)  # noqa: E731
     by_id = {s[0]: s for s in shapes}
-    sprites, rows = {}, [[2, 2, bv - 2], [2, bv + bh + 2, SIZE - 2]]  # x, y, bottom of the room
-    for part, ids in sorted(PARTS.items(), key=lambda item: item[0]):
+    sizes, corners = {}, {}
+    for part, ids in PARTS.items():
         px0, py0, px1, py1 = _bounds([by_id[i] for i in ids])
         (cx0, cy0), (cx1, cy1) = place((px0, py0)), place((px1, py1))
-        x, y = math.floor(cx0) - pad, math.floor(cy0) - pad
-        w, h = math.ceil(cx1) + pad - x, math.ceil(cy1) + pad - y
-        row = next((r for r in rows if r[0] + w <= SIZE - 2 and r[1] + h <= r[2]), None)
-        if row is None:
-            raise ValueError(f'no room on the sheet for {part}')
-        sprites[part] = (row[0], row[1], w, h, x, y)
-        row[0] += w + 8  # apart, so the smaller mip levels keep them apart too
-    return place, sprites
+        corners[part] = x, y = math.floor(cx0) - pad, math.floor(cy0) - pad
+        sizes[part] = math.ceil(cx1) + pad - x, math.ceil(cy1) + pad - y
+    places = _shelves(sizes, _rooms(box))
+    if places is None:
+        raise ValueError("no room on the sheet for the controller's highlights")
+    return place, {part: (*places[part], *sizes[part], *corners[part]) for part in PARTS}
 
 
 def occluders(shapes, ids):
@@ -273,16 +297,24 @@ def body_placement(text):
     return u, v, tw, th, x, y, kx
 
 
+def _on_screen(sprite, placement):
+    """(x, y, width, height) on the screen of a layout() sprite, where body_placement() draws the
+    controller."""
+    bu, bv, _tw, _th, x0, y0, k = placement
+    _u, _v, w, h, x, y = sprite
+    return x0 + (x - bu) * k, y0 + (y - bv) * k, w * k, h * k
+
+
 def relayout(xml, sprites):
     """The layout file with each highlight at its Xbox button (sprites from layout(), drawn where
     the body tag says); the Share highlight, which the Xbox drawing has no sprite for, moved off
-    the screen. The same length; its tabs (indentation only) become spaces, which pack smaller, so
-    the changed numbers fit."""
-    bu, bv, _tw, _th, x0, y0, k = body_placement(xml.decode('latin1'))
+    the screen. The same length (_retag)."""
+    placement = body_placement(xml.decode('latin1'))
     places = {SHARE: ({'x': -999, 'y': -999}, {})}  # its size kept (a zero-sized quad is degenerate)
-    for name, (u, v, w, h, x, y) in sprites.items():
-        places[name] = ({'x': x0 + (x - bu) * k, 'y': y0 + (y - bv) * k, 'width': w * k, 'Height': h * k,
-                         'U': u, 'V': v}, {'TxtrWidth': w, 'TxtrHeight': h})
+    for name, sprite in sprites.items():
+        x, y, w, h = _on_screen(sprite, placement)
+        places[name] = ({'x': x, 'y': y, 'width': w, 'Height': h, 'U': sprite[0], 'V': sprite[1]},
+                        {'TxtrWidth': sprite[2], 'TxtrHeight': sprite[3]})
     return _retag(xml, places, set(PARTS) | {SHARE})
 
 
@@ -335,24 +367,6 @@ def highlights(text):
     return found
 
 
-def _shelves(sizes, rooms, gap=8):
-    """{name: (u, v)} placing {name: (w, h)} in rows inside `rooms` [(top, bottom)] of the sheet,
-    the tallest first; None when they do not all fit."""
-    places, rows = {}, [[2, top, top, bottom] for top, bottom in rooms]  # x, row top, row bottom, room end
-    for name, (w, h) in sorted(sizes.items(), key=lambda item: (-item[1][1], item[0])):
-        for row in rows:
-            if row[0] + w > SIZE - 2:  # a new row below this one, if the room has space
-                row[:3] = [2, row[2] + gap, row[2] + gap]
-            if row[0] + w <= SIZE - 2 and row[1] + h <= row[3]:
-                places[name] = (row[0], row[1])
-                row[0] += w + gap
-                row[2] = max(row[2], row[1] + h)
-                break
-        else:
-            return None
-    return places
-
-
 def dual_layout(text, sprites):
     """{name: (screen, slot, boxes)} for a layout that works with both sheets. screen (x, y, width,
     height) covers the highlight's place on both controllers: the layout's (DualShock 4) and the Xbox
@@ -360,8 +374,12 @@ def dual_layout(text, sprites):
     sheets, and boxes {style: (dx, dy, w, h)} where in the slot each controller's button goes (the
     Xbox has no Share). The slots fill the room above and below the controller; they are drawn
     smaller when they would not fit at the controller's own scale. ValueError when they never fit."""
-    bu, bv, bw, bh, x0, y0, k = body_placement(text)
-    ps = highlights(text)
+    return _slots(body_placement(text), highlights(text), sprites)
+
+
+def _slots(placement, ps, sprites):
+    """dual_layout() of the layout's body_placement() and highlights()."""
+    k = placement[6]
     missing = (set(PARTS) | {SHARE}) - set(ps)
     if missing:
         raise ValueError(f'the layout lacks {sorted(missing)}')
@@ -369,18 +387,16 @@ def dual_layout(text, sprites):
     for name in sorted(set(PARTS) | {SHARE}):
         own = {'playstation': ps[name][:4]}
         if name in sprites:
-            _u, _v, w, h, x, y = sprites[name]
-            own['xbox'] = (x0 + (x - bu) * k, y0 + (y - bv) * k, w * k, h * k)
+            own['xbox'] = _on_screen(sprites[name], placement)
         left = min(r[0] for r in own.values())
         top = min(r[1] for r in own.values())
         right = max(r[0] + r[2] for r in own.values())
         bottom = max(r[1] + r[3] for r in own.values())
         rects[name] = (left, top, right - left, bottom - top, own)
-    rooms = [(2, bv - 2), (bv + bh + 2, SIZE - 2)]
     for share in (1, 0.85, 0.7, 0.6, 0.5, 0.4):
         density = share / k  # texels a screen unit
         sizes = {name: (math.ceil(r[2] * density), math.ceil(r[3] * density)) for name, r in rects.items()}
-        places = _shelves(sizes, rooms)
+        places = _shelves(sizes, _rooms(placement[:4]))
         if places is not None:
             break
     else:
@@ -409,29 +425,24 @@ def dual(text, original, shapes=None):
     `original`, the game's sheet as an image, or the Xbox drawing) and each highlight's sprite in its
     slot, at that controller's box (scaled when the slots are drawn smaller)."""
     from PIL import Image
-    placement = body_placement(text)
+    placement, ps = body_placement(text), highlights(text)
     bu, bv, bw, bh = placement[:4]
     if original.size != (SIZE, SIZE):
         original = original.resize((SIZE, SIZE), Image.LANCZOS)
-    original = original.convert('RGBA')
     drawn, sprites = draw_sheet(shapes, box=(bu, bv, bw, bh))
-    slots = dual_layout(text, sprites)
-    ps = highlights(text)
-    pieces = {'playstation': lambda name: original.crop(_box(ps[name][4:])),
-              'xbox': lambda name: drawn.crop(_box(sprites[name][:4]))}
+    slots = _slots(placement, ps, sprites)
+    # Each controller's image and where each highlight's sprite is on it.
+    sources = {'playstation': (original.convert('RGBA'), {name: place[4:] for name, place in ps.items()}),
+               'xbox': (drawn, {name: sprite[:4] for name, sprite in sprites.items()})}
     sheets = {}
-    for style, piece in pieces.items():
-        source = original if style == 'playstation' else drawn
+    for style, (image, sprite_at) in sources.items():
         sheet = Image.new('RGBA', (SIZE, SIZE), PAPER + (0,))
-        sheet.paste(source.crop((bu, bv, bu + bw, bv + bh)), (bu, bv))
+        sheet.paste(image.crop((bu, bv, bu + bw, bv + bh)), (bu, bv))
         for name, (_screen, (u, v, _w, _h), boxes) in slots.items():
             if style not in boxes:
                 continue
             dx, dy, w, h = boxes[style]
-            sprite = piece(name)
-            if sprite.size != (w, h):
-                sprite = sprite.resize((w, h), Image.LANCZOS)
-            sheet.paste(sprite, (u + dx, v + dy))
+            sheet.paste(image.crop(_box(sprite_at[name])).resize((w, h), Image.LANCZOS), (u + dx, v + dy))
         sheets[style] = sheet
     return slots, sheets
 
@@ -444,64 +455,106 @@ def _box(place):
 
 # ------------------------------------------------------------------------------- patches
 
-def changes(game, given=None, row=True):
-    """{archive: [(offset, original, new)]} that draw the Xbox controller (and with `row`, the
-    Controller type rows). The game reads the newest archive's copy of a file (as
-    scripts/menu_patches.py's data09 change), and the picture and the layout go together: an
-    archive changes only when all its copies fit. An archive that
-    holds the newest copy of a file must fit, or ValueError and nothing changes; an older one that
-    does not is left as it is."""
-    with contextlib.ExitStack() as opened:
-        holders = {name: [] for name in (*TEXTURES, LAYOUT)}  # file -> [(archive name, Archive, entry)]
-        for archive_name, path in psarc.archives(game, given):
-            archive = opened.enter_context(psarc.Archive(path))
-            for name in holders:
-                i = archive.find(name)
-                if i is not None:
-                    holders[name].append((archive_name, archive, i))
-        return _changes(holders, row)
+def _holders(game, given, opened):
+    """{file: [(archive name, Archive, entry)]} of the picture and the layout, oldest archive first
+    (the game reads the newest's copy, as scripts/menu_patches.py's data09 change). A name whose
+    entry another name already has in that archive (the 2x and 1x sheets can share their bytes) is
+    that one copy. The archives stay open in `opened`."""
+    holders = {name: [] for name in (*TEXTURES, LAYOUT)}
+    for archive_name, path in psarc.archives(game, given):
+        archive = opened.enter_context(psarc.Archive(path))
+        taken = set()
+        for name in holders:
+            i = archive.find(name)
+            if i is not None and archive.entries[i]['offset'] not in taken:
+                taken.add(archive.entries[i]['offset'])
+                holders[name].append((archive_name, archive, i))
+    return holders
 
 
-def _changes(holders, row=True):
-    """changes() of the archives' copies, found and opened: {file: [(archive name, Archive, entry)]}."""
+def _layouts(holders):
+    """({archive: the layout's bytes}, body_placement()) of every copy of the layout: the sheet is
+    drawn where they place the controller, so they must agree."""
     if not holders[LAYOUT] or not any(holders[name] for name in TEXTURES):
         raise ValueError("the Controls screen's picture or layout was not found")
-    # Every layout copy first: the sheet is drawn where they place the controller.
     layouts = {archive_name: archive.read(i) for archive_name, archive, i in holders[LAYOUT]}
     placements = {body_placement(xml.decode('latin1')) for xml in layouts.values()}
     if len(placements) > 1:
         raise ValueError(f'the copies of the layout place the controller differently: {sorted(placements)}')
-    sheet, sprites = draw_sheet(box=placements.pop()[:4])
+    return layouts, placements.pop()
+
+
+def _with_rows(xml, row):
+    """The layout with the Controller type rows when `row` (scripts/controller_row.py): they go in
+    the same bytes as the picture's changes, as two patches of one entry would each check the
+    other's original bytes and fail."""
+    return controller_row.add_row(xml) if row else xml
+
+
+def _encoder(sheets):
+    """encode(original, style): the texture with `style`'s sheet, encoded once for all copies that
+    agree in length and header (the new texture depends only on its size and levels)."""
+    from PIL import Image
+    encoded = {}
+
+    def encode(original, style):
+        key = (style, len(original), original[:gnf.HEADER])
+        if key not in encoded:
+            texture = gnf.Texture(original)
+            sheet = sheets[style]
+            if sheet.size != (texture.width, texture.height):
+                sheet = sheet.resize((texture.width, texture.height), Image.LANCZOS)
+            encoded[key] = texture.replaced(sheet)
+        return encoded[key]
+    return encode
+
+
+def _pack(holders, variants, label):
+    """{style: {archive: [(offset, original, new)]}} giving each copy its new bytes in each style:
+    variants(name, archive name, Archive, entry) -> {style: bytes}. The picture and the layout go
+    together: an archive changes only when all its copies fit in every style. An archive that holds
+    the newest copy of a file must fit, or ValueError and nothing changes; an older one that does
+    not is left as it is (reported under `label`)."""
     newest = {copies[-1][0] for copies in holders.values() if copies}
-    packed = {}  # archive -> {file: its changes, or None when they do not fit}
-    encoded = {}  # (length, header) -> the sheet in a texture of that shape
+    packed = {}  # archive -> {(file, style): its changes, or None when they do not fit}
     for name, copies in holders.items():
         for archive_name, archive, i in copies:
-            if name == LAYOUT:
-                # The Controller type rows (scripts/controller_row.py) go in the same bytes: two
-                # patches of one entry would each check the other's original bytes and fail.
-                xml = layouts[archive_name]
-                new = relayout(controller_row.add_row(xml) if row else xml, sprites)
-            else:
-                # The new texture depends only on the original's length and header (its size and
-                # levels), so copies that agree in both are encoded once.
-                original = archive.read(i)
-                key = (len(original), original[:gnf.HEADER])
-                if key not in encoded:
-                    encoded[key] = gnf.Texture(original).replaced(sheet)
-                new = encoded[key]
-            packed.setdefault(archive_name, {})[name] = parts = archive.repack(i, new)
-            if parts is None and archive_name in newest:
-                raise ValueError(f'{archive_name} {name}: the Xbox version does not fit in its place')
+            repacked = {}
+            for style, data in variants(name, archive_name, archive, i).items():
+                if data not in repacked:
+                    repacked[data] = archive.repack(i, data)
+                packed.setdefault(archive_name, {})[(name, style)] = repacked[data]
+                if repacked[data] is None and archive_name in newest:
+                    raise ValueError(f'{archive_name} {name}: the {style} version does not fit in its place')
     result = {}
     for archive_name, files in packed.items():
-        missing = [name for name, parts in files.items() if parts is None]
+        missing = sorted({name for (name, _style), parts in files.items() if parts is None})
         if missing:
-            print(f'Xbox controller: {archive_name}: no room for {", ".join(missing)}; '
-                  'its copies are left as they are', flush=True)
+            print(f'{label}: {archive_name}: no room for {", ".join(missing)}; its copies are left as they are', flush=True)
             continue
-        result[archive_name] = [change for parts in files.values() for change in parts]
+        for (_name, style), parts in files.items():
+            result.setdefault(style, {}).setdefault(archive_name, []).extend(parts)
     return result
+
+
+def changes(game, given=None, row=True):
+    """{archive: [(offset, original, new)]} that draw the Xbox controller (and with `row`, the
+    Controller type rows), as _pack gives them."""
+    with contextlib.ExitStack() as opened:
+        return _changes(_holders(game, given, opened), row)
+
+
+def _changes(holders, row=True):
+    """changes() of the archives' copies, found and opened (_holders)."""
+    layouts, placement = _layouts(holders)
+    sheet, sprites = draw_sheet(box=placement[:4])
+    encode = _encoder({'xbox': sheet})
+
+    def variants(name, archive_name, archive, i):
+        if name == LAYOUT:
+            return {'xbox': relayout(_with_rows(layouts[archive_name], row), sprites)}
+        return {'xbox': encode(archive.read(i), 'xbox')}
+    return _pack(holders, variants, 'Xbox controller').get('xbox', {})
 
 
 def build(game, out, given=None, row=True):
@@ -519,75 +572,30 @@ def build(game, out, given=None, row=True):
 
 def dual_changes(game, given=None, row=True):
     """({style: {archive: [(offset, original, new)]}}, swaps) for the dual layout (and with `row`,
-    the Controller type rows) and each style's sheet. swaps: [(archive, offset, packed length,
-    {style: texture bytes})], the newest copy of each sheet texture. An archive changes only when
-    all its copies fit for both styles; the newest copy of a file must fit, or ValueError."""
+    the Controller type rows) and each style's sheet, as _pack gives them. swaps: [(archive, offset,
+    stored size, {style: texture bytes})], the newest copy of each sheet texture."""
     with contextlib.ExitStack() as opened:
-        holders = {name: [] for name in (*TEXTURES, LAYOUT)}
-        for archive_name, path in psarc.archives(game, given):
-            archive = opened.enter_context(psarc.Archive(path))
-            for name in holders:
-                i = archive.find(name)
-                if i is not None:
-                    holders[name].append((archive_name, archive, i))
-        return _dual_changes(holders, row)
+        return _dual_changes(_holders(game, given, opened), row)
 
 
 def _dual_changes(holders, row=True):
-    from PIL import Image
-    if not holders[LAYOUT] or not any(holders[name] for name in TEXTURES):
-        raise ValueError("the Controls screen's picture or layout was not found")
-    layouts = {archive_name: archive.read(i) for archive_name, archive, i in holders[LAYOUT]}
-    if len({body_placement(xml.decode('latin1')) for xml in layouts.values()}) > 1:
-        raise ValueError('the copies of the layout place the controller differently')
+    layouts, _placement = _layouts(holders)
     # The game's newest layout and its largest sheet: what the DualShock 4 sheet is made from.
     text = layouts[holders[LAYOUT][-1][0]].decode('latin1')
     _n, archive, i = next(holders[name][-1] for name in TEXTURES if holders[name])
     slots, sheets = dual(text, gnf.Texture(archive.read(i)).image())
-    encoded = {}  # (style, length, header) -> the style's sheet in a texture of that shape
-    newest = {copies[-1][0] for copies in holders.values() if copies}
-    packed = {}  # archive -> {(file, style): its changes, or None when they do not fit}
+    encode = _encoder(sheets)
     swaps = []
-    for name, copies in holders.items():
-        for archive_name, archive, i in copies:
-            if name == LAYOUT:
-                xml = layouts[archive_name]
-                new = relayout_dual(controller_row.add_row(xml) if row else xml, slots)
-                variants = dict.fromkeys(STYLES, new)
-            else:
-                original = archive.read(i)
-                texture = gnf.Texture(original)
-                variants = {}
-                for style in STYLES:
-                    key = (style, len(original), original[:gnf.HEADER])
-                    if key not in encoded:
-                        sheet = sheets[style]
-                        if sheet.size != (texture.width, texture.height):
-                            sheet = sheet.resize((texture.width, texture.height), Image.LANCZOS)
-                        encoded[key] = texture.replaced(sheet)
-                    variants[style] = encoded[key]
-                offset = archive.entries[i]['offset']
-                # Two names of one entry (the 2x and 1x sheets can share their bytes): one texture.
-                if (archive_name, archive, i) == copies[-1] and all((a, o) != (archive_name, offset) for a, o, _l, _v in swaps):
-                    swaps.append((archive_name, offset, sum(stored for stored, _length in archive.blocks(i)), variants))
-            repacked = {}
-            for style, data in variants.items():
-                if data not in repacked:
-                    repacked[data] = archive.repack(i, data)
-                packed.setdefault(archive_name, {})[(name, style)] = parts = repacked[data]
-                if parts is None and archive_name in newest:
-                    raise ValueError(f'{archive_name} {name}: the {style} version does not fit in its place')
-    result = {style: {} for style in STYLES}
-    for archive_name, files in packed.items():
-        missing = sorted({name for (name, _style), parts in files.items() if parts is None})
-        if missing:
-            print(f'Controller picture: {archive_name}: no room for {", ".join(missing)}; '
-                  'its copies are left as they are', flush=True)
-            continue
-        for (_name, style), parts in files.items():
-            kept = result[style].setdefault(archive_name, [])
-            kept.extend(change for change in parts if change not in kept)  # one entry under two names
-    return result, swaps
+
+    def variants(name, archive_name, archive, i):
+        if name == LAYOUT:
+            return dict.fromkeys(STYLES, relayout_dual(_with_rows(layouts[archive_name], row), slots))
+        original = archive.read(i)
+        each = {style: encode(original, style) for style in STYLES}
+        if (archive_name, archive, i) == holders[name][-1]:
+            swaps.append((archive_name, archive.entries[i]['offset'], archive.stored_size(i), each))
+        return each
+    return _pack(holders, variants, 'Controller picture'), swaps
 
 
 def build_dual(game, out, style, given=None, row=True):
@@ -600,17 +608,14 @@ def build_dual(game, out, style, given=None, row=True):
         lines = []
         for each in STYLES:
             (folder / each).mkdir()
-            lines += [f'{each}\t{line}' for name, parts in changed[each].items()
+            lines += [f'{each}\t{line}' for name, parts in changed.get(each, {}).items()
                       for line in psarc.patch_lines(name, parts, folder / each)]
         (folder / 'swap').mkdir()
-        for archive_name, offset, length, variants in swaps:
-            files = []
-            for each, data in variants.items():
-                file = folder / 'swap' / f'{Path(archive_name).stem}-{offset:x}-{each}.gnf'
-                file.write_bytes(data)
-                files.append(f'{each}={file.resolve()}')
-            lines.append('swap\t' + '\t'.join([f'/app0/{archive_name}', f'{offset:x}', f'{length:x}',
-                                                f'{gnf.HEADER:x}', *files]) + '\n')
+        for archive_name, offset, stored, variants in swaps:
+            files = {each: folder / 'swap' / f'{Path(archive_name).stem}-{offset:x}-{each}.gnf' for each in variants}
+            for each, file in files.items():
+                file.write_bytes(variants[each])
+            lines.append('swap\t' + wipeout_glyphs.swap_line(archive_name, offset, stored, files))
         return lines
     key = [DUAL_VERSION, VERSION, controller_row.VERSION, row, psarc.stamp([SVG]), [name for name, _p in found],
            psarc.stamp(p for _n, p in found)]
@@ -632,39 +637,42 @@ def main():
     psarc.add_archive_option(parser)
     args = parser.parse_args()
     row = not args.no_row
-    if args.swap_config:
-        try:
-            lines, swaps = build_dual(args.game, args.out, args.style, args.archive, row)
-        except Exception as error:  # noqa: BLE001  (a picture only: whatever fails, the game starts)
-            print(f'Controller picture: {error}; it does not follow the Controller type row', flush=True)
-        else:
-            with open(args.out / 'file_patches.txt', 'a') as f:
-                f.writelines(lines)
-            with open(args.swap_config, 'a') as f:
-                f.writelines(swaps)
-            print(f'Controller picture: {args.style} at start, follows the Controller type row '
-                  f'({len(lines)} changes, {len(swaps)} sheets; game files untouched)', flush=True)
-            return
-        if args.style == 'playstation':  # the game's own picture, with the rows (as before)
-            if not row:
-                return
-            try:
-                lines = controller_row.build(args.game, args.out, args.archive)
-            except Exception as error:  # noqa: BLE001  (a menu row: whatever fails, the game starts)
-                print(f'Controller type row: {error}; the Controls screens stay as they are', flush=True)
-                return
-            with open(args.out / 'file_patches.txt', 'a') as f:
-                f.writelines(lines)
-            print(f'Controller type row: on the Controls screens ({len(lines)} changes; game files untouched)', flush=True)
-            return
+    # Whatever fails, the game starts: both controllers, else (as before) the game's own picture
+    # with the rows for PlayStation, or the Xbox picture alone.
+    built = _both(args, row) if args.swap_config else None
+    if not built and args.swap_config and args.style == 'playstation':
+        if row:
+            controller_row.apply(args.game, args.out, args.archive)
+        return
+    built = built or _xbox(args, row)
+    if built:
+        lines, message = built
+        with open(args.out / 'file_patches.txt', 'a') as f:
+            f.writelines(lines)
+        print(message, flush=True)
+
+
+def _both(args, row):
+    """(lines, message) of both controllers, their sheets added to the swap file; None on failure."""
+    try:
+        lines, swaps = build_dual(args.game, args.out, args.style, args.archive, row)
+    except Exception as error:  # noqa: BLE001  (a picture only)
+        print(f'Controller picture: {error}; it does not follow the Controller type row', flush=True)
+        return None
+    with open(args.swap_config, 'a') as f:
+        f.writelines(swaps)
+    return lines, (f'Controller picture: {args.style} at start, follows the Controller type row '
+                   f'({len(lines)} changes, {len(swaps)} sheets; game files untouched)')
+
+
+def _xbox(args, row):
+    """(lines, message) of the Xbox picture alone; None on failure."""
     try:
         lines = build(args.game, args.out, args.archive, row=row)
-    except Exception as error:  # noqa: BLE001  (a picture only: whatever fails, the game starts)
+    except Exception as error:  # noqa: BLE001  (a picture only)
         print(f'Xbox controller: {error}; the Controls screen keeps the DualShock 4', flush=True)
-        return
-    with open(args.out / 'file_patches.txt', 'a') as f:
-        f.writelines(lines)
-    print(f'Xbox controller: on the Controls screen ({len(lines)} changes; game files untouched)', flush=True)
+        return None
+    return lines, f'Xbox controller: on the Controls screen ({len(lines)} changes; game files untouched)'
 
 
 if __name__ == '__main__':

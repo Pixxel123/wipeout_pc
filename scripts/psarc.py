@@ -89,6 +89,10 @@ class Archive:
             out.append((self.sizes[e['first'] + n] or self.block, length))
         return out
 
+    def stored_size(self, i):
+        """The bytes entry i takes in the archive."""
+        return sum(stored for stored, _length in self.blocks(i))
+
     def compressed(self, i):
         return any(stored != length for stored, length in self.blocks(i))
 

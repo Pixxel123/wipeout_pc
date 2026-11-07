@@ -325,15 +325,19 @@ def main():
             if style in ('xbox', 'nintendo'):
                 optional_script('wipeout_glyphs.py', game, '--out', out, '--style', style,
                                 '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
-            # The swap file first (written anew), then the controller picture adds its sheets to it.
+            # With the rows the prompts and the picture follow them while the game runs: the scripts
+            # add the textures that switch to the swap file, emptied here once a start.
             swap = out / 'glyph_swap.txt'
-            optional_script('wipeout_glyphs.py', game, '--out', out, '--swap-config', swap,
-                            '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
+            swap.write_text('')
+            if ready:
+                optional_script('wipeout_glyphs.py', game, '--out', out, '--swap-config', swap,
+                                '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
             for script, options in row_scripts(style, ready, swap):
                 optional_script(script, game, '--out', out, *options, *psarcs)
-            env['GOW3_GLYPH_SWAP'] = str(swap)
-            env['GOW3_GLYPH_STYLE'] = style  # what the file patches above load (src/runtime_glyphs.c)
-            derived += ['GOW3_GLYPH_SWAP', 'GOW3_GLYPH_STYLE']
+            if ready:
+                env['GOW3_GLYPH_SWAP'] = str(swap)
+                env['GOW3_GLYPH_STYLE'] = style  # what the file patches above load (src/runtime_glyphs.c)
+                derived += ['GOW3_GLYPH_SWAP', 'GOW3_GLYPH_STYLE']
         env['GOW3_FILE_PATCHES'] = str(out / 'file_patches.txt')
 
         from patches import game_profile_for, patch_requirements, patch_status, selected_patches

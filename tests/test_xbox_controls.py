@@ -44,12 +44,12 @@ def read(path, name):
         return a.read(a.find(name))
 
 
-def fast_replaced(texture, image):
+def fast_replaced(texture, image, seed=None):
     """Stands in for gnf.Texture.replaced, which takes many seconds on a 1024x1024 BC7 sheet (its
-    own tests are in test_gnf.py): the header kept, the data noise the size of the original's,
-    which packs no smaller than the game's own textures do."""
+    own tests are in test_gnf.py): the header kept, the data noise the size of the original's
+    (seeded by its length unless told), which packs no smaller than the game's own textures do."""
     import random
-    rng = random.Random(len(texture.data))
+    rng = random.Random(len(texture.data) if seed is None else seed)
     return texture.data[:gnf.HEADER] + bytes(rng.getrandbits(8) for _ in range(len(texture.data) - gnf.HEADER))
 
 
@@ -314,11 +314,9 @@ def ps_sheet():
 
 
 def image_replaced(texture, image):
-    """gnf.Texture.replaced, fast: noise seeded by the image, so each style's sheet has its own."""
+    """fast_replaced seeded by the image, so each style's sheet has its own noise."""
     import hashlib
-    import random
-    rng = random.Random(hashlib.md5(image.tobytes()).digest())
-    return texture.data[:gnf.HEADER] + bytes(rng.getrandbits(8) for _ in range(len(texture.data) - gnf.HEADER))
+    return fast_replaced(texture, image, hashlib.md5(image.tobytes()).digest())
 
 
 class DualTest(unittest.TestCase):

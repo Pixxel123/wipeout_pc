@@ -120,6 +120,7 @@ void runtime_json_report(void);
 const char *runtime_thread_name(void *handle);
 uint64_t runtime_memory_flexible_available(void);
 unsigned char *runtime_image_base(void);
+/* Copies of byte blocks in resident guest memory, at 256-byte boundaries only (runtime_memory.c). */
 int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
                             int count, uintptr_t *addresses, int *which, int max);
 int runtime_memory_find_u32(const uint32_t *values, int count, int align, uint64_t max_region,
@@ -135,7 +136,4 @@ ABI void runtime_glyphs_accept(void);
 void runtime_glyphs_accept_hooked(void);
 /* The size of the game's mapped image (probe.c). */
 uint64_t runtime_image_size(void);
-size_t runtime_savedata_mounts(void);
-/* The guest mapping or gap around address: [start,end), mapped; 0 past the last mapping. */
-int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped);
 #endif

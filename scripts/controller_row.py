@@ -87,20 +87,25 @@ def build(game, out, given=None):
     return psarc.cached_lines(Path(out) / 'controller_row', key, make)
 
 
+def apply(game, out, given=None):
+    """Adds the rows' changes to out/file_patches.txt; whatever fails, the game starts without them."""
+    try:
+        lines = build(game, out, given)
+    except Exception as error:  # noqa: BLE001  (a menu row: whatever fails, the game starts)
+        print(f'Controller type row: {error}; the Controls screens stay as they are', flush=True)
+        return
+    with open(Path(out) / 'file_patches.txt', 'a') as f:
+        f.writelines(lines)
+    print(f'Controller type row: on the Controls screens ({len(lines)} changes; game files untouched)', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, required=True, help='adds its changes to OUT/file_patches.txt')
     psarc.add_archive_option(parser)
     args = parser.parse_args()
-    try:
-        lines = build(args.game, args.out, args.archive)
-    except Exception as error:  # noqa: BLE001  (a menu row: whatever fails, the game starts)
-        print(f'Controller type row: {error}; the Controls screens stay as they are', flush=True)
-        return
-    with open(args.out / 'file_patches.txt', 'a') as f:
-        f.writelines(lines)
-    print(f'Controller type row: on the Controls screens ({len(lines)} changes; game files untouched)', flush=True)
+    apply(args.game, args.out, args.archive)
 
 
 if __name__ == '__main__':

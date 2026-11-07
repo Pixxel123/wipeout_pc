@@ -297,12 +297,20 @@ def build(game, out, style, pad_map='', given=None):
 SWAP_STYLES = ('playstation', 'xbox', 'nintendo')
 
 
+def swap_line(name, offset, stored, files):
+    """A GOW3_GLYPH_SWAP line (src/glyph_swap.h glyph_parse_line): the archive, where the entry's
+    packed bytes are (the runtime looks for the texture again after the game reads them) and the
+    GNF header length (hex), then style=file for each {style: file}; tab-separated (paths may hold
+    spaces)."""
+    return '\t'.join([f'/app0/{name}', f'{offset:x}', f'{stored:x}', f'{gnf.HEADER:x}',
+                      *(f'{style}={Path(file).resolve()}' for style, file in files.items())]) + '\n'
+
+
+
 def variants(game, out, pad_map='', given=None):
-    """GOW3_GLYPH_SWAP lines (src/runtime_glyphs.c): for the newest copy of the button font's atlas
-    and of each tab picture, where its packed bytes are in the archive (the runtime looks for the
-    texture again after the game reads them) and a file of each style's texture, the original for
-    playstation, written in out/glyph_swap. Fields are tab-separated (paths may hold spaces):
-    archive, offset, packed length, header length (all hex), then style=file for each style."""
+    """GOW3_GLYPH_SWAP lines (swap_line, src/runtime_glyphs.c) for the newest copy of the button
+    font's atlas and of each tab picture, with a file of each style's texture, the original for
+    playstation, written in out/glyph_swap."""
     found = psarc.archives(game, given)
 
     def make(folder):
@@ -320,17 +328,16 @@ def variants(game, out, pad_map='', given=None):
                 font = archive.find(FONT_MAP)
                 font = archive.read(font) if font is not None else None
                 offset = archive.entries[i]['offset']
-                packed = sum(stored for stored, _length in archive.blocks(i))
-            files = []
+                stored = archive.stored_size(i)
+            files = {}
             for style in SWAP_STYLES:
                 data = original if style == 'playstation' else redrawn(entry, original, style, pad_map, font)
                 if not data:
                     continue
-                file = Path(folder) / f'{Path(name).stem}-{Path(entry).stem}-{style}.gnf'
-                file.write_bytes(data)
-                files.append(f'{style}={file.resolve()}')
+                files[style] = Path(folder) / f'{Path(name).stem}-{Path(entry).stem}-{style}.gnf'
+                files[style].write_bytes(data)
             if len(files) > 1:
-                lines.append('\t'.join([f'/app0/{name}', f'{offset:x}', f'{packed:x}', f'{gnf.HEADER:x}', *files]) + '\n')
+                lines.append(swap_line(name, offset, stored, files))
         return lines
     key = [VERSION, pad_map, [name for name, _p in found], psarc.stamp(p for _n, p in found)]
     return psarc.cached_lines(Path(out) / 'glyph_swap', key, make)
@@ -341,7 +348,7 @@ def main():
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, required=True, help='adds its changes to OUT/file_patches.txt')
     parser.add_argument('--style', choices=('xbox', 'nintendo'))
-    parser.add_argument('--swap-config', type=Path, help='writes GOW3_GLYPH_SWAP lines (all styles) to this file')
+    parser.add_argument('--swap-config', type=Path, help='adds GOW3_GLYPH_SWAP lines (all styles) to this file')
     parser.add_argument('--pad-map', default='', help='GOW3_PAD_MAP')
     psarc.add_archive_option(parser)
     args = parser.parse_args()
@@ -351,7 +358,8 @@ def main():
         except Exception as error:  # noqa: BLE001  (icons only: whatever fails, the game starts)
             print(f'Glyphs: {error}; the prompts keep the style chosen at start', flush=True)
             lines = []
-        args.swap_config.write_text(''.join(lines))
+        with open(args.swap_config, 'a') as f:  # run.py empties it; scripts/xbox_controls.py adds too
+            f.writelines(lines)
         print(f'Glyphs: {len(lines)} textures switch while the game runs', flush=True)
         return
     if not args.style:

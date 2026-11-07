@@ -38,6 +38,12 @@ static void test_find_aligned(void) {
     assert(memory_find_aligned(lo,hi,blocks,sizes,odd,3,at,which,0,8)==0);
 }
 
+/* A row value's style as the runtime reads it: the string it points at, else the text at it. */
+static int field_style(const unsigned char *field) {
+    const int style=field ? glyph_pointed_style(field) : -1;
+    return style>=0 || !field ? style : glyph_inline_style(field);
+}
+
 /* What finds the settings store and the open rows' table in a build whose offsets moved (01.09). */
 static void test_find_checks(void) {
     static unsigned char store[0x600], a[0xb0] __attribute__((aligned(8))), b[0xb0] __attribute__((aligned(8)));
@@ -69,30 +75,31 @@ static void test_find_checks(void) {
     assert(glyph_table_slot(table,3,p1));
     assert(!glyph_table_slot(table,2,p1) && !glyph_table_slot(table,3,glyph_key("FE_Pad Style P2")));
     assert(!glyph_table_slot(table,-1,p1) && !glyph_table_slot(table,GLYPH_ROWS,p1));
-    assert(glyph_row_field(table,p1)==(const unsigned char *)&field && !glyph_row_field(table,glyph_key("FE_Pad Style P2")));
+    assert(glyph_row_field(table,p1,1)==(const unsigned char *)&field && !glyph_row_field(table,glyph_key("FE_Pad Style P2"),1));
     put32(table+0x1000+4*3,0);
-    assert(!glyph_table_slot(table,3,p1) && !glyph_row_field(table,p1)); /* not open */
+    assert(!glyph_table_slot(table,3,p1) && !glyph_row_field(table,p1,1)); /* not open */
     put32(table+0x1000+4*3,1);
     /* The row is open whatever its value; what the value names is read separately. */
-    assert(glyph_field_style(glyph_row_field(table,p1))==1);              /* -> the entry's value */
+    assert(field_style(glyph_row_field(table,p1,1))==1);              /* -> the entry's value */
     field=(uint64_t)(uintptr_t)label;
-    assert(glyph_field_style(glyph_row_field(table,p1))==0);              /* -> the entry's label */
+    assert(field_style(glyph_row_field(table,p1,1))==0);              /* -> the entry's label */
     field=(uint64_t)(uintptr_t)other;
-    assert(glyph_table_slot(table,3,p1) && glyph_field_style(glyph_row_field(table,p1))==-1);
+    assert(glyph_table_slot(table,3,p1) && field_style(glyph_row_field(table,p1,1))==-1);
     /* The text at the pointer itself (its first 8 bytes are no address, so nothing is followed). */
     static char inline_value[16] __attribute__((aligned(8)))="FE_DEFAULT";
     put64(table+8*3,(uint64_t)(uintptr_t)inline_value);
-    assert(glyph_pointed_style(glyph_row_field(table,p1))==-1 && glyph_inline_style(glyph_row_field(table,p1))==0);
-    assert(glyph_field_style(glyph_row_field(table,p1))==0);
+    assert(glyph_pointed_style(glyph_row_field(table,p1,1))==-1 && glyph_inline_style(glyph_row_field(table,p1,1))==0);
+    assert(field_style(glyph_row_field(table,p1,1))==0);
     put64(table+8*3,(uint64_t)(uintptr_t)&field+1);
     assert(!glyph_table_slot(table,3,p1));                                /* misaligned pointer */
     put64(table+8*3,0);
-    assert(!glyph_table_slot(table,3,p1) && glyph_field_style(NULL)==-1);
+    assert(!glyph_table_slot(table,3,p1) && field_style(NULL)==-1);
     /* A table whose counts say nothing: the row is found by its key and value pointer alone. */
     put64(table+8*3,(uint64_t)(uintptr_t)&field); put32(table+0x1000+4*3,0);
-    assert(!glyph_row_field(table,p1) && glyph_row_field_any(table,p1)==(const unsigned char *)&field);
+    assert(!glyph_row_field(table,p1,1) && glyph_row_field(table,p1,0)==(const unsigned char *)&field);
+    assert(!glyph_slot(table,3,p1,1) && glyph_slot(table,3,p1,0));
     put64(table+8*3,(uint64_t)(uintptr_t)&field+4);
-    assert(!glyph_row_field_any(table,p1));                               /* misaligned: not a pointer */
+    assert(!glyph_row_field(table,p1,0));                                 /* misaligned: not a pointer */
     put64(table+8*3,0); put32(table+0x1000+4*3,1);
     assert(glyph_value_style("XBOX")==1 && glyph_value_style("DEFAULT")==0 && glyph_value_style("nintendo")==2);
     assert(glyph_value_style("Xbox")==-1 && glyph_value_style(NULL)==-1);
@@ -126,15 +133,16 @@ int main(void) {
     static const char selected[]="nintendo";
     uint64_t field=(uint64_t)(uintptr_t)selected;
     put64(table+8*7,(uint64_t)(uintptr_t)&field);
-    assert(glyph_row_value(table,glyph_key("FE_Pad Style P2"))==selected);
-    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P1")));        /* no such row */
+    const uint32_t p2=glyph_key("FE_Pad Style P2");
+    assert(glyph_row_field(table,p2,1)==(const unsigned char *)&field && glyph_pointed_style(glyph_row_field(table,p2,1))==2);
+    assert(!glyph_row_field(table,glyph_key("FE_Pad Style P1"),1));      /* no such row */
     put32(table+0x1000+4*7,0);
-    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* not open */
+    assert(!glyph_row_field(table,p2,1));                                 /* not open */
     put32(table+0x1000+4*7,1);
     field=0;
-    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* NULL string */
+    assert(glyph_pointed_style(glyph_row_field(table,p2,1))==-1);         /* NULL string */
     put64(table+8*7,0);
-    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* NULL slot */
+    assert(!glyph_row_field(table,p2,1));                                 /* NULL slot */
 
     /* Commit: only into an existing node, only within its capacity. */
     put64(b+0x50,0);

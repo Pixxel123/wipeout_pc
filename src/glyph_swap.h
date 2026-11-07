@@ -51,16 +51,6 @@ static inline int glyph_row_open(const unsigned char *table, uint32_t key) {
         if ((uint32_t)glyph_load64(table+0x800+8*i)==key && glyph_load32(table+0x1000+4*i)) return 1;
     return 0;
 }
-/* The selected value of the open row with this key (the guest's string, not a copy); NULL when no
- * open row has the key or its pointers are NULL. */
-static inline const char *glyph_row_value(const unsigned char *table, uint32_t key) {
-    for (int i=0;i<GLYPH_ROWS;++i) {
-        if ((uint32_t)glyph_load64(table+0x800+8*i)!=key || !glyph_load32(table+0x1000+4*i)) continue;
-        const unsigned char *field=(const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
-        return field ? (const char *)(uintptr_t)glyph_load64(field) : NULL;
-    }
-    return NULL;
-}
 /* Writes value (with its NUL) into the existing setting with this key when it fits the node's
  * capacity, the rest of the capacity zeroed, as the game's own in-place write (0x696300) does; 1
  * when written. Never grows a node and never adds a missing one. The caller commits only values
@@ -104,28 +94,20 @@ static inline int glyph_store_holds(const unsigned char *store, uint32_t key, in
     }
     return 0;
 }
-/* Whether slot i of `table` is an open row with this key: its key, a count and a value pointer, as
- * the table of rows on open screens holds while a Controller type row is shown. What the value
- * points at is read with glyph_value_style. */
-static inline int glyph_table_slot(const unsigned char *table, int i, uint32_t key) {
-    if (i<0 || i>=GLYPH_ROWS || (uint32_t)glyph_load64(table+0x800+8*i)!=key || !glyph_load32(table+0x1000+4*i)) return 0;
+/* Whether slot i of `table` holds a row with this key and a value pointer, with a count when
+ * `counted` (a table whose counts say which rows are open). What the value names is read with
+ * glyph_pointed_style and glyph_inline_style. */
+static inline int glyph_slot(const unsigned char *table, int i, uint32_t key, int counted) {
+    if (i<0 || i>=GLYPH_ROWS || (uint32_t)glyph_load64(table+0x800+8*i)!=key || (counted && !glyph_load32(table+0x1000+4*i))) return 0;
     const uint64_t field=glyph_load64(table+8*i);
     return field && !(field & 7);
 }
-/* The value pointer of the open row with this key (what its slot points at), or NULL. */
-static inline const unsigned char *glyph_row_field(const unsigned char *table, uint32_t key) {
+/* An open row with this key, as the table of rows on open screens holds while it is shown. */
+static inline int glyph_table_slot(const unsigned char *table, int i, uint32_t key) { return glyph_slot(table,i,key,1); }
+/* The value pointer of the row with this key (glyph_slot), or NULL. */
+static inline const unsigned char *glyph_row_field(const unsigned char *table, uint32_t key, int counted) {
     for (int i=0;i<GLYPH_ROWS;++i)
-        if (glyph_table_slot(table,i,key)) return (const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
-    return NULL;
-}
-/* The value pointer of the row with this key whatever its count (a table whose counts do not say
- * which rows are open), or NULL. */
-static inline const unsigned char *glyph_row_field_any(const unsigned char *table, uint32_t key) {
-    for (int i=0;i<GLYPH_ROWS;++i) {
-        if ((uint32_t)glyph_load64(table+0x800+8*i)!=key) continue;
-        const uint64_t field=glyph_load64(table+8*i);
-        if (field && !(field & 7)) return (const unsigned char *)(uintptr_t)field;
-    }
+        if (glyph_slot(table,i,key,counted)) return (const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
     return NULL;
 }
 /* The style a row's text names: a style (an entry's value) or an entry's label as the row writes
@@ -146,11 +128,6 @@ static inline int glyph_pointed_style(const unsigned char *field) {
 /* The style the text at the value pointer itself names, or -1. */
 static inline int glyph_inline_style(const unsigned char *field) {
     return field ? glyph_value_style((const char *)field) : -1;
-}
-/* The value's style: the string it points at, else the text at it. */
-static inline int glyph_field_style(const unsigned char *field) {
-    const int style=glyph_pointed_style(field);
-    return style>=0 ? style : glyph_inline_style(field);
 }
 /* The style the prompts should show: an open Controller type row's live value (player 2's before
  * player 1's; one Controls screen is open at a time), else player 1's saved setting. Each is a

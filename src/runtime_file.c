@@ -57,7 +57,7 @@ typedef struct {
 _Static_assert(sizeof(GuestStat)==120,"FreeBSD stat layout");
 
 typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Listing;
-typedef struct { int used, host, patched, glyphs; Listing *dir; size_t position; char path[512]; } File;
+typedef struct { int used, host, patched, watched; Listing *dir; size_t position; char path[512]; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -366,7 +366,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     if (fd<0) { pthread_mutex_unlock(&lock); if (host>=0) close(host); free_listing(dir); return -EMFILE; }
     files[fd]=(File){.used=1,.host=host,.dir=dir,
                      .patched=file_patch_count && host>=0 && game_path(guest) && file_patches_check(guest,host),
-                     .glyphs=host>=0 && watch_wants && watch_wants(guest)};
+                     .watched=host>=0 && watch_wants && watch_wants(guest)};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
@@ -434,11 +434,11 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
     const File *f=get(fd);
-    const int64_t at=f && (f->patched || f->glyphs) ? host_lseek(h,0,SEEK_CUR) : 0;
+    const int64_t at=f && (f->patched || f->watched) ? host_lseek(h,0,SEEK_CUR) : 0;
     const int64_t n=bounce_read(h,buffer,size,-1);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,(int)-n); return n; }
     if (f && f->patched) file_patches_apply(f->path,buffer,at,n);
-    if (f && f->glyphs) watch_read(f->path,at,n);
+    if (f && f->watched) watch_read(f->path,at,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -449,7 +449,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,(int)-n); return n; }
     const File *f=get(fd);
     if (f && f->patched) file_patches_apply(f->path,buffer,offset,n);
-    if (f && f->glyphs) watch_read(f->path,offset,n);
+    if (f && f->watched) watch_read(f->path,offset,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }

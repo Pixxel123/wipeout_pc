@@ -839,21 +839,6 @@ int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, i
     read_unlock();
     return found;
 }
-/* The places in mapped guest memory that hold one of `count` byte blocks whole, found by 64 bytes
- * of each at sig_at[i] (a multiple of 256), up to max of them: addresses[k] and which[k] (that
- * block's index); returns how many. Only blocks that start at a 256-byte boundary are looked for,
- * every block in one pass (src/memory_find.h): the GPU reads a texture from a 256-byte aligned
- * address (a T# holds its base in 256-byte units), so the copy that is drawn is there, and the
- * stale copies left in freed load buffers mostly are not. A block not in memory yet (a texture
- * not loaded) costs one pass, not a byte-by-byte search. The search goes on past a hit. Faults (a
- * region unmapped or protected meanwhile) skip the region. A full search reads every mapping once:
- * call it only when needed, from a runtime thread. Linux reads only pages already in memory
- * (mincore), so the search commits none of the guest's untouched memory; a block must lie whole in
- * one run of such pages (a texture the GPU uploaded is in memory). */
-static int find_in(uintptr_t lo, uintptr_t hi, const unsigned char *const *blocks, const size_t *sizes,
-                   const size_t *sig_at, int count, uintptr_t *addresses, int *which, int n, int max) {
-    return memory_find_aligned(lo,hi,blocks,sizes,sig_at,count,addresses,which,n,max);
-}
 /* Calls scan(lo, hi, ctx, n) over the mapped guest regions of at most max_region bytes (Linux: over
  * the runs of their pages already in memory, so untouched memory is never committed; Windows has no
  * residency query and reads the whole region), while fewer than max hits are found; scan returns
@@ -907,11 +892,18 @@ static int scan_guest(GuestScan scan, void *ctx, int max, uint64_t max_region) {
     }
     return found;
 }
-typedef struct { const unsigned char *const *blocks; const size_t *sizes, *sig_at; int count; uintptr_t *addresses; int *which, max; } BlockScan;
+typedef struct {
+    const unsigned char *const *blocks; const size_t *sizes, *sig_at; int count; uintptr_t *addresses; int *which, max;
+} BlockScan;
 static int scan_blocks(uintptr_t lo, uintptr_t hi, void *ctx, int n) {
     const BlockScan *b=ctx;
-    return find_in(lo,hi,b->blocks,b->sizes,b->sig_at,b->count,b->addresses,b->which,n,b->max);
+    return memory_find_aligned(lo,hi,b->blocks,b->sizes,b->sig_at,b->count,b->addresses,b->which,n,b->max);
 }
+/* The places in mapped guest memory that hold one of `count` byte blocks whole, found by 64 bytes
+ * of each at sig_at[i], up to max of them: addresses[k] and which[k] (that block's index); returns
+ * how many. Only blocks that start at a 256-byte boundary, with sig_at a multiple of 256, are
+ * found (src/memory_find.h: where the GPU reads a texture from). A full search reads every resident
+ * page once: call it only when needed, from a runtime thread. */
 int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
                             int count, uintptr_t *addresses, int *which, int max) {
     BlockScan b={blocks,sizes,sig_at,count,addresses,which,max};
