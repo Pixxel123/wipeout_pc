@@ -25,7 +25,8 @@ ART = Path(__file__).resolve().parent / 'art'
 # Each sheet: its sprites (U, V, width, height, the stick drawn) in texels of a sheet `space` wide.
 SHEETS = {
     'data/fe/images/photo_mode.2x.gnf': (512, [(8, 427, 131, 82, 'right'), (238, 427, 131, 82, 'left')], ''),
-    'data/fe/images/photo_mode.gnf': (512, [(8, 427, 131, 82, 'right'), (238, 427, 131, 82, 'left')], ''),
+    # At 1x the 2x drawing's lines are one texel and its parts run together: the small one instead.
+    'data/fe/images/photo_mode.gnf': (512, [(8, 427, 131, 82, 'right'), (238, 427, 131, 82, 'left')], 'small_'),
     'data/fe/images/photo_mode_fury.gnf': (256, [(4, 214, 65, 40, 'right'), (119, 214, 65, 40, 'left')], 'fury_'),
 }
 SUPER = 4  # drawn this many times larger, then reduced

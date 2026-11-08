@@ -99,6 +99,9 @@ def main():
               f'Photo mode help (photo_mode.2x.gnf, 2x), from xbox_controller.svg: the {side} stick in red.')
         write(f'xbox_photo_fury_{side}_stick.svg', styled(side, 18, FURY_RED, True, FURY_DROP), 130, 80,
               f'Fury photo mode help (photo_mode_fury.gnf, 2x of 1x), from xbox_controller.svg: the {side} stick in red.')
+        # photo_mode.gnf (1x) has the same 65 x 41 sprite as Fury's: Fury's shapes and lines, HD's red.
+        write(f'xbox_photo_small_{side}_stick.svg', styled(side, 18, RED, True, FURY_DROP), 130, 82,
+              f'Photo mode help at 1x (photo_mode.gnf), from xbox_controller.svg: the {side} stick in red.')
 
 
 if __name__ == '__main__':

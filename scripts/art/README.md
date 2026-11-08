@@ -9,6 +9,7 @@ Commons CC0 1.0 Universal Public Domain Dedication
 with the stick an action uses filled red, for photo mode's help in place of the DualShocks of
 `data/fe/images/photo_mode.2x.gnf` (and `photo_mode.gnf` at half size). Rotate and Pan use the left
 stick, Zoom the right one. `xbox_photo_fury_*_stick.svg`: the same for Fury's `photo_mode_fury.gnf`,
-with bolder lines and fewer inner rims. Written from `xbox_controller.svg` by `photo_pads.py` (run
+with bolder lines and fewer inner rims; `xbox_photo_small_*_stick.svg` the same shapes in HD's red for
+`photo_mode.gnf`, whose sprites are as small as Fury's. Written from `xbox_controller.svg` by `photo_pads.py` (run
 it after changing a line width or the shapes left out there); CC0 like their source.
 `scripts/photo_mode.py` draws them into the game's sheets.
