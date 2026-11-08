@@ -88,9 +88,7 @@ class LayoutTest(unittest.TestCase):
 
     def test_layout_has_row_and_xbox_highlights(self):
         import controller_row
-        from test_controller_row import P1, P2
-        first, second, _rest = layout().split(b'</Screen>\r\n')
-        both = first + P1 + b'</Screen>\r\n' + second + P2 + b'</Screen>\r\n'
+        both = rows(layout())
         new = xc.relayout(controller_row.add_row(both), self.sprites)
         self.assertEqual(len(new), len(both))
         self.assertIn(b'name="Pad Style P1"', new)
@@ -200,9 +198,7 @@ class BuildTest(unittest.TestCase):
                 self.assertEqual(xc.build(game, out), [line + '\n' for line in lines[1:]])
 
     def test_the_layout_carries_the_rows_unless_told_not_to(self):
-        from test_controller_row import P1, P2
-        first, second, _rest = layout().split(b'</Screen>\r\n')
-        sliders = first + P1 + b'</Screen>\r\n' + second + P2 + b'</Screen>\r\n'
+        sliders = rows(layout())
         with tempfile.TemporaryDirectory() as folder:
             game, out = self.game(folder), Path(folder) / 'out'
             out.mkdir()
@@ -459,11 +455,14 @@ class DualBuildTest(unittest.TestCase):
             with psarc.Archive(game / 'data08.psarc') as a:
                 i = a.find(TEXTURE)
                 self.assertEqual(fields[:4], ['/app0/data08.psarc', f"{a.entries[i]['offset']:x}",
-                                              f'{sum(s for s, _l in a.blocks(i)):x}', f'{gnf.HEADER:x}'])
+                                              f'{a.stored_size(i):x}', f'{gnf.HEADER:x}'])
             files = dict(field.split('=', 1) for field in fields[4:])
-            self.assertEqual(set(files), {'playstation', 'xbox'})
-            for style, path in files.items():
-                self.assertEqual(Path(path).read_bytes(), seen[style][0], style)
+            self.assertEqual(set(files), {'playstation', 'xbox', 'nintendo'})
+            self.assertEqual(files['nintendo'], files['playstation'])  # no Nintendo drawing
+            for style in ('playstation', 'xbox'):
+                self.assertEqual(Path(files[style]).read_bytes(), seen[style][0], style)
+            # Nintendo at start shows the PlayStation picture.
+            self.assertEqual(xc.build_dual(game, out, 'nintendo')[0], xc.build_dual(game, out, 'playstation')[0])
             # Cached: both styles from one drawing.
             with mock.patch.object(xc, 'draw_sheet', side_effect=AssertionError('drawn again')):
                 lines, swaps = xc.build_dual(game, out, 'xbox')

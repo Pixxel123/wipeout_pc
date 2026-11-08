@@ -844,7 +844,7 @@ int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, i
  * residency query and reads the whole region), while fewer than max hits are found; scan returns
  * the new count of hits. A fault (a region unmapped or protected meanwhile) drops that region's
  * hits. The caller's fault recovery point is kept. */
-typedef int (*GuestScan)(uintptr_t lo, uintptr_t hi, void *ctx, int n);
+typedef int (*GuestScan)(uintptr_t lo, uintptr_t hi, void *ctx, int n, int max);
 static int scan_guest(GuestScan scan, void *ctx, int max, uint64_t max_region) {
     volatile uintptr_t address=0;
     volatile int found=0;
@@ -859,7 +859,7 @@ static int scan_guest(GuestScan scan, void *ctx, int max, uint64_t max_region) {
                 runtime_fault_recover=&recover;
                 int n=found;
 #ifdef _WIN32
-                n=scan(lo,hi,ctx,n);
+                n=scan(lo,hi,ctx,n,max);
 #else
                 /* Runs of resident pages, 512 pages (2 MiB of 4 KiB pages) per query; a run goes on
                  * across queries. A failed query counts as pages not in memory. */
@@ -876,13 +876,13 @@ static int scan_guest(GuestScan scan, void *ctx, int max, uint64_t max_region) {
                         if (queried && (resident[i] & 1)) {
                             if (!in_run) { run=pg>lo ? pg : lo; in_run=1; }
                         } else if (in_run) {
-                            n=scan(run,pg,ctx,n);
+                            n=scan(run,pg,ctx,n,max);
                             in_run=0;
                         }
                     }
                     chunk+=len;
                 }
-                if (n<max && in_run) n=scan(run,hi,ctx,n);
+                if (n<max && in_run) n=scan(run,hi,ctx,n,max);
 #endif
                 found=n;
             }
@@ -892,12 +892,10 @@ static int scan_guest(GuestScan scan, void *ctx, int max, uint64_t max_region) {
     }
     return found;
 }
-typedef struct {
-    const unsigned char *const *blocks; const size_t *sizes, *sig_at; int count; uintptr_t *addresses; int *which, max;
-} BlockScan;
-static int scan_blocks(uintptr_t lo, uintptr_t hi, void *ctx, int n) {
+typedef struct { const unsigned char *const *blocks; const size_t *sizes, *sig_at; int count; uintptr_t *addresses; int *which; } BlockScan;
+static int scan_blocks(uintptr_t lo, uintptr_t hi, void *ctx, int n, int max) {
     const BlockScan *b=ctx;
-    return memory_find_aligned(lo,hi,b->blocks,b->sizes,b->sig_at,b->count,b->addresses,b->which,n,b->max);
+    return memory_find_aligned(lo,hi,b->blocks,b->sizes,b->sig_at,b->count,b->addresses,b->which,n,max);
 }
 /* The places in mapped guest memory that hold one of `count` byte blocks whole, found by 64 bytes
  * of each at sig_at[i], up to max of them: addresses[k] and which[k] (that block's index); returns
@@ -906,14 +904,14 @@ static int scan_blocks(uintptr_t lo, uintptr_t hi, void *ctx, int n) {
  * page once: call it only when needed, from a runtime thread. */
 int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *sizes, const size_t *sig_at,
                             int count, uintptr_t *addresses, int *which, int max) {
-    BlockScan b={blocks,sizes,sig_at,count,addresses,which,max};
+    BlockScan b={blocks,sizes,sig_at,count,addresses,which};
     return scan_guest(scan_blocks,&b,max,UINT64_MAX);
 }
-typedef struct { const uint32_t *values; int count, align; uintptr_t *addresses; int *which, max; } WordScan;
-static int scan_words(uintptr_t lo, uintptr_t hi, void *ctx, int n) {
+typedef struct { const uint32_t *values; int count, align; uintptr_t *addresses; int *which; } WordScan;
+static int scan_words(uintptr_t lo, uintptr_t hi, void *ctx, int n, int max) {
     const WordScan *w=ctx;
     const uintptr_t step=(uintptr_t)w->align;
-    for (uintptr_t p=(lo+step-1) & ~(step-1); p+4<=hi && n<w->max; p+=step) {
+    for (uintptr_t p=(lo+step-1) & ~(step-1); p+4<=hi && n<max; p+=step) {
         uint32_t v;
         memcpy(&v,(const void *)p,4);
         for (int k=0;k<w->count;++k)
@@ -927,7 +925,7 @@ static int scan_words(uintptr_t lo, uintptr_t hi, void *ctx, int n) {
  * from a runtime thread or, rarely, the game thread (a whole search reads every such region). */
 int runtime_memory_find_u32(const uint32_t *values, int count, int align, uint64_t max_region,
                             uintptr_t *addresses, int *which, int max) {
-    WordScan w={values,count,align==8 ? 8 : 4,addresses,which,max};
+    WordScan w={values,count,align==8 ? 8 : 4,addresses,which};
     return scan_guest(scan_words,&w,max,max_region);
 }
 /* A write into guest memory from a runtime thread, as the guest's own would land for the GPU:

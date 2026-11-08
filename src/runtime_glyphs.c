@@ -1,19 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Live controller glyphs and picture (WipEout, the Controls screens' Controller type rows):
  * GOW3_GLYPH_SWAP=<file> names the button font's atlas and tab textures and the Controls screen's
- * controller sheet, and a file of each style's version (scripts/wipeout_glyphs.py and
+ * controller sheet, with a file of each style's version (scripts/wipeout_glyphs.py and
  * scripts/xbox_controls.py --swap-config). A thread reads four times a second the game's settings
  * "Pad Style P<n>" and the value of an open Controller type row (src/glyph_swap.h): an open row's
  * value is shown as it changes, else the saved P1. When the wanted style changes it finds each
  * texture's copies in guest memory by their bytes (runtime_memory_find_all) and writes the wanted
  * style's texels over each through the backing view, the range invalidated for the GPU
- * (runtime_memory_write_guest): a page the guest keeps read-only cannot stop it, and a texture
- * smaller than a page is uploaded again whatever its first texels. Smooth play first: nothing is
- * searched or written unless the wanted style changed, a row has just opened (a menu screen) or
- * the game has just read a texture from its archive (then it may have moved), and a copy is
- * written only where its whole texels were just checked to be the version thought to be there.
- * The settings store and the table of open rows are taken at their 01.07 places (CUSA07671) when
- * those hold them, else found by what they hold: find_store, find_table and the Accept hook. */
+ * (runtime_memory_write_guest). Smooth play first: nothing is searched or written unless the
+ * wanted style changed, a row has just opened (a menu screen) or the game has just read a texture
+ * from its archive (then it may have moved), and a copy is written only where its whole texels
+ * were just checked to be the version thought to be there. The settings store and the table of
+ * open rows are taken at their 01.07 places (CUSA07671) when those hold them, else found by what
+ * they hold (find_store, find_table, the Accept hook). Without the Accept hook (probe.c found no
+ * site) a row's value is written into its setting as it changes. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "glyph_swap.h"
@@ -41,14 +41,10 @@ typedef struct {
     int shown;           /* the style all copies hold (as loaded while none is known), or -1 */
     int failed_for;      /* the wanted style a search last failed for, or -2 */
     uint64_t read_at;    /* ns of the last read of its archive range; 0 when handled */
-    int start;           /* the style the game's file patches load: launch_style, else playstation */
     int reloaded;        /* read again since the last search: only the start style is looked for */
     uint64_t retry_at;   /* ns of the one more search after a failed one following a read; 0 none */
 } Texture;
 static Texture textures[GLYPH_MAX_TEXTURES];
-/* The style a texture shows for `style`: its own version, else PlayStation's (the controller
- * sheet has no Nintendo one; run.py loads the PlayStation sheet then). */
-static int texture_style(const Texture *t, int style) { return style>=0 && !t->data[style] ? 0 : style; }
 static int texture_count;
 static int launch_style; /* GOW3_GLYPH_STYLE: the style the game's file patches load (run.py) */
 
@@ -108,9 +104,14 @@ static void load_config(const char *path) {
             t->sig_at[s]=signature_at(data+t->spec.skip,t->size[s]);
             ++styles;
         }
-        if (styles<2) { for (int s=0;s<GLYPH_STYLES;++s) free(t->data[s]); memset(t,0,sizeof(*t)); continue; }
-        t->start=texture_style(t,launch_style);
-        t->shown=t->start; t->failed_for=-2; /* as loaded: where is found only when needed */
+        if (styles<2 || !t->data[launch_style]) {
+            if (styles>=2) printf("Runtime: glyphs: %s @0x%llx has no %s version, left alone\n",t->spec.guest,
+                                  (unsigned long long)t->spec.offset,glyph_style_names[launch_style]);
+            for (int s=0;s<GLYPH_STYLES;++s) free(t->data[s]);
+            memset(t,0,sizeof(*t));
+            continue;
+        }
+        t->shown=launch_style; t->failed_for=-2; /* as loaded: where is found only when needed */
         ++texture_count;
     }
     fclose(f);
@@ -171,6 +172,14 @@ static void image_words(const unsigned char *image, uint64_t size, ImageVisit vi
         if (guarded_page(image,offset,visit,ctx)==2) return;
 }
 
+/* Whether a search is due: not before *next, and each time the wait doubles, up to 30 s. */
+static int due(uint64_t now, uint64_t *next, uint64_t *wait) {
+    if (now<*next) return 0;
+    *next=now+*wait;
+    if (*wait<30000000000ull) *wait*=2;
+    return 1;
+}
+
 /* ---- the settings store ---- */
 static __attribute__((noinline)) int store_ok(uint64_t store) {
     volatile int ok;
@@ -192,18 +201,17 @@ static int store_word(uint64_t offset, uint64_t word, void *ctx) {
     if (s->best<0 || distance((int64_t)offset,GLYPH_STORE_AT)<distance(s->best,GLYPH_STORE_AT)) s->best=(int64_t)offset;
     return 0;
 }
-/* The image offset of the store's pointer: 01.07's place, else found by searching the image (not
- * more often than every `wait`, which grows to 30 s: until the profile is loaded there is none).
- * -1 when none. */
+/* The image offset of the store's pointer: 01.07's place, else found by searching the image, with
+ * a growing wait between searches. -1 when none: until the profile is loaded the store lacks the
+ * setting, so while 01.07's place points at a mapped store nothing is searched. */
 static int64_t find_store(const unsigned char *image, uint64_t size, uint64_t now) {
     static uint64_t next, wait=5000000000ull;
-    if (size>GLYPH_STORE_AT+8 && store_ok(word_at(image+GLYPH_STORE_AT))) {
+    const uint64_t place=size>GLYPH_STORE_AT+8 ? word_at(image+GLYPH_STORE_AT) : 0;
+    if (store_ok(place)) {
         printf("Runtime: glyphs: settings store at image+0x%llx (01.07's place)\n",(unsigned long long)GLYPH_STORE_AT);
         return GLYPH_STORE_AT;
     }
-    if (now<next) return -1;
-    next=now+wait;
-    if (wait<30000000000ull) wait*=2;
+    if ((plausible(place) && runtime_memory_is_mapped((uintptr_t)place,GLYPH_STORE_HEAD+8)) || !due(now,&next,&wait)) return -1;
     StoreSearch s={image,size,-1,0};
     const uint64_t start=glyph_now();
     image_words(image,size,store_word,&s);
@@ -256,20 +264,19 @@ static __attribute__((noinline)) int field_style(const unsigned char *field) {
     if (!field) return -1;
     GLYPH_GUARDED(pointed,glyph_pointed_style(field)+2);
     if (pointed>=2) return pointed-2;
-    GLYPH_GUARDED(at,glyph_inline_style(field)+2);
+    GLYPH_GUARDED(at,glyph_value_style((const char *)field)+2);
     return at>=2 ? at-2 : -1;
 }
 
 /* ---- the table of rows on open screens ----
- * As found in 01.07 (glyph_swap.h): 256 value pointers, their keys at +0x800 and counts at
- * +0x1000. A run on that build found nothing there while the Controls screen was open, so where
- * it is and whether its counts mean anything are found by trying: the place itself, the place as a
- * pointer to the table, and the rows' keys in the image or the guest's smaller regions. A slot is
- * a Controller type row when it has a row's key and a value pointer, and a count or, where no
- * count is seen, a value that names a style. */
+ * 256 value pointers, their keys at +0x800 and counts at +0x1000 (glyph_swap.h). Where it is and
+ * whether its counts mean anything are found by trying: 01.07's place, that place as a pointer to
+ * it, and the rows' keys in the image or the guest's smaller regions. A slot is a Controller type
+ * row when it has a row's key and a value pointer, and a count or, where no count is seen, a value
+ * that names a style. */
 static __attribute__((noinline)) int counted_slot(const unsigned char *table, int i, uint32_t key) {
     volatile int ok;
-    GLYPH_GUARDED(ok,glyph_table_slot(table,i,key));
+    GLYPH_GUARDED(ok,glyph_slot(table,i,key,1));
     return ok;
 }
 static int named_slot(const unsigned char *table, int i, uint32_t key) {
@@ -305,7 +312,7 @@ static int use_table(uintptr_t ref, int indirect, int quality, const unsigned ch
     printf("Runtime: glyphs: rows are open by %s\n",quality==2 ? "their count" : "their value (no count seen)");
     return 1;
 }
-/* 01.07's place, or that place as a pointer to the table: cheap, so tried every second. */
+/* 01.07's place, or that place as a pointer to the table: cheap, so tried every tick. */
 static int table_at_place(const unsigned char *image, uint64_t size) {
     const unsigned char *place=image+GLYPH_TABLE_AT;
     int quality;
@@ -333,36 +340,36 @@ static int table_word(uint64_t offset, uint64_t word, void *ctx) {
         s->quality=table_around((uintptr_t)s->image+offset,(uintptr_t)s->image,&s->best,s->quality);
     return s->quality==2;
 }
-/* The thread's search, while no table is known: the image's words holding a row's key, not more
- * often than every `wait`, which grows to 30 s (the rows are there only while a Controller type
- * row is open, and the Accept hook searches deeper). */
+/* The thread's search, while no table is known: the image's words holding a row's key, with a
+ * growing wait between searches (the rows are there only while a Controller type row is open, and
+ * the Accept hook searches deeper). */
 static void find_table(const unsigned char *image, uint64_t size, uint64_t now) {
     static uint64_t next, wait=1000000000ull;
-    if (table_at_place(image,size) || now<next || pthread_mutex_trylock(&table_lock)) return;
-    next=now+wait;
-    if (wait<30000000000ull) wait*=2;
+    if (table_at_place(image,size) || !due(now,&next,&wait) || pthread_mutex_trylock(&table_lock)) return;
     TableSearch s={image,0,0};
     image_words(image,size,table_word,&s);
     if (s.quality) use_table(s.best,0,s.quality,image,"found by its rows' keys in the image");
     pthread_mutex_unlock(&table_lock);
 }
-/* Where the settings' and rows' keys are, in the image (4-aligned) and the guest's regions of at
- * most 1 GiB (the heap; the texture pool is larger), for the Accept hook's search and its log. */
+/* Where the settings' and rows' keys are, in the image and the guest's regions of at most 1 GiB
+ * (the heap; the texture pool is larger), for the Accept hook's search (8-aligned: a table's keys
+ * are) and its log (4-aligned: everything). */
 enum { KEY_HITS=64 };
-typedef struct { const unsigned char *image; uintptr_t at[KEY_HITS]; int which[KEY_HITS], count, in_image; } KeyHits;
+typedef struct { const unsigned char *image; uintptr_t at[KEY_HITS]; int which[KEY_HITS], count, in_image, align; } KeyHits;
 static int key_word(uint64_t offset, uint64_t word, void *ctx) {
     KeyHits *h=ctx;
-    for (int half=0;half<2 && h->count<KEY_HITS;++half)
+    for (int half=0;half<(h->align==8 ? 1 : 2) && h->count<KEY_HITS;++half)
         for (int k=0;k<KEYS;++k)
             if ((uint32_t)(word>>32*half)==keys[k]) { h->at[h->count]=(uintptr_t)h->image+offset+4*half; h->which[h->count++]=k; break; }
     return h->count==KEY_HITS;
 }
-static void find_keys(const unsigned char *image, uint64_t size, KeyHits *h) {
+static void find_keys(const unsigned char *image, uint64_t size, int align, KeyHits *h) {
     h->image=image;
     h->count=0;
+    h->align=align;
     image_words(image,size,key_word,h);
     h->in_image=h->count;
-    h->count+=runtime_memory_find_u32(keys,KEYS,4,1ull<<30,h->at+h->count,h->which+h->count,KEY_HITS-h->count);
+    h->count+=runtime_memory_find_u32(keys,KEYS,align,1ull<<30,h->at+h->count,h->which+h->count,KEY_HITS-h->count);
 }
 typedef struct { uint64_t target, offset; int found; } WordSearch;
 static int word_equal(uint64_t offset, uint64_t word, void *ctx) {
@@ -377,7 +384,7 @@ static int table_from_keys(const unsigned char *image, uint64_t size, const KeyH
     uintptr_t best=0;
     int quality=0;
     for (int i=0;i<h->count && quality<2;++i)
-        if (h->which[i]>=ROW_P1 && !(h->at[i] & 7))
+        if (h->which[i]>=ROW_P1)
             quality=table_around(h->at[i],i<h->in_image ? (uintptr_t)image : 0,&best,quality);
     if (!quality) return 0;
     if (best-(uintptr_t)image<size) return use_table(best,0,quality,image,"found by its rows' keys in the image");
@@ -458,8 +465,7 @@ static int all_there(const Texture *t) {
  * check reads under fault recovery; the write takes the memory lock, so it comes after. */
 static int write_style(Texture *t, int i, int want) {
     const size_t n=t->size[want];
-    const int style=t->at_style[i];
-    if (!t->at[i] || style<0 || t->size[style]!=n || !still_there(t,i)) return 0;
+    if (!still_there(t,i) || t->size[t->at_style[i]]!=n) return 0;
     return runtime_memory_write_guest((uintptr_t)t->at[i],t->data[want]+t->spec.skip,n);
 }
 static void locate(Texture *t) {
@@ -467,13 +473,13 @@ static void locate(Texture *t) {
     /* Just read again, the texture holds the start style: a copy of another style written earlier
      * may still be in memory and must not be taken for it. */
     for (int s=0;s<GLYPH_STYLES;++s)
-        blocks[s]=t->data[s] && (!t->reloaded || s==t->start) ? t->data[s]+t->spec.skip : NULL;
+        blocks[s]=t->data[s] && (!t->reloaded || s==launch_style) ? t->data[s]+t->spec.skip : NULL;
     t->reloaded=0;
     uintptr_t found[GLYPH_MAX_COPIES];
     const uint64_t start=glyph_now();
     t->copies=runtime_memory_find_all(blocks,t->size,t->sig_at,GLYPH_STYLES,found,t->at_style,GLYPH_MAX_COPIES);
     printf("Runtime: glyphs: search %s @0x%llx: %d copies in %.1f ms\n",t->spec.guest,(unsigned long long)t->spec.offset,
-           t->copies,(double)(glyph_now()-start)/1e6);
+           t->copies,ms_since(start));
     for (int i=0;i<t->copies;++i) {
         t->at[i]=(unsigned char *)found[i];
         printf("Runtime: glyphs: %s @0x%llx found as %s at %p (copy %d of %d)\n",t->spec.guest,
@@ -496,6 +502,46 @@ static int write_copies(Texture *t, int want) {
                      (unsigned long long)t->spec.offset,glyph_style_names[want],kept,n);
     return kept;
 }
+/* One texture's work in a tick: `style` wanted (-1 none), `opened` a Controller type row just
+ * opened (a menu screen, never a race: the copies are found now, so the row's first change shows
+ * at once). */
+static void tick_texture(Texture *t, int style, int opened, uint64_t now) {
+    /* The game read the texture again (a load): its file patches gave it the start style, maybe
+     * somewhere else. Searched for only if another style is wanted (below). */
+    const uint64_t read=__atomic_load_n(&t->read_at,__ATOMIC_ACQUIRE);
+    int located=0;
+    if (read && now>read && now-read>1500000000ull) {
+        __atomic_store_n(&t->read_at,0,__ATOMIC_RELEASE);
+        t->copies=0; t->shown=launch_style; t->failed_for=-2;
+        t->reloaded=1; t->retry_at=0;
+    }
+    if (opened && now>=t->retry_at && !all_there(t)) {
+        const int reloaded=t->reloaded, shown=t->shown;
+        locate(t);
+        if (!t->copies) { t->reloaded=reloaded; t->shown=shown; return; } /* left as it was */
+        t->failed_for=-2;   /* found: an earlier failed search no longer applies */
+        located=1;
+    }
+    if (style<0 || !t->data[style] || t->shown==style || t->failed_for==style || now<t->retry_at) return;
+    if (!located && !all_there(t)) {
+        const int reloaded=t->reloaded;
+        locate(t);          /* the only search: the wanted style changed, a place is unknown */
+        if (!t->copies) {
+            /* After a read the game may still be unpacking it: one more try 2 s later. */
+            if (reloaded && !t->retry_at) { t->retry_at=now+2000000000ull; t->reloaded=1; }
+            else t->failed_for=style;
+            return;
+        }
+        if (t->shown==style) return;
+    }
+    if (write_copies(t,style)) {
+        t->shown=style;
+        t->failed_for=-2;
+    } else {
+        t->shown=-1;        /* all changed under us: searched for again at the next change */
+        t->failed_for=style;
+    }
+}
 static const char *style_or_dash(int style) { return style>=0 ? glyph_style_names[style] : "-"; }
 static void *glyph_thread(void *unused) {
     (void)unused;
@@ -504,7 +550,7 @@ static void *glyph_thread(void *unused) {
     glyph_pause_ns(2000000000ull);
     printf("Runtime: glyph switch on (%d textures, %s at start; Accept %s)\n",texture_count,glyph_style_names[launch_style],
            __atomic_load_n(&accept_hooked,__ATOMIC_ACQUIRE) ? "hooked" : "not hooked: a row's value is kept as it changes");
-    int last_want=-2, was_open=0, armed=0, active=-1, last_saved[2]={-2,-2}, last_live[2]={-1,-1};
+    int last_want=-2, was_open=0, profile_loaded=0, active=-1, last_saved[2]={-2,-2}, last_live[2]={-1,-1};
     const unsigned char *last_field[2]={NULL,NULL};
     for (;;) {
         glyph_pause_ns(250000000ull);
@@ -521,27 +567,26 @@ static void *glyph_thread(void *unused) {
                 describe_field(s.field[p],text,sizeof(text));
                 printf("Runtime: glyphs: P%d row value %s (%s)\n",p+1,text,style_or_dash(s.live[p]));
             }
-            /* A table without counts may show both screens' rows at once: the one changed last is
-             * followed. */
             if (s.live[p]>=0 && last_live[p]>=0 && s.live[p]!=last_live[p]) active=p;
             last_saved[p]=s.saved[p]; last_field[p]=s.field[p]; last_live[p]=s.live[p];
         }
-        /* No Accept hook in this build (its code moved, probe.c): the row's value is written into
-         * its setting as it changes, so it stays after the screen is left (Cancel keeps it too). */
+        /* No Accept hook: the row's value is written into its setting as it changes, so it stays
+         * after the screen is left (Cancel keeps it too). */
         if (!__atomic_load_n(&accept_hooked,__ATOMIC_ACQUIRE))
             for (int p=0;p<2;++p)
                 if (s.live[p]>=0 && s.live[p]!=s.saved[p] && commit_row(image,p,s.live[p]))
                     printf("Runtime: Controller type P%d kept: %s\n",p+1,glyph_style_names[s.live[p]]);
-        /* The prompts stay as loaded (run.py chose them from the save) until the game's setting
-         * agrees with them, a Controller type row is open or Accept commits one: before the
-         * profile is loaded the setting holds the row's default. From then the saved setting is
-         * followed, and an open row's value while it is open. */
-        if (!armed && (s.saved[0]==launch_style || (s.counted ? s.open : active>=0) || __atomic_load_n(&accepted,__ATOMIC_ACQUIRE))) {
-            armed=1;
+        /* A table without counts may show both screens' rows at once: only the one changed last
+         * counts as open. */
+        if (!s.counted) for (int p=0;p<2;++p) if (p!=active) s.live[p]=-1;
+        /* Before the profile is loaded the setting holds the row's default: the prompts stay as
+         * loaded (run.py chose them from the save) until the setting agrees with them, a row is
+         * open or Accept committed one. */
+        if (!profile_loaded && (s.saved[0]==launch_style || s.live[0]>=0 || s.live[1]>=0 || __atomic_load_n(&accepted,__ATOMIC_ACQUIRE))) {
+            profile_loaded=1;
             printf("Runtime: glyphs: following the Controller type (saved P1 %s)\n",style_or_dash(s.saved[0]));
         }
-        const int want=!armed ? -1 : s.counted ? glyph_wanted_live(s.live[0],s.live[1],s.saved[0])
-                                    : active>=0 && s.live[active]>=0 ? s.live[active] : s.saved[0];
+        const int want=profile_loaded ? glyph_wanted_live(s.live[0],s.live[1],s.saved[0]) : -1;
         if (s.open!=was_open)
             printf("Runtime: glyphs: Controller type row %s (live P1 %s, live P2 %s, saved P1 %s)\n",s.open ? "open" : "closed",
                    style_or_dash(s.live[0]),style_or_dash(s.live[1]),style_or_dash(s.saved[0]));
@@ -552,48 +597,8 @@ static void *glyph_thread(void *unused) {
             for (int i=0;i<texture_count;++i) textures[i].failed_for=-2;
         }
         last_want=want;
-        const int opened=s.open && !was_open;
+        for (int i=0;i<texture_count;++i) tick_texture(&textures[i],want,s.open && !was_open,now);
         was_open=s.open;
-        for (int i=0;i<texture_count;++i) {
-            Texture *t=&textures[i];
-            const int style=texture_style(t,want);
-            /* The game read the texture again (a load): its file patches gave it the start style,
-             * maybe somewhere else. Searched for only if another style is wanted (below). */
-            const uint64_t read=__atomic_load_n(&t->read_at,__ATOMIC_ACQUIRE);
-            if (read && now>read && now-read>1500000000ull) {
-                __atomic_store_n(&t->read_at,0,__ATOMIC_RELEASE);
-                t->copies=0; t->shown=t->start; t->failed_for=-2;
-                t->reloaded=1; t->retry_at=0;
-            }
-            /* A Controller type row just opened (a menu screen, never a race): the copies are found
-             * now, so the row's first change shows at once. A search that finds none leaves the
-             * state as it was and nothing more is searched this tick. */
-            if (opened && now>=t->retry_at && !all_there(t)) {
-                const int reloaded=t->reloaded, shown=t->shown;
-                locate(t);
-                if (!t->copies) { t->reloaded=reloaded; t->shown=shown; continue; }
-                t->failed_for=-2;   /* found: an earlier failed search no longer applies */
-            }
-            if (style<0 || !t->data[style] || t->shown==style || t->failed_for==style || now<t->retry_at) continue;
-            if (!all_there(t)) {
-                const int reloaded=t->reloaded;
-                locate(t);          /* the only search: the wanted style changed, a place is unknown */
-                if (!t->copies) {
-                    /* After a read the game may still be unpacking it: one more try 2 s later. */
-                    if (reloaded && !t->retry_at) { t->retry_at=now+2000000000ull; t->reloaded=1; }
-                    else t->failed_for=style;
-                    continue;
-                }
-                if (t->shown==style) continue;
-            }
-            if (write_copies(t,style)) {
-                t->shown=style;
-                t->failed_for=-2;
-            } else {
-                t->shown=-1;        /* all changed under us: searched for again at the next change */
-                t->failed_for=style;
-            }
-        }
     }
     return NULL;
 }
@@ -615,10 +620,10 @@ ABI void runtime_glyphs_accept(void) {
         ++searches;
         pthread_mutex_lock(&table_lock);
         const uint64_t start=glyph_now();
-        find_keys(image,size,&hits);
+        find_keys(image,size,8,&hits);
         const int found=table_from_keys(image,size,&hits);
         printf("Runtime: glyphs: open rows table %s (%d key hits, %.0f ms)\n",found ? "found" : "not found",hits.count,ms_since(start));
-        if (!found) dump_keys(image,size,&hits);
+        if (!found) { find_keys(image,size,4,&hits); dump_keys(image,size,&hits); }
         pthread_mutex_unlock(&table_lock);
     }
     State s;

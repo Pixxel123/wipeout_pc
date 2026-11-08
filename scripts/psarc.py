@@ -139,7 +139,7 @@ class Archive:
             kept = packed if len(packed) < length else raw  # a packed block as long as a raw one would read as raw
             blocks += kept
             sizes += (len(kept) % (256 ** self.width)).to_bytes(self.width, 'big')
-        if len(blocks) > sum(stored for stored, _length in self.blocks(i)):
+        if len(blocks) > self.stored_size(i):
             return None
         sizes_at = self.sizes_at + e['first'] * self.width
         return [(sizes_at, self._bytes(sizes_at, len(sizes)), bytes(sizes)),

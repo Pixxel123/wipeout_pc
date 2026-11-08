@@ -145,7 +145,7 @@ class WipeoutGlyphTests(unittest.TestCase):
             with psarc.Archive(game / 'data08.psarc') as a:
                 i = a.find(wipeout_glyphs.FONT_ATLAS)
                 self.assertEqual(int(offset, 16), a.entries[i]['offset'])
-                self.assertEqual(int(length, 16), sum(stored for stored, _l in a.blocks(i)))
+                self.assertEqual(int(length, 16), a.stored_size(i))
             self.assertEqual(Path(styles['playstation']).read_bytes(), gnf_file)
             self.assertEqual(Path(styles['xbox']).read_bytes(),
                              wipeout_glyphs.redrawn(wipeout_glyphs.FONT_ATLAS, gnf_file, 'xbox', '', fnt))

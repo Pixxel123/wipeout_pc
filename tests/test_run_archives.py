@@ -42,13 +42,13 @@ class RunArchiveTests(unittest.TestCase):
         swap = Path('out') / 'glyph_swap.txt'
         # With them: one picture that follows the rows, the launch style's shown first.
         both = ['--swap-config', str(swap)]
-        self.assertEqual(run.row_scripts('playstation', True, swap), [('xbox_controls.py', ['--style', 'playstation', *both])])
-        self.assertEqual(run.row_scripts('nintendo', True, swap), [('xbox_controls.py', ['--style', 'playstation', *both])])
-        self.assertEqual(run.row_scripts('xbox', True, swap), [('xbox_controls.py', ['--style', 'xbox', *both])])
+        for style in ('playstation', 'nintendo', 'xbox'):
+            self.assertEqual(run.picture_options(style, True, swap), ['--style', style, *both])
         # Without them: no rows, but the Xbox picture is still drawn.
-        self.assertEqual(run.row_scripts('playstation', False, swap), [])
-        self.assertEqual(run.row_scripts('nintendo', False, swap), [])
-        self.assertEqual(run.row_scripts('xbox', False, swap), [('xbox_controls.py', ['--no-row'])])
+        self.assertIsNone(run.picture_options('playstation', False, swap))
+        self.assertIsNone(run.picture_options('nintendo', False, swap))
+        self.assertEqual(run.picture_options('xbox', False, swap), ['--no-row'])
+
 
 if __name__ == '__main__':
     unittest.main()

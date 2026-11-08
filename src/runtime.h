@@ -125,7 +125,6 @@ int runtime_memory_find_all(const unsigned char *const *blocks, const size_t *si
                             int count, uintptr_t *addresses, int *which, int max);
 int runtime_memory_find_u32(const uint32_t *values, int count, int align, uint64_t max_region,
                             uintptr_t *addresses, int *which, int max);
-int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size);
 int runtime_memory_write_guest(uintptr_t address, const void *data, uint64_t size);
 /* Starts the live glyph switch (GOW3_GLYPH_SWAP); call after runtime_file_configure. */
 void runtime_glyphs_start(void);

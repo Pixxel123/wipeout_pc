@@ -3,7 +3,7 @@
 #define GOW3_GLYPH_SWAP_H
 /* The side-effect-free parts of src/runtime_glyphs.c (WipEout; image offsets of CUSA07671 01.07,
  * which another build such as 01.09 moves: runtime_glyphs.c then finds the store and the table by
- * what they hold, glyph_store_holds and glyph_table_slot):
+ * what they hold, glyph_store_holds and glyph_slot):
  * - the game's hash of setting and row names: CRC-32 (0xedb88320) from 0, inverted (0x401a08);
  * - its settings list: store at u64 [0x10ea398], head at store+0x580, node +0 u32 key, +0x48 u32
  *   value length with its NUL, +0x4c u32 capacity of the value, +0x50 next, +0x68 the value;
@@ -31,19 +31,25 @@ static inline uint32_t glyph_key(const char *name) {
 }
 static inline uint64_t glyph_load64(const unsigned char *p) { uint64_t v; memcpy(&v,p,8); return v; }
 static inline uint32_t glyph_load32(const unsigned char *p) { uint32_t v; memcpy(&v,p,4); return v; }
-/* The value of the setting with this key, copied into out (NUL-terminated); NULL when absent. */
-static inline const char *glyph_setting(const unsigned char *store, uint32_t key, char *out, size_t cap) {
-    const unsigned char *node=(const unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
-    for (int n=0; node && n<GLYPH_MAX_NODES; ++n, node=(const unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
-        if (glyph_load32(node)!=key) continue;
-        size_t length=glyph_load32(node+0x48);
-        if (!cap) return NULL;
-        if (length>cap-1) length=cap-1;
-        memcpy(out,node+0x68,length);
-        out[length]=0;
-        return out;
+/* The node of the setting with this key in store's list (walked at most max_nodes, every node
+ * 8-aligned), or NULL. */
+static inline unsigned char *glyph_node(const unsigned char *store, uint32_t key, int max_nodes) {
+    unsigned char *node=(unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
+    for (int n=0; node && n<max_nodes; ++n, node=(unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
+        if ((uintptr_t)node & 7) return NULL;
+        if (glyph_load32(node)==key) return node;
     }
     return NULL;
+}
+/* The value of the setting with this key, copied into out (NUL-terminated); NULL when absent. */
+static inline const char *glyph_setting(const unsigned char *store, uint32_t key, char *out, size_t cap) {
+    const unsigned char *node=glyph_node(store,key,GLYPH_MAX_NODES);
+    if (!node || !cap) return NULL;
+    size_t length=glyph_load32(node+0x48);
+    if (length>cap-1) length=cap-1;
+    memcpy(out,node+0x68,length);
+    out[length]=0;
+    return out;
 }
 /* Whether a row registered under this key is on an open screen. */
 static inline int glyph_row_open(const unsigned char *table, uint32_t key) {
@@ -56,18 +62,15 @@ static inline int glyph_row_open(const unsigned char *table, uint32_t key) {
  * when written. Never grows a node and never adds a missing one. The caller commits only values
  * glyph_style_index() knows (>= 0). */
 static inline int glyph_commit(unsigned char *store, uint32_t key, const char *value) {
-    unsigned char *node=(unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
+    unsigned char *node=glyph_node(store,key,GLYPH_MAX_NODES);
     const size_t n=strlen(value)+1;
-    for (int i=0; node && i<GLYPH_MAX_NODES; ++i, node=(unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
-        if (glyph_load32(node)!=key) continue;
-        const uint32_t capacity=glyph_load32(node+0x4c), length=(uint32_t)n;
-        if (n>capacity || capacity>4096) return 0; /* a larger capacity is a corrupt node */
-        memcpy(node+0x68,value,n);
-        memset(node+0x68+n,0,capacity-n);
-        memcpy(node+0x48,&length,4);
-        return 1;
-    }
-    return 0;
+    if (!node) return 0;
+    const uint32_t capacity=glyph_load32(node+0x4c), length=(uint32_t)n;
+    if (n>capacity || capacity>4096) return 0; /* a larger capacity is a corrupt node */
+    memcpy(node+0x68,value,n);
+    memset(node+0x68+n,0,capacity-n);
+    memcpy(node+0x48,&length,4);
+    return 1;
 }
 static inline int glyph_style_index(const char *value) {
     for (int i=0; value && i<GLYPH_STYLES; ++i) if (!strcmp(value,glyph_style_names[i])) return i;
@@ -83,16 +86,12 @@ static inline int glyph_node_style(const unsigned char *node) {
     if (value[length-1]) return -1;
     return glyph_style_index(value);
 }
-/* Whether `store` looks like the game's settings store: its list (walked at most max_nodes, every
- * node pointer 8-aligned) holds the setting with this key and a known style as its value. For
- * finding the store in a build whose offsets differ; the caller recovers from faults. */
+/* Whether `store` looks like the game's settings store: its list holds the setting with this key
+ * and a known style as its value. For finding the store in a build whose offsets differ; the
+ * caller recovers from faults. */
 static inline int glyph_store_holds(const unsigned char *store, uint32_t key, int max_nodes) {
-    const unsigned char *node=(const unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
-    for (int n=0; node && n<max_nodes; ++n, node=(const unsigned char *)(uintptr_t)glyph_load64(node+0x50)) {
-        if ((uintptr_t)node & 7) return 0;
-        if (glyph_load32(node)==key) return glyph_node_style(node)>=0;
-    }
-    return 0;
+    const unsigned char *node=glyph_node(store,key,max_nodes);
+    return node && glyph_node_style(node)>=0;
 }
 /* Whether slot i of `table` holds a row with this key and a value pointer, with a count when
  * `counted` (a table whose counts say which rows are open). What the value names is read with
@@ -102,8 +101,6 @@ static inline int glyph_slot(const unsigned char *table, int i, uint32_t key, in
     const uint64_t field=glyph_load64(table+8*i);
     return field && !(field & 7);
 }
-/* An open row with this key, as the table of rows on open screens holds while it is shown. */
-static inline int glyph_table_slot(const unsigned char *table, int i, uint32_t key) { return glyph_slot(table,i,key,1); }
 /* The value pointer of the row with this key (glyph_slot), or NULL. */
 static inline const unsigned char *glyph_row_field(const unsigned char *table, uint32_t key, int counted) {
     for (int i=0;i<GLYPH_ROWS;++i)
@@ -124,10 +121,6 @@ static inline int glyph_value_style(const char *text) {
 static inline int glyph_pointed_style(const unsigned char *field) {
     const uint64_t string=field ? glyph_load64(field) : 0;
     return string && !(string>>47) ? glyph_value_style((const char *)(uintptr_t)string) : -1;
-}
-/* The style the text at the value pointer itself names, or -1. */
-static inline int glyph_inline_style(const unsigned char *field) {
-    return field ? glyph_value_style((const char *)field) : -1;
 }
 /* The style the prompts should show: an open Controller type row's live value (player 2's before
  * player 1's; one Controls screen is open at a time), else player 1's saved setting. Each is a

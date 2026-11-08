@@ -306,7 +306,6 @@ def swap_line(name, offset, stored, files):
                       *(f'{style}={Path(file).resolve()}' for style, file in files.items())]) + '\n'
 
 
-
 def variants(game, out, pad_map='', given=None):
     """GOW3_GLYPH_SWAP lines (swap_line, src/runtime_glyphs.c) for the newest copy of the button
     font's atlas and of each tab picture, with a file of each style's texture, the original for

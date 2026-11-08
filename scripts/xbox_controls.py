@@ -30,8 +30,8 @@ import psarc
 import wipeout_glyphs
 
 VERSION = 5  # of the drawing and the patches: a change rebuilds the cached ones
-DUAL_VERSION = 2  # of the dual layout and its two sheets
-STYLES = ('playstation', 'xbox')
+DUAL_VERSION = 3  # of the dual layout and its two sheets
+STYLES = ('playstation', 'xbox')  # the controllers drawn; Nintendo shows the PlayStation one
 SHARE = 'SelectButton'  # the DualShock 4's Share highlight: the Xbox drawing has no such button
 SVG = Path(__file__).resolve().parent / 'art' / 'xbox_controller.svg'
 TEXTURES = ('data/fe/images/controls_ps3.2x.gnf', 'data/fe/images/controls_ps3.gnf')
@@ -419,7 +419,7 @@ def relayout_dual(xml, slots):
     return _retag(xml, places, set(places))
 
 
-def dual(text, original, shapes=None):
+def dual(text, original):
     """(slots, {style: 1024x1024 RGBA sheet}) for the layout file's text: dual_layout()'s slots, and
     each controller's sheet: its controller in the layout's box (the game's DualShock 4 from
     `original`, the game's sheet as an image, or the Xbox drawing) and each highlight's sprite in its
@@ -429,7 +429,7 @@ def dual(text, original, shapes=None):
     bu, bv, bw, bh = placement[:4]
     if original.size != (SIZE, SIZE):
         original = original.resize((SIZE, SIZE), Image.LANCZOS)
-    drawn, sprites = draw_sheet(shapes, box=(bu, bv, bw, bh))
+    drawn, sprites = draw_sheet(box=(bu, bv, bw, bh))
     slots = _slots(placement, ps, sprites)
     # Each controller's image and where each highlight's sprite is on it.
     sources = {'playstation': (original.convert('RGBA'), {name: place[4:] for name, place in ps.items()}),
@@ -492,19 +492,16 @@ def _with_rows(xml, row):
 
 
 def _encoder(sheets):
-    """encode(original, style): the texture with `style`'s sheet, encoded once for all copies that
-    agree in length and header (the new texture depends only on its size and levels)."""
-    from PIL import Image
+    """encode(original, style): the texture with `style`'s sheet (reduced to its size, as its mips
+    are), encoded once for all copies that agree in length and header (the new texture depends only
+    on its size and levels)."""
     encoded = {}
 
     def encode(original, style):
         key = (style, len(original), original[:gnf.HEADER])
         if key not in encoded:
             texture = gnf.Texture(original)
-            sheet = sheets[style]
-            if sheet.size != (texture.width, texture.height):
-                sheet = sheet.resize((texture.width, texture.height), Image.LANCZOS)
-            encoded[key] = texture.replaced(sheet)
+            encoded[key] = texture.replaced(gnf.reduce(sheets[style], texture.width, texture.height))
         return encoded[key]
     return encode
 
@@ -615,13 +612,15 @@ def build_dual(game, out, style, given=None, row=True):
             files = {each: folder / 'swap' / f'{Path(archive_name).stem}-{offset:x}-{each}.gnf' for each in variants}
             for each, file in files.items():
                 file.write_bytes(variants[each])
+            files['nintendo'] = files['playstation']  # no Nintendo drawing: the runtime shows the PlayStation one
             lines.append('swap\t' + wipeout_glyphs.swap_line(archive_name, offset, stored, files))
         return lines
     key = [DUAL_VERSION, VERSION, controller_row.VERSION, row, psarc.stamp([SVG]), [name for name, _p in found],
            psarc.stamp(p for _n, p in found)]
     lines = psarc.cached_lines(Path(out) / 'controls_dual', key, make)
     split = [line.split('\t', 1) for line in lines]
-    return [line for kind, line in split if kind == style], [line for kind, line in split if kind == 'swap']
+    shown = style if style in STYLES else 'playstation'
+    return [line for kind, line in split if kind == shown], [line for kind, line in split if kind == 'swap']
 
 
 def main():
@@ -630,7 +629,8 @@ def main():
     parser.add_argument('--out', type=Path, required=True, help='adds its changes to OUT/file_patches.txt')
     parser.add_argument('--no-row', action='store_true',
                         help='without the Controller type rows (the save cannot take their settings)')
-    parser.add_argument('--style', choices=STYLES, default='xbox', help='the controller shown at start')
+    parser.add_argument('--style', choices=(*STYLES, 'nintendo'), default='xbox',
+                        help='the controller shown at start (Nintendo: the PlayStation one)')
     parser.add_argument('--swap-config', type=Path,
                         help='both controllers: the picture follows the Controller type row while the game runs; '
                              'the sheets are added to this GOW3_GLYPH_SWAP file')
@@ -638,13 +638,14 @@ def main():
     args = parser.parse_args()
     row = not args.no_row
     # Whatever fails, the game starts: both controllers, else (as before) the game's own picture
-    # with the rows for PlayStation, or the Xbox picture alone.
+    # with the rows when PlayStation is shown, or the Xbox picture alone.
     built = _both(args, row) if args.swap_config else None
-    if not built and args.swap_config and args.style == 'playstation':
-        if row:
-            controller_row.apply(args.game, args.out, args.archive)
-        return
-    built = built or _xbox(args, row)
+    if not built:
+        if args.swap_config and args.style != 'xbox':
+            if row:
+                controller_row.apply(args.game, args.out, args.archive)
+            return
+        built = _xbox(args, row)
     if built:
         lines, message = built
         with open(args.out / 'file_patches.txt', 'a') as f:
