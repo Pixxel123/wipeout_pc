@@ -28,11 +28,15 @@ cmake -S "$work/vulkan-headers" -B "$work/vulkan-headers/build" -G Ninja -DCMAKE
 $sudo cmake --install "$work/vulkan-headers/build" >/dev/null
 # Vulkan Memory Allocator: header only, not packaged in 24.04.
 VMA=${VMA:-v3.1.0}
-$sudo curl -fsSL -o /usr/local/include/vk_mem_alloc.h \
+# Downloads retry: GitHub's file servers answer 503/504 now and then, which failed whole builds.
+retry=(--retry 5 --retry-delay 10 --retry-all-errors)
+$sudo curl -fsSL "${retry[@]}" -o /usr/local/include/vk_mem_alloc.h \
     "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/$VMA/include/vk_mem_alloc.h"
 # SDL3: not packaged in 24.04.
 SDL=${SDL:-3.4.16}
-curl -fsSL "https://github.com/libsdl-org/SDL/releases/download/release-$SDL/SDL3-$SDL.tar.gz" | tar xz -C "$work"
+# To a file first: a retry inside a pipe would hand tar the start of the archive twice.
+curl -fsSL "${retry[@]}" -o "$work/sdl.tar.gz" "https://github.com/libsdl-org/SDL/releases/download/release-$SDL/SDL3-$SDL.tar.gz"
+tar xzf "$work/sdl.tar.gz" -C "$work"
 cmake -S "$work/SDL3-$SDL" -B "$work/sdl" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
     -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF >/dev/null
 ninja -C "$work/sdl" >/dev/null

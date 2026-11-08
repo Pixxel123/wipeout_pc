@@ -87,7 +87,9 @@ tool=${APPIMAGETOOL:-$(command -v appimagetool || true)}
 if [[ -z $tool ]]; then
     tool=out/appimagetool-x86_64.AppImage
     [[ -x $tool ]] || {
-        curl -fL -o "$tool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+        # Retried: GitHub's file servers answer 503/504 now and then.
+        curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o "$tool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
         chmod +x "$tool"
     }
 fi
