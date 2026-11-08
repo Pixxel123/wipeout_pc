@@ -53,12 +53,24 @@ class DrawingTest(unittest.TestCase):
         from PIL import Image, ImageDraw
         sheet = Image.new('RGBA', (512, 512), (0, 0, 0, 0))
         draw = ImageDraw.Draw(sheet)
-        draw.rectangle((6, 425, 140, 510), outline=(255, 255, 255, 255), width=2)  # 2 texels past (8, 427)-(139, 509)
-        draw.rectangle((150, 430, 160, 440), fill=(255, 255, 255, 255))          # another sprite, 11 texels away
+        # The pictogram: its grips 7 texels left of the rectangle (8, 427)-(139, 509), grey and
+        # faint as anti-aliased at 1x; another sprite 4 texels away, not joined to it.
+        draw.rectangle((20, 440, 120, 500), outline=(255, 255, 255, 255), width=2)
+        draw.line((20, 470, 1, 470), fill=(140, 140, 140, 60), width=1)
+        draw.rectangle((141, 430, 150, 440), fill=(255, 255, 255, 255))
         out = pm.redraw(sheet, HD)
-        self.assertEqual(out.getpixel((6, 470)), (0, 0, 0, 0))
-        self.assertEqual(out.getpixel((70, 510)), (0, 0, 0, 0))
-        self.assertEqual(out.getpixel((155, 435)), (255, 255, 255, 255))
+        self.assertEqual(out.getpixel((1, 470)), (0, 0, 0, 0))     # the grip's tip, past the rectangle
+        self.assertEqual(out.getpixel((145, 435)), (255, 255, 255, 255))
+        # The drawing sits in the pictogram's bounds: it reaches left of the rectangle.
+        self.assertGreater(out.crop((0, 427, 8, 510)).getchannel('A').getextrema()[1], 0)
+
+    def test_a_pictogram_on_the_sheets_edge_is_cleared_whole(self):
+        # At 1x (and Fury) the sprites end at the sheet's bottom: its edge is no background.
+        from PIL import Image, ImageDraw
+        sheet = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+        ImageDraw.Draw(sheet).rounded_rectangle((1, 214, 72, 255), radius=12, outline=(170, 170, 170, 150), width=1)
+        out = pm.redraw(sheet, HALF)
+        self.assertEqual(out.getpixel((1, 235)), (0, 0, 0, 0))  # the grip's arc, left of the rectangle
 
 
 class BuildTest(unittest.TestCase):

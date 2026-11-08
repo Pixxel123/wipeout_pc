@@ -20,7 +20,7 @@ import psarc
 import wipeout_glyphs
 import xbox_controls
 
-VERSION = 2  # of the drawing and the patches: a change rebuilds the cached ones
+VERSION = 3  # of the drawing and the patches: a change rebuilds the cached ones
 ART = Path(__file__).resolve().parent / 'art'
 # Each sheet: its sprites (U, V, width, height, the stick drawn) in texels of a sheet `space` wide.
 SHEETS = {
@@ -32,7 +32,8 @@ SHEETS = {
 SUPER = 4  # drawn this many times larger, then reduced
 MARGIN = 1.5  # texels left clear around a drawing: the help draws its sprites filtered, so lines
               # on a sprite's edge show as cut strokes and smear into what is next to them
-REMNANT = 3   # texels around a sprite looked through for the game's own pictogram's outer pixels
+REACH = 12    # texels (at 2x) past the notes' rectangle the game's own pictogram is followed:
+              # its grips reach out of it, wider than the rectangle, more so at 1x
 
 
 def _color(text):
@@ -70,40 +71,50 @@ def draw(svg, width, height, margin=MARGIN):
     return gnf.reduce(big, width, height)
 
 
-def _line_art(image, box):
-    """Whether `box` of the sheet holds a pixel of the pictograms' white line art."""
-    return any(a > 128 and min(r, g, b) > 128 for r, g, b, a in image.crop(box).getdata())
-
-
-def _extent(image, box, most):
-    """`box` grown, up to `most` texels a side, over the rows and columns just outside it that hold
-    the game's pictogram's line art: what the notes' rectangle (and its rounding at 1x) leaves out."""
+def _pictogram(image, box, reach):
+    """The game's pictogram at `box`: its pixels (every visible one joined to one inside the box,
+    within `reach` texels of it) and their bounds with the box's. The notes' rectangle is the
+    pictogram's middle; its grips reach past it, anti-aliased to grey at 1x. When what is joined
+    reaches the edge of that window it is the sheet's background, not one pictogram: then the box's
+    pixels and the box."""
     x0, y0, x1, y1 = box
-    for _ in range(most):
-        grown = (x0 - (x0 > 0 and _line_art(image, (x0 - 1, y0, x0, y1))),
-                 y0 - (y0 > 0 and _line_art(image, (x0, y0 - 1, x1, y0))),
-                 x1 + (x1 < image.width and _line_art(image, (x1, y0, x1 + 1, y1))),
-                 y1 + (y1 < image.height and _line_art(image, (x0, y1, x1, y1 + 1))))
-        if grown == (x0, y0, x1, y1):
-            break
-        x0, y0, x1, y1 = grown
-    return x0, y0, x1, y1
+    wx0, wy0 = max(0, x0 - reach), max(0, y0 - reach)
+    wx1, wy1 = min(image.width, x1 + reach), min(image.height, y1 + reach)
+    alpha = image.getchannel('A').crop((wx0, wy0, wx1, wy1)).load()
+    w, h = wx1 - wx0, wy1 - wy0
+    todo = [(x, y) for x in range(x0 - wx0, x1 - wx0) for y in range(y0 - wy0, y1 - wy0) if alpha[x, y]]
+    seen = set(todo)
+    while todo:
+        x, y = todo.pop()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                n = (x + dx, y + dy)
+                if 0 <= n[0] < w and 0 <= n[1] < h and n not in seen and alpha[n]:
+                    seen.add(n)
+                    todo.append(n)
+    # The window's sides inside the sheet: the sheet's own edges bound a pictogram, not background.
+    inner = ((wx0 > 0, 0), (wx1 < image.width, w - 1)), ((wy0 > 0, 0), (wy1 < image.height, h - 1))
+    if any(any(cut and x == at for cut, at in inner[0]) or any(cut and y == at for cut, at in inner[1]) for x, y in seen):
+        return [(x, y) for x in range(x0, x1) for y in range(y0, y1)], box
+    pixels = [(x + wx0, y + wy0) for x, y in seen]
+    xs, ys = [x for x, _y in pixels] + [x0, x1 - 1], [y for _x, y in pixels] + [y0, y1 - 1]
+    return pixels, (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
 
 
 def redraw(image, name):
-    """The sheet image of `name` (SHEETS) with its sprites redrawn as Xbox controllers: the game's
-    pictogram cleared, its outer pixels just outside the rectangle too, and the drawing put in the
-    rectangle with a clear margin."""
-    from PIL import Image
+    """The sheet image of `name` (SHEETS) with its sprites redrawn as Xbox controllers: each of the
+    game's pictograms cleared, pixel by pixel (_pictogram), and the drawing put where it was, with a
+    clear margin."""
     space, sprites, prefix = SHEETS[name]
     k = image.width / space
     out = image.convert('RGBA')
     for u, v, w, h, stick in sprites:
         box = (round(u * k), round(v * k), round((u + w) * k), round((v + h) * k))
-        cleared = _extent(out, box, max(1, round(REMNANT * k)))
-        out.paste(Image.new('RGBA', (cleared[2] - cleared[0], cleared[3] - cleared[1]), (0, 0, 0, 0)), cleared[:2])
-        sprite = draw(ART / f'xbox_photo_{prefix}{stick}_stick.svg', box[2] - box[0], box[3] - box[1])
-        out.paste(sprite, box[:2], sprite)
+        pixels, bounds = _pictogram(out, box, max(2, round(REACH * k)))
+        for pixel in pixels:
+            out.putpixel(pixel, (0, 0, 0, 0))
+        sprite = draw(ART / f'xbox_photo_{prefix}{stick}_stick.svg', bounds[2] - bounds[0], bounds[3] - bounds[1])
+        out.paste(sprite, bounds[:2], sprite)
     return out
 
 
