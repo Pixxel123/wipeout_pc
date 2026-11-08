@@ -12,6 +12,7 @@ bytes the originals take and applied as runtime file patches (scripts/psarc.py),
 row while the game runs (src/runtime_glyphs.c)."""
 import argparse
 import contextlib
+import hashlib
 from pathlib import Path
 
 import gnf
@@ -143,9 +144,11 @@ def main():
     if args.swap_config:
         with open(args.swap_config, 'a') as f:
             f.writelines(swaps)
+    # The drawings' digest names which SVGs the sheets came from (a stale AppImage or cache shows).
+    drawings = hashlib.md5(b''.join(p.read_bytes() for p in sorted(ART.glob('xbox_photo_*.svg')))).hexdigest()[:8]
     print(f'Photo mode: {args.style} controllers in its help ({len(lines)} changes'
           + (f', {len(swaps)} sheets follow the Controller type row' if args.swap_config else '')
-          + '; game files untouched)', flush=True)
+          + f'; drawings {drawings}; game files untouched)', flush=True)
 
 
 if __name__ == '__main__':
