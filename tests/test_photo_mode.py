@@ -40,6 +40,27 @@ class DrawingTest(unittest.TestCase):
             self.assertEqual(out.getpixel((size // 2, size // 4)), (10, 20, 30, 255), name)
 
 
+    def test_drawings_keep_clear_of_the_sprite_edges(self):
+        # The help draws its sprites filtered: a line on the edge shows as a cut stroke.
+        for svg, (w, h) in (('xbox_photo_left_stick.svg', (131, 82)), ('xbox_photo_small_right_stick.svg', (65, 41)),
+                            ('xbox_photo_fury_left_stick.svg', (65, 40))):
+            alpha = pm.draw(pm.ART / svg, w, h).getchannel('A')
+            edges = [(x, 0) for x in range(w)] + [(x, h - 1) for x in range(w)] + \
+                    [(0, y) for y in range(h)] + [(w - 1, y) for y in range(h)]
+            self.assertFalse([p for p in edges if alpha.getpixel(p)], svg)
+
+    def test_the_games_pictogram_is_cleared_past_the_rectangle_its_neighbours_kept(self):
+        from PIL import Image, ImageDraw
+        sheet = Image.new('RGBA', (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(sheet)
+        draw.rectangle((6, 425, 140, 510), outline=(255, 255, 255, 255), width=2)  # 2 texels past (8, 427)-(139, 509)
+        draw.rectangle((150, 430, 160, 440), fill=(255, 255, 255, 255))          # another sprite, 11 texels away
+        out = pm.redraw(sheet, HD)
+        self.assertEqual(out.getpixel((6, 470)), (0, 0, 0, 0))
+        self.assertEqual(out.getpixel((70, 510)), (0, 0, 0, 0))
+        self.assertEqual(out.getpixel((155, 435)), (255, 255, 255, 255))
+
+
 class BuildTest(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.object(gnf.Texture, 'replaced', fast_replaced)
