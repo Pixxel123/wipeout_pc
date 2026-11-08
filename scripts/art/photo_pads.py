@@ -41,8 +41,9 @@ FURY_DROP = SMALL | {'path4977', 'path4943', 'path4953', 'path4957', 'path4963',
 ET.register_namespace('', SVG_NS)
 
 
-# The face buttons' outer rings (A, B, X, Y).
+# The face buttons' outer rings (A, B, X, Y) and the Xbox (guide) button's.
 FACE = {'path4957', 'path4963', 'path4965', 'path4969'}
+GUIDE = 'path4977'
 
 
 def styled(active, line, red, idle_fill, drop, filled=frozenset()):
@@ -108,8 +109,8 @@ def main():
         write(f'xbox_photo_fury_{side}_stick.svg', styled(side, 18, FURY_RED, True, FURY_DROP), 130, 80,
               f'Fury photo mode help (photo_mode_fury.gnf, 2x of 1x), from xbox_controller.svg: the {side} stick in red.')
         # photo_mode.gnf (1x) has the same 65 x 41 sprite as Fury's: Fury's shapes and lines, HD's red,
-        # and the face buttons as white dots (rings that small run together).
-        write(f'xbox_photo_small_{side}_stick.svg', styled(side, 18, RED, True, FURY_DROP - FACE, FACE), 130, 82,
+        # the face buttons as white dots (rings that small run together) and the Xbox button's ring.
+        write(f'xbox_photo_small_{side}_stick.svg', styled(side, 18, RED, True, FURY_DROP - FACE - {GUIDE}, FACE), 130, 82,
               f'Photo mode help at 1x (photo_mode.gnf), from xbox_controller.svg: the {side} stick in red.')
 
 
