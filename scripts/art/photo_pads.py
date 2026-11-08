@@ -25,13 +25,18 @@ VIEW = (30, 35, 680, 425)  # the drawing (x 36..704, y 41..454) and room for the
 CAP = {'left': 'path5108', 'right': 'path5110'}
 CAP_RINGS = {'left': {'path4997', 'path4999', 'path5086'}, 'right': {'path4995', 'path5001', 'path5088'}}
 GRIP_DOTS = {'path5090', 'path5092', 'path5094', 'path5096', 'path5098', 'path5100', 'path5102', 'path5104'}
-# Lines that run together at the sprite's size: the guide button's X and inner ring, the trigger
-# backs, Back/Start's arrows and the d-pad's inner rims.
+# What the sprite's size (131 x 82 texels, as the DualShock pictograms) cannot show: an outer and
+# an inner line two texels apart read as one grey smear, so only the outer one stays. Left out: the
+# guide button's X and inner ring, the trigger backs, Back/Start and their arrows, the d-pad's rings
+# and inner rims (its cross stays), the stick wells (the caps stay, the idle one filled white so it
+# reads as a stick), the face buttons' inner rings, the shoulder ridge and the bumpers' inner
+# outlines.
 SMALL = {'path4993', 'path4979', 'rect5193', 'rect5196', 'path4987', 'path4989', 'path5189',
-         'path4973', 'path4975', 'path5218'}
-# Fury's bolder lines merge more: only the outer shapes stay.
-FURY_DROP = SMALL | {'path5180', 'path5176', 'path5178', 'path4981', 'path4959', 'path4961',
-                     'path4967', 'path4971', 'path4983', 'path4985'}
+         'path4973', 'path4975', 'path5218', 'path4983', 'path4985', 'path5191', 'path5106',
+         'path5185', 'path5187', 'path4959', 'path4961', 'path4967', 'path4971', 'path5180',
+         'path5176', 'path5178'}
+# Fury's sprite is half the size again: the body, the triggers, the caps and the d-pad only.
+FURY_DROP = SMALL | {'path4977', 'path4943', 'path4953', 'path4957', 'path4963', 'path4965', 'path4969'}
 
 ET.register_namespace('', SVG_NS)
 
@@ -89,8 +94,8 @@ def write(name, root, width, height, comment):
 
 def main():
     for side in ('left', 'right'):
-        # 1.3 texels of the 131 x 82 sprite, as the DualShock's lines; Fury's 1.8 texels of 65 x 40.
-        write(f'xbox_photo_{side}_stick.svg', styled(side, 6.6, RED, False, SMALL), 131, 82,
+        # 2 texels of the 131 x 82 sprite, as the DualShock's lines; Fury's 1.8 texels of 65 x 40.
+        write(f'xbox_photo_{side}_stick.svg', styled(side, 10.4, RED, True, SMALL), 131, 82,
               f'Photo mode help (photo_mode.2x.gnf, 2x), from xbox_controller.svg: the {side} stick in red.')
         write(f'xbox_photo_fury_{side}_stick.svg', styled(side, 18, FURY_RED, True, FURY_DROP), 130, 80,
               f'Fury photo mode help (photo_mode_fury.gnf, 2x of 1x), from xbox_controller.svg: the {side} stick in red.')
