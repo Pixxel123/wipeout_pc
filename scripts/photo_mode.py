@@ -20,7 +20,7 @@ import psarc
 import wipeout_glyphs
 import xbox_controls
 
-VERSION = 3  # of the drawing and the patches: a change rebuilds the cached ones
+VERSION = 4  # of the drawing and the patches: a change rebuilds the cached ones
 ART = Path(__file__).resolve().parent / 'art'
 # Each sheet: its sprites (U, V, width, height, the stick drawn) in texels of a sheet `space` wide.
 SHEETS = {
@@ -34,6 +34,8 @@ MARGIN = 1.5  # texels left clear around a drawing: the help draws its sprites f
               # on a sprite's edge show as cut strokes and smear into what is next to them
 REACH = 12    # texels (at 2x) past the notes' rectangle the game's own pictogram is followed:
               # its grips reach out of it, wider than the rectangle, more so at 1x
+VISIBLE = 24  # alpha from which a texel is part of a pictogram: the sheets' BC7 blocks leave a halo
+              # of alpha 1 around every shape, which joins everything to everything
 
 
 def _color(text):
@@ -72,8 +74,8 @@ def draw(svg, width, height, margin=MARGIN):
 
 
 def _pictogram(image, box, reach):
-    """The game's pictogram at `box`: its pixels (every visible one joined to one inside the box,
-    within `reach` texels of it) and their bounds with the box's. The notes' rectangle is the
+    """The game's pictogram at `box`: its pixels (every visible one, alpha >= VISIBLE, joined to one
+    inside the box, within `reach` texels of it) and their bounds with the box's. The notes' rectangle is the
     pictogram's middle; its grips reach past it, anti-aliased to grey at 1x. When what is joined
     reaches the edge of that window it is the sheet's background, not one pictogram: then the box's
     pixels and the box."""
@@ -82,14 +84,14 @@ def _pictogram(image, box, reach):
     wx1, wy1 = min(image.width, x1 + reach), min(image.height, y1 + reach)
     alpha = image.getchannel('A').crop((wx0, wy0, wx1, wy1)).load()
     w, h = wx1 - wx0, wy1 - wy0
-    todo = [(x, y) for x in range(x0 - wx0, x1 - wx0) for y in range(y0 - wy0, y1 - wy0) if alpha[x, y]]
+    todo = [(x, y) for x in range(x0 - wx0, x1 - wx0) for y in range(y0 - wy0, y1 - wy0) if alpha[x, y] >= VISIBLE]
     seen = set(todo)
     while todo:
         x, y = todo.pop()
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 n = (x + dx, y + dy)
-                if 0 <= n[0] < w and 0 <= n[1] < h and n not in seen and alpha[n]:
+                if 0 <= n[0] < w and 0 <= n[1] < h and n not in seen and alpha[n] >= VISIBLE:
                     seen.add(n)
                     todo.append(n)
     # The window's sides inside the sheet: the sheet's own edges bound a pictogram, not background.
