@@ -163,13 +163,14 @@ def launch_style(env, savedata, title):
 
 
 def picture_options(style, ready, swap):
-    """scripts/xbox_controls.py's options for WipEout's Controls screens, or None to leave them: with
-    the Controller type rows (ready: the saves hold their settings; the game saves a row's value
-    without checking that its setting exists) the picture of `style` at start, following the rows
-    while the game runs through the GOW3_GLYPH_SWAP file `swap`; else the Xbox picture alone."""
+    """The options of scripts/xbox_controls.py (the Controls screens) and scripts/photo_mode.py
+    (photo mode's help), or None to leave both: with the Controller type rows (ready: the saves hold
+    their settings; the game saves a row's value without checking that its setting exists) the
+    pictures of `style` at start, following the rows while the game runs through the GOW3_GLYPH_SWAP
+    file `swap`; else the Xbox pictures alone."""
     if ready:
         return ['--style', style, '--swap-config', str(swap)]
-    return ['--no-row'] if style == 'xbox' else None
+    return ['--style', 'xbox'] if style == 'xbox' else None
 
 
 def backup_saves(user_dir, env):
@@ -333,7 +334,8 @@ def main():
                 env['GOW3_GLYPH_STYLE'] = style  # what the file patches above load (src/runtime_glyphs.c)
                 derived += ['GOW3_GLYPH_SWAP', 'GOW3_GLYPH_STYLE']
             if options := picture_options(style, ready, swap):
-                optional_script('xbox_controls.py', game, '--out', out, *options, *psarcs)
+                optional_script('xbox_controls.py', game, '--out', out, *options, *([] if ready else ['--no-row']), *psarcs)
+                optional_script('photo_mode.py', game, '--out', out, *options, *psarcs)
         env['GOW3_FILE_PATCHES'] = str(out / 'file_patches.txt')
 
         from patches import game_profile_for, patch_requirements, patch_status, selected_patches

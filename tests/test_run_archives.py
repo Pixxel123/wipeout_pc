@@ -47,7 +47,7 @@ class RunArchiveTests(unittest.TestCase):
         # Without them: no rows, but the Xbox picture is still drawn.
         self.assertIsNone(run.picture_options('playstation', False, swap))
         self.assertIsNone(run.picture_options('nintendo', False, swap))
-        self.assertEqual(run.picture_options('xbox', False, swap), ['--no-row'])
+        self.assertEqual(run.picture_options('xbox', False, swap), ['--style', 'xbox'])
 
 
 if __name__ == '__main__':

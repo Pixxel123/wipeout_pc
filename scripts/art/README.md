@@ -11,3 +11,4 @@ with the stick an action uses filled red, for photo mode's help in place of the 
 stick, Zoom the right one. `xbox_photo_fury_*_stick.svg`: the same for Fury's `photo_mode_fury.gnf`,
 with bolder lines and fewer inner rims. Written from `xbox_controller.svg` by `photo_pads.py` (run
 it after changing a line width or the shapes left out there); CC0 like their source.
+`scripts/photo_mode.py` draws them into the game's sheets.

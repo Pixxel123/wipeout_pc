@@ -117,9 +117,9 @@ def _subpaths(d):
     return subs
 
 
-def load_svg(path=SVG):
-    """[(id, outlined, subpaths)] in drawing order; points in the document's units. Shapes without
-    a stroke (the letters and labels) are filled with ink, the others white and outlined."""
+def svg_paths(path):
+    """[(id, style, subpaths)] of an SVG's paths in drawing order: style its inline style as a dict,
+    subpaths [(points, closed)] in the document's units, the groups' transforms applied."""
     shapes = []
 
     def walk(element, matrix):
@@ -127,13 +127,19 @@ def load_svg(path=SVG):
             tag, m = child.tag.split('}')[-1], _multiply(matrix, _transform(child.get('transform')))
             if tag == 'g':
                 walk(child, m)
-            elif tag == 'path' and child.get('id') not in SKIP:
+            elif tag == 'path':
                 style = dict(kv.split(':', 1) for kv in (child.get('style') or '').split(';') if ':' in kv)
                 subs = [([(m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]) for x, y in pts], closed)
                         for pts, closed in _subpaths(child.get('d'))]
-                shapes.append((child.get('id'), style.get('stroke', 'none') != 'none', subs))
+                shapes.append((child.get('id'), style, subs))
     walk(ET.parse(path).getroot(), (1, 0, 0, 1, 0, 0))
     return shapes
+
+
+def load_svg(path=SVG):
+    """[(id, outlined, subpaths)] of the controller's drawing. Shapes without a stroke (the letters
+    and labels) are filled with ink, the others white and outlined."""
+    return [(ident, style.get('stroke', 'none') != 'none', subs) for ident, style, subs in svg_paths(path) if ident not in SKIP]
 
 
 # ------------------------------------------------------------------------------- drawing
@@ -455,21 +461,21 @@ def _box(place):
 
 # ------------------------------------------------------------------------------- patches
 
-def _holders(game, given, opened):
-    """{file: [(archive name, Archive, entry)]} of the picture and the layout, oldest archive first
-    (the game reads the newest's copy, as scripts/menu_patches.py's data09 change). A name whose
-    entry another name already has in that archive (the 2x and 1x sheets can share their bytes) is
-    that one copy. The archives stay open in `opened`."""
-    holders = {name: [] for name in (*TEXTURES, LAYOUT)}
+def holders(game, given, opened, names=(*TEXTURES, LAYOUT)):
+    """{file: [(archive name, Archive, entry)]} of the files `names`, oldest archive first (the game
+    reads the newest's copy, as scripts/menu_patches.py's data09 change). A name whose entry another
+    name already has in that archive (the 2x and 1x sheets can share their bytes) is that one copy.
+    The archives stay open in `opened`."""
+    found = {name: [] for name in names}
     for archive_name, path in psarc.archives(game, given):
         archive = opened.enter_context(psarc.Archive(path))
         taken = set()
-        for name in holders:
+        for name in found:
             i = archive.find(name)
             if i is not None and archive.entries[i]['offset'] not in taken:
                 taken.add(archive.entries[i]['offset'])
-                holders[name].append((archive_name, archive, i))
-    return holders
+                found[name].append((archive_name, archive, i))
+    return found
 
 
 def _layouts(holders):
@@ -506,7 +512,7 @@ def _encoder(sheets):
     return encode
 
 
-def _pack(holders, variants, label):
+def pack(holders, variants, label):
     """{style: {archive: [(offset, original, new)]}} giving each copy its new bytes in each style:
     variants(name, archive name, Archive, entry) -> {style: bytes}. The picture and the layout go
     together: an archive changes only when all its copies fit in every style. An archive that holds
@@ -536,13 +542,13 @@ def _pack(holders, variants, label):
 
 def changes(game, given=None, row=True):
     """{archive: [(offset, original, new)]} that draw the Xbox controller (and with `row`, the
-    Controller type rows), as _pack gives them."""
+    Controller type rows), as pack gives them."""
     with contextlib.ExitStack() as opened:
-        return _changes(_holders(game, given, opened), row)
+        return _changes(holders(game, given, opened), row)
 
 
 def _changes(holders, row=True):
-    """changes() of the archives' copies, found and opened (_holders)."""
+    """changes() of the archives' copies, found and opened (holders)."""
     layouts, placement = _layouts(holders)
     sheet, sprites = draw_sheet(box=placement[:4])
     encode = _encoder({'xbox': sheet})
@@ -551,7 +557,7 @@ def _changes(holders, row=True):
         if name == LAYOUT:
             return {'xbox': relayout(_with_rows(layouts[archive_name], row), sprites)}
         return {'xbox': encode(archive.read(i), 'xbox')}
-    return _pack(holders, variants, 'Xbox controller').get('xbox', {})
+    return pack(holders, variants, 'Xbox controller').get('xbox', {})
 
 
 def build(game, out, given=None, row=True):
@@ -569,10 +575,10 @@ def build(game, out, given=None, row=True):
 
 def dual_changes(game, given=None, row=True):
     """({style: {archive: [(offset, original, new)]}}, swaps) for the dual layout (and with `row`,
-    the Controller type rows) and each style's sheet, as _pack gives them. swaps: [(archive, offset,
+    the Controller type rows) and each style's sheet, as pack gives them. swaps: [(archive, offset,
     stored size, {style: texture bytes})], the newest copy of each sheet texture."""
     with contextlib.ExitStack() as opened:
-        return _dual_changes(_holders(game, given, opened), row)
+        return _dual_changes(holders(game, given, opened), row)
 
 
 def _dual_changes(holders, row=True):
@@ -592,7 +598,7 @@ def _dual_changes(holders, row=True):
         if (archive_name, archive, i) == holders[name][-1]:
             swaps.append((archive_name, archive.entries[i]['offset'], archive.stored_size(i), each))
         return each
-    return _pack(holders, variants, 'Controller picture'), swaps
+    return pack(holders, variants, 'Controller picture'), swaps
 
 
 def build_dual(game, out, style, given=None, row=True):

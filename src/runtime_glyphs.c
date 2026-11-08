@@ -26,7 +26,7 @@
 
 /* Copies: the drawn one and stale ones in freed load buffers, which hold the same bytes; every one
  * is written, so a few stale ones cannot keep the drawn one from being found. */
-enum { GLYPH_MAX_TEXTURES=8, GLYPH_MAX_COPIES=16 };
+enum { GLYPH_MAX_TEXTURES=12, GLYPH_MAX_COPIES=16 };
 /* 01.07's offsets of the settings store's pointer and of the table of rows on open screens. */
 #define GLYPH_STORE_AT 0x10ea398
 #define GLYPH_TABLE_AT 0x11ac4c8
