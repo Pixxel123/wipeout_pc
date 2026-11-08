@@ -41,7 +41,13 @@ FURY_DROP = SMALL | {'path4977', 'path4943', 'path4953', 'path4957', 'path4963',
 ET.register_namespace('', SVG_NS)
 
 
-def styled(active, line, red, idle_fill, drop):
+# The face buttons' outer rings (A, B, X, Y).
+FACE = {'path4957', 'path4963', 'path4965', 'path4969'}
+
+
+def styled(active, line, red, idle_fill, drop, filled=frozenset()):
+    """The drawing for the `active` stick: `drop` left out, the rest white outlines `line` wide, the
+    active cap filled `red`, the idle one white with idle_fill, the paths `filled` solid white."""
     tree = copy.deepcopy(ET.parse(SOURCE))
     root = tree.getroot()
     for element in root.iter():
@@ -76,6 +82,8 @@ def styled(active, line, red, idle_fill, drop):
             element.set('style', f'fill:{red};stroke:{red};stroke-width:{line}')
         elif ident == CAP[idle] and idle_fill:
             element.set('style', f'fill:{WHITE};stroke:{WHITE};stroke-width:{line}')
+        elif ident in filled:  # no outline, so neighbouring dots stay apart
+            element.set('style', f'fill:{WHITE};stroke:none')
         else:
             element.set('style', outline)
     for name in ('width', 'height', 'version', 'id'):
@@ -99,8 +107,9 @@ def main():
               f'Photo mode help (photo_mode.2x.gnf, 2x), from xbox_controller.svg: the {side} stick in red.')
         write(f'xbox_photo_fury_{side}_stick.svg', styled(side, 18, FURY_RED, True, FURY_DROP), 130, 80,
               f'Fury photo mode help (photo_mode_fury.gnf, 2x of 1x), from xbox_controller.svg: the {side} stick in red.')
-        # photo_mode.gnf (1x) has the same 65 x 41 sprite as Fury's: Fury's shapes and lines, HD's red.
-        write(f'xbox_photo_small_{side}_stick.svg', styled(side, 18, RED, True, FURY_DROP), 130, 82,
+        # photo_mode.gnf (1x) has the same 65 x 41 sprite as Fury's: Fury's shapes and lines, HD's red,
+        # and the face buttons as white dots (rings that small run together).
+        write(f'xbox_photo_small_{side}_stick.svg', styled(side, 18, RED, True, FURY_DROP - FACE, FACE), 130, 82,
               f'Photo mode help at 1x (photo_mode.gnf), from xbox_controller.svg: the {side} stick in red.')
 
 
