@@ -386,8 +386,8 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
     `names` that fit inside one of its modes; without them, `names` (hand-made and profile sizes) that fit
     the monitor. Below MIN_GENERATED a size is inert (the game keeps 1920x1080, and the session runs at that size). The
     game's own size, the saved size and the `keep` sizes (the one the launcher opened with) are never
-    dropped; one nobody lists (generated) is appended so it stays selectable. `mods`: the sizes the enabled
-    mods list themselves, which need no saved row."""
+    dropped, whatever their size, with or without the modes. `mods`: the sizes the enabled mods list
+    themselves, which need no saved row."""
     kept = list(dict.fromkeys(n for n in (saved, *keep) if n))  # at open the live and opened-with sizes are one
     screen = your_screen_choice(size)
     choices = [screen] if screen else []
@@ -397,13 +397,14 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
     if modes:
         # The monitor's modes, and the hand-made sizes that fit inside one of them: a panel with a single
         # mode (a laptop's, a gamescope session's) keeps the lower sizes a PC game would list.
-        # Kept sizes stay, as without modes (a mod lists its own); each name once.
         bounds = modes
         mode_names = [graphics_options.size_name(w, h) for w, h in modes]
-        names = list(dict.fromkeys(['native', *mode_names, *names, *(n for n in kept if n not in mods)]))
+        names = ['native', *mode_names, *names]
     else:
         limit = screen and graphics_options.resolution_size(screen[0])
         bounds = [limit] if limit else []
+    # Kept sizes stay (a mod lists its own); each name once.
+    names = list(dict.fromkeys([*names, *(n for n in kept if n not in mods)]))
 
     def listed(name):
         row = graphics_options.resolution_size(name)
@@ -417,9 +418,6 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
         row = graphics_options.resolution_size(choice[0])
         return (0, -row[0], -row[1]) if row else (1, 0, 0)
     choices += [(n, (plain_size_label(n),)) for n in names if (not screen or n != screen[0]) and listed(n)]
-    for name in kept:
-        if name not in dict(choices) and graphics_options.generated_resolution(name, [*names, *mods]):
-            choices.append((name, (plain_size_label(name),)))
     head = 1 if screen else 0
     return choices[:head] + sorted(choices[head:], key=largest_first)
 

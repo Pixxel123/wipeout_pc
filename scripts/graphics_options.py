@@ -91,10 +91,12 @@ _SIZE_NAME = re.compile(r'([1-9][0-9]{0,4})x([1-9][0-9]{0,4})')
 
 def resolution_size(name):
     """(width, height) of a built-in name or a mod's "<width>x<height>" (plain digits, no sign, space or
-    leading zero); None for anything else."""
+    leading zero); None for anything else (a hand-edited state file's number or list too)."""
+    if not isinstance(name, str):
+        return None
     if name in SIZES:
         return tuple(SIZES[name])
-    match = _SIZE_NAME.fullmatch(name) if isinstance(name, str) else None
+    match = _SIZE_NAME.fullmatch(name)
     return (int(match[1]), int(match[2])) if match else None
 
 

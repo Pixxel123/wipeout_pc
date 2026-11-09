@@ -112,6 +112,21 @@ class GeneratedResolutionTest(unittest.TestCase):
             self.assertEqual(options['render_resolution'], '2256x1504')
             self.assertTrue(reverted)
 
+    def test_a_hand_edited_state_value_that_is_no_string_generates_nothing(self):
+        for value in (5, None, ['x'], {'x': 1}):
+            with tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                config, state = out / 'gow3.ini', out / 'graphics_state.json'
+                config.write_text('render_resolution=4K\nrestart_unconfirmed=1\n', encoding='utf-8')
+                state.write_text(json.dumps({'attempt': True, 'last_good': {'render_resolution': value}}),
+                                 encoding='utf-8')
+                ini = g.launch_ini(config, state)
+                self.assertEqual(ini['render_resolution'], value)
+                self.assertEqual(run.generated_resolution_files(ini, [], OWN, out, 'CUSA07671'), ([], []), repr(value))
+                self.assertFalse((out / 'generated-resolution.xml').exists())
+                options, _reverted = g.prepare(config, state)
+                self.assertEqual(options['render_resolution'], 'native', repr(value))
+
     def test_above_the_largest_size_generates_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)

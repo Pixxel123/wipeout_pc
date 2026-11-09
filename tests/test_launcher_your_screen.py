@@ -49,10 +49,11 @@ class YourScreenTest(unittest.TestCase):
         self.assertEqual([v for v, _t in options], ['native', '2256x1504'])
         self.assertEqual(dict(options)['2256x1504'], ('2256 × 1504',))
 
-    def test_a_saved_size_below_the_floor_is_not_kept(self):
+    def test_a_saved_size_below_the_floor_is_kept_without_modes(self):
+        # A saved value is never dropped: below the game's own size it is listed last, as with modes.
         for saved in ('1280x800', '1366x768'):
             options = launcher.resolution_choices_for(['native', '720p'], (1920, 1080), saved=saved)
-            self.assertEqual([v for v, _t in options], ['native'], saved)
+            self.assertEqual([v for v, _t in options], ['native', saved], saved)
 
     def test_rows_are_plain_sizes(self):
         options = dict(launcher.resolution_choices_for(['native', '2560x1080', '1440p'], (2560, 1440)))
@@ -295,6 +296,30 @@ class MonitorModesTest(unittest.TestCase):
         self.assertEqual(options[-1], ('1280x800', ('1280 × 800',)))
         self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native', '1280x800'])
 
+    def test_a_saved_size_below_the_floor_stays_listed_without_modes(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='720p')
+        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('2560x1080', ('2560 × 1080',)), ('1920x1440', ('1920 × 1440',)),
+                                   ('1920x1200', ('1920 × 1200',)), ('native', ('1920 × 1080',)), ('720p', ('1280 × 720',))])
+        for saved in ('1280x800', '480p'):
+            options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved=saved)
+            self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native', saved], saved)
+
+    def test_a_saved_size_no_patch_is_generated_for_stays_listed(self):
+        # Above 7680x4320, odd, or below the game's own size: a saved value is never dropped, with the
+        # monitor's modes, without them, and for an unknown monitor; each name once.
+        for saved in ('8000x4000', '7682x4320', '70000x2000', '2561x1441', '480p'):
+            for size, modes in (((2560, 1440), ()), ((0, 0), ()), ((2560, 1440), QHD_MODES)):
+                for keep in ((), (saved,)):
+                    values = [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, size, saved=saved,
+                                                                             modes=modes, keep=keep)]
+                    self.assertIn(saved, values, (saved, size, modes, keep))
+                    self.assertEqual(len(values), len(set(values)), (saved, size, modes, keep))
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='8000x4000')
+        self.assertEqual(options[:2], [('1440p', ('2560 × 1440 (Native)',)), ('8000x4000', ('8000 × 4000  ⚠',))])
+        values = [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (0, 0), saved='8000x4000')]
+        self.assertEqual(values[0], '8000x4000')
+        self.assertEqual(values[1:], [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (0, 0))])
+
     def test_without_modes_the_list_is_todays(self):
         self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=()),
                          launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440)))
@@ -325,7 +350,8 @@ class MonitorModesTest(unittest.TestCase):
         self.assertIn('5120x1440', values)   # a hand-made size that fits the monitor
 
     def test_a_monitor_below_its_largest_mode_still_lists_that_mode(self):
-        # A 1440p monitor whose desktop runs at 1080p: the limit is the largest mode, not the desktop.
+        # A 1440p monitor whose desktop runs at 1080p: a size is listed when it fits one of the modes,
+        # not only the desktop's.
         values = [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080), modes=[(1920, 1080), (2560, 1440)])]
         self.assertEqual(values, ['native', '1440p', '2560x1080', '1920x1440', '1920x1200'])
 

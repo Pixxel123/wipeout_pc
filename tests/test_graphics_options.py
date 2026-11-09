@@ -289,6 +289,27 @@ class GraphicsOptionsTest(unittest.TestCase):
         for name in g.RESOLUTIONS:
             self.assertIsNotNone(g.resolution_size(name), name)
 
+    def test_a_size_that_is_no_string_has_no_size(self):
+        # A hand-edited state file can hold "render_resolution": 5 or a list.
+        for value in (5, None, ['x'], {'x': 1}):
+            self.assertIsNone(g.resolution_size(value), repr(value))
+            self.assertIsNone(g.generated_resolution(value, ()), repr(value))
+
+    def test_the_render_size_limits_match_the_game_profiles_and_the_renderer(self):
+        # The launcher's floor is what the WipEout profiles tell the renderer; God of War III has none.
+        import game_profiles
+        floor = f'{g.MIN_GENERATED[0]}x{g.MIN_GENERATED[1]}'
+        for title in g.GENERATED_TITLES:
+            self.assertEqual(game_profiles.PROFILES[title]['env']['GOW3_MIN_RENDER_SIZE'], floor, title)
+        self.assertEqual(set(g.GENERATED_TITLES), {'CUSA07671', 'CUSA05670'})
+        self.assertNotIn('GOW3_MIN_RENDER_SIZE', game_profiles.PROFILES['CUSA01623'].get('env', {}))
+        self.assertNotIn('GOW3_MIN_RENDER_SIZE', game_profiles.DEFAULT.get('env', {}))
+        # The renderer's ceiling (scene_resolution.h MaxGuest) is the largest generated size.
+        header = (paths.ROOT / 'gpu/shadps4/video_core/renderer_vulkan/scene_resolution.h').read_text(encoding='utf-8')
+        match = re.search(r'\bMaxGuest\s*\{\s*(\d+)\s*,\s*(\d+)\s*\}', header)
+        self.assertIsNotNone(match)
+        self.assertEqual((int(match[1]), int(match[2])), g.MAX_GENERATED)
+
     def test_generated_resolution_starts_at_the_games_own_size(self):
         for value in ('1280x800', '1366x768', '1680x1050', '1920x1000', '1800x1200'):
             self.assertIsNone(g.generated_resolution(value, ()), value)
