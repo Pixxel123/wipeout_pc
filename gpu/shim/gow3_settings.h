@@ -77,6 +77,8 @@ struct Values {
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
     /// Set by the presenter: the guest display buffer (the render resolution).
     std::atomic<int> game_width{0}, game_height{0};
+    /// Set by the presenter: the game shows a size other than the session's guest size: presets and mip bias are off.
+    std::atomic<bool> guest_mismatch{false};
     std::atomic<int> frames_queued{1};
     /// Controller vibration strength in percent; 0 turns it off (runtime_pad.c). Live.
     std::atomic<int> vibration{100};

@@ -23,6 +23,11 @@ constexpr Size ClampGuest(Size wanted, Size floor) {
     if (wanted.width < floor.width || wanted.height < floor.height) wanted = floor;
     return {std::min(wanted.width, MaxGuest.width) & ~1u, std::min(wanted.height, MaxGuest.height) & ~1u};
 }
+/// The preset the scene is sized for this frame: none while the upscaler is off, or while the game
+/// shows a size other than the session's guest size (its targets cannot be reduced then).
+constexpr int EffectivePreset(int preset, bool active, bool mismatch) {
+    return active && !mismatch ? preset : 0;
+}
 inline Size ForPreset(int preset, Size output) {
     // Even dimensions for half-resolution effects; match the preset labels exactly.
     constexpr std::array<double, 5> scales{1.0, 1.5, 1.7, 2.0, 3.0};

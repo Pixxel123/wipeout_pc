@@ -38,5 +38,9 @@ int main() {
     static_assert(ClampGuest({2561, 1081}, Size{0, 0}) == Size{2560, 1080});
     static_assert(ClampGuest({3200, 1350}, floor) == Size{3200, 1350}); // odd half size is the game's business
     static_assert(Unpack(Pack({7680, 4320})) == Size{7680, 4320});
+    // A game that shows another size than the session expects (patch refused) gets no preset.
+    static_assert(EffectivePreset(3, true, false) == 3);
+    static_assert(EffectivePreset(3, true, true) == 0);
+    static_assert(EffectivePreset(3, false, false) == 0);
     std::puts("Guest size: PASS (scene and half-resolution divisors)");
 }

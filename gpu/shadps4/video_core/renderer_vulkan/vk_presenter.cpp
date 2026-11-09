@@ -665,9 +665,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // gow3: the guest display buffer, before the upscaler's override.
     Gow3Settings::Get().game_width = int(attribute.attrib.width);
     Gow3Settings::Get().game_height = int(attribute.attrib.height);
+    // Stored every presented frame, so it clears when the sizes agree again; logged once.
     static bool mismatch_logged = false;
-    if (const auto guest = SceneResolution::Guest(); !mismatch_logged &&
-        (attribute.attrib.width != guest.width || attribute.attrib.height != guest.height)) {
+    const auto guest = SceneResolution::Guest();
+    const bool mismatch =
+        attribute.attrib.width != guest.width || attribute.attrib.height != guest.height;
+    Gow3Settings::Get().guest_mismatch.store(mismatch, std::memory_order_relaxed);
+    if (mismatch && !mismatch_logged) {
         mismatch_logged = true;
         std::printf("Render resolution: the game shows %ux%u, not the expected %ux%u (patch not "
                     "applied?): upscaling stays off\n", attribute.attrib.width,

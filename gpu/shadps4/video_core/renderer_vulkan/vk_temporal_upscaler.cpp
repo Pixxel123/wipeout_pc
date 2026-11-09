@@ -318,8 +318,14 @@ bool TemporalUpscaler::OnFrameStart() {
         failed = false;
         fsr4_failed = false;
     }
+    // The game shows another size than the session's guest (patch refused): its targets cannot be
+    // reduced, so the scene stays at the output size and the mip bias at 0 (presenter sets it).
+    const bool mismatch = settings.guest_mismatch.load(std::memory_order_relaxed);
+    const int effective_preset = SceneResolution::EffectivePreset(preset, active, mismatch);
+    // A change of the effective preset resizes the scene: the history restarts.
     const bool changed = output_changed || applied_preset != preset || active != last_active ||
-                         jitter_on != last_jitter || applied_upscaler != upscaler;
+                         jitter_on != last_jitter || applied_upscaler != upscaler ||
+                         scene_preset != effective_preset;
     if (applied_upscaler != upscaler) {
         // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
         scheduler.Finish();
@@ -330,16 +336,21 @@ bool TemporalUpscaler::OnFrameStart() {
     // Dynamic scene resolution scaling (live preset switching) works on all GPUs.
     // On GPUs without D32S8 blit support, UI depth is cleared instead of copied from scene.
     if (!scaled_session) {
-        scene_targets.SetSize(SceneResolution::ForPreset(active ? preset : 0,
-                                                        {target_width, target_height}));
+        scene_targets.SetSize(
+            SceneResolution::ForPreset(effective_preset, {target_width, target_height}));
         render_width = scene_targets.Size().width;
         render_height = scene_targets.Size().height;
     }
-    Gow3Settings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
-    Gow3Settings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
+    // A mismatch reports the output size (SceneMipBias reads it: no bias), also in a
+    // GOW3_RENDER_RES session, whose render size the preset does not set.
+    Gow3Settings::Get().active_render_width =
+        mismatch ? target_width : Scaled() ? render_width : scene_targets.Size().width;
+    Gow3Settings::Get().active_render_height =
+        mismatch ? target_height : Scaled() ? render_height : scene_targets.Size().height;
     if (changed || !dispatched_last_frame) reset = true;
     if (changed) jitter_index = 0;
     applied_preset = preset;
+    scene_preset = effective_preset;
     applied_output_width = target_width;
     applied_output_height = target_height;
     applied_upscaler = upscaler;
@@ -1345,6 +1356,8 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 }
 
 float TemporalUpscaler::SceneMipBias() const {
+    // Called per G-buffer draw, so it loads no guest_mismatch of its own: OnFrameStart reports the
+    // output size as active_render_width while the game shows another size, which gives 0 here.
     if (!Active() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) return 0.0f;
     const float render = float(Gow3Settings::Get().active_render_width.load());
     const float output = float(Scaled() ? target_width : scene_targets.Guest().width);
@@ -2022,7 +2035,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
         .output = {vk::Image(output_image), *output_view, ow, oh},
         .render_width = w,
         .render_height = h,
-        .preset = applied_preset,
+        .preset = scene_preset,
         .jitter = {sign * jitter[0], sign * jitter[1]},
         .frame_ms = frame_ms,
         .near_plane = camera_motion.Near(),

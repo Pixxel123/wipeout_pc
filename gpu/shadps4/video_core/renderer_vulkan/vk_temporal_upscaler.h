@@ -187,6 +187,8 @@ private:
     CameraMotion& camera_motion;
     SceneTargets& scene_targets;
     int applied_preset = -1;
+    /// The preset the scene is sized for (SceneResolution::EffectivePreset); FSR 4 picks its model by it.
+    int scene_preset = -1;
     int applied_upscaler = -1;
     bool dispatched_last_frame = false;
     bool last_active = false, last_jitter = false;
