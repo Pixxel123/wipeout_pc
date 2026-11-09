@@ -35,7 +35,7 @@ Every size but 1440x1080, 2048x1536 and 2560x1920 was tested in game: on an RX 6
 
 **WipEout note:** in WipEout, a size below 1920 × 1080 does not take effect. Measured on the Steam Deck with 720p, 900p
 and 1280 × 800: the patch applies, but the game keeps its 1920 × 1080 targets. Such a size therefore runs as the game's
-own 1920 × 1080, and the upscaler presets keep working there. The launcher does not list those sizes for WipEout. This
+own 1920 × 1080, and the upscaler presets keep working there. The launcher does not offer those sizes for WipEout. This
 was not measured on God of War III, and says nothing about it.
 
 ### Any size
@@ -56,7 +56,7 @@ half the monitor's width and height instead (a 7680 × 4320 monitor starts at 38
 stays in the list to choose. A monitor wider than 7680 or taller than 4320 starts at the game's own 1920 × 1080.
 
 Generated or scaled sizes above 3840 × 2160 are untested, and the memory patch adds a fixed 1 GB. Every listed size
-wider than 3840 or taller than 2160, except a mod's, is marked ⚠ in both lists. A size in the
+wider than 3840 or taller than 2160, except a mod's, is marked ⚠ in the Render resolution and Render scale lists. A size in the
 table above uses its tested entry. Any other even size (a 3:2 laptop at 2256 × 1504) is **generated at start** from
 the same sites by `scripts/graphics_options.py`
 (`resolution_patch_lines`): output size, half-resolution buffers, the camera aspect ratio, and 1 GB more video memory
