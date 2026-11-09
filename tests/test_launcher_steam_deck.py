@@ -62,6 +62,11 @@ class OutputDefaultTest(unittest.TestCase):
                 self.assertEqual(self.load(f'output_res={value}\n', deck=True), value)
         self.assertEqual(self.load('output_res=1280x720\n', deck=False), '1280x720')
 
+    def test_a_dropped_saved_choice_is_the_default(self):
+        self.assertEqual(self.load('output_res=native\n', deck=False), '1920x1080')
+        self.assertEqual(self.load('output_res=native\n', deck=True), '1280x720')
+        self.assertEqual(self.load('output_res=2560x1440\n', deck=True), '2560x1440')
+
 
 class PlayPathTest(unittest.TestCase):
     """Steam starts the game with --play, which never opens the window that saves the file, and the
@@ -80,6 +85,9 @@ class PlayPathTest(unittest.TestCase):
         self.assertIn('output_res=1280x720\n', text)
         self.assertIn('vsync=1\n', text)
         self.assertIn('output_res=1280x720\n', self.write(None, deck=True))
+
+    def test_a_dropped_saved_choice_gets_720p_written_on_a_deck(self):
+        self.assertIn('output_res=1280x720\n', self.write('output_res=native\n', deck=True))
 
     def test_a_saved_value_and_other_machines_are_left_alone(self):
         self.assertEqual(self.write('output_res=1920x1080\n', deck=True), 'output_res=1920x1080\n')

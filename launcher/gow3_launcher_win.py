@@ -824,6 +824,8 @@ def load_ini():
     for line in lines:
         if '=' in line and not line.lstrip().startswith('#'):
             key, value = line.split('=', 1)
+            if key.strip() == 'output_res' and value.strip() == 'native':
+                continue  # a dropped choice: the default of a file without the key
             values[key.strip()] = value.strip()
     return values, lines
 
@@ -3996,7 +3998,8 @@ def write_deck_defaults():
     if not steam_deck():
         return
     values, lines = load_ini()
-    keys = {line.split('=', 1)[0].strip() for line in lines if '=' in line and not line.lstrip().startswith('#')}
+    keys = {line.split('=', 1)[0].strip() for line in lines if '=' in line and not line.lstrip().startswith('#')
+            and line.replace(' ', '').strip() != 'output_res=native'}
     if 'output_res' not in keys:
         save_ini({'output_res': values['output_res']}, lines)
 
