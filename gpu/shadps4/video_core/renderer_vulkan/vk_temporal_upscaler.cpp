@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <tuple>
 
 #include <vk_mem_alloc.h>
 
@@ -191,10 +190,7 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     target_height = scene_targets.Guest().height;
     if (const char* res = std::getenv("GOW3_OUTPUT_RES")) {
         u32 w = 0, h = 0;
-        if (std::strcmp(res, "native") == 0) {
-            Gow3Settings::Get().output_native = true;
-        } else if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
-            Gow3Settings::Get().output_native = false;
+        if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
             target_width = w;
             target_height = h;
         }
@@ -291,7 +287,6 @@ bool TemporalUpscaler::OnFrameStart() {
                 Gow3Settings::Get().preset.store(value);
             }
             if (fields >= 2 && output >= 0 && output < Gow3Settings::OutputCount) {
-                Gow3Settings::Get().output_native = false;
                 Gow3Settings::Get().output_res.store(output);
             }
             if (fields == 3 && provider >= 0 && provider < Gow3Settings::UpscalerCount) {
@@ -308,22 +303,11 @@ bool TemporalUpscaler::OnFrameStart() {
     const bool active = Active();
     const bool jitter_on = active && settings.jitter && !Gow3Toggle::Disabled(1u << 25);
     const int upscaler = settings.upscaler.load();
-    // gow3: the fixed rows and "Native (window)" are for the native render only.
+    // gow3: the Output resolution rows are for the native render; other render sizes output at their own.
     const auto guest = scene_targets.Guest();
-    u32 output_width = target_width, output_height = target_height;
-    if (settings.output_native && SceneResolution::NativeRender(guest)) {
-        const auto [w, h] = OutputResolution::Output(settings.window_width, settings.window_height,
-                                                     settings.game_width, settings.game_height);
-        if (w && native_settled.Update(w, h)) {
-            output_width = w;
-            output_height = h;
-        }
-    } else {
-        const int row = std::clamp(settings.output_res.load(), 0, Gow3Settings::OutputCount - 1);
-        std::tie(output_width, output_height) = OutputResolution::FixedOrGuest(
-            Gow3Settings::OutputWidths[row], Gow3Settings::OutputHeights[row], guest.width,
-            guest.height);
-    }
+    const int row = std::clamp(settings.output_res.load(), 0, Gow3Settings::OutputCount - 1);
+    const auto [output_width, output_height] = OutputResolution::FixedOrGuest(
+        Gow3Settings::OutputWidths[row], Gow3Settings::OutputHeights[row], guest.width, guest.height);
     const bool output_changed = !scaled_session &&
                                 (output_width != applied_output_width ||
                                  output_height != applied_output_height);

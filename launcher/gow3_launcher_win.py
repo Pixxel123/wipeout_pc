@@ -695,8 +695,7 @@ PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('B
 # resolution per axis, scaled up by FSR 3.1 or DLSS; the HUD stays at full size.
 UPSCALE_PRESETS = [('0', ('Off (full resolution)',)), ('1', ('Quality (scene at 1/1.5)',)),
                    ('2', ('Balanced (scene at 1/1.7)',)), ('3', ('Performance (scene at 1/2)',))]
-# "native": the window fitted to 16:9 (gpu: output_resolution.h).
-OUTPUTS = [('native', ('Native (window)',)), ('1280x720', ('1280 × 720 (Steam Deck)',)),
+OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)),
            ('1920x1080', ('1920 × 1080',)), ('2560x1440', ('2560 × 1440',)),
            ('3840x2160', ('3840 × 2160 (4K)',))]
 LIVE = [('auto', ('Auto (by graphics card)', 'Авто (по видеокарте)')), ('0', ('Off (faster)', 'Выключена (быстрее)')),
@@ -2029,10 +2028,10 @@ class Launcher:
                  _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
         self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('What the upscaler produces; the HUD is drawn at this size too. Applies at the native '
-                   'render resolution; other render resolutions output at their own size.',
-                   'Что выдаёт апскейлер; интерфейс рисуется в этом же размере. Действует при родном '
-                   'разрешении рендеринга; другие разрешения выводятся в своём размере.'), restart=True)
+                 _('What the upscaler produces at the native render resolution; other render resolutions '
+                   'output at their own size.',
+                   'Что выдаёт апскейлер при родном разрешении рендеринга; другие разрешения выводятся в '
+                   'своём размере.'), restart=True)
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
                    'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)

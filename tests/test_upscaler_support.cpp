@@ -79,24 +79,21 @@ int main() {
     setenv("GOW3_RENDER_RES", "", 1);
     assert(!FixedRenderSession() && !ResolutionNeedsRestart());
     unsetenv("GOW3_RENDER_RES");
-    // "Native (window)": the keyword round-trips, and a fixed size turns it off again.
+    // An old "output_res=native" (a dropped choice) is the default size.
     {
-        const auto write_config = [&](const char* text) {
-            FILE* config = std::fopen(path, "w");
-            assert(config);
-            std::fputs(text, config);
-            std::fclose(config);
-        };
-        write_config("output_res=native\n");
+        FILE* config = std::fopen(path, "w");
+        assert(config);
+        std::fputs("output_res=native\n", config);
+        std::fclose(config);
         Load();
-        assert(s.output_native);
+        assert(s.output_res == OutputDefault);
         Save();
-        Load();
-        assert(s.output_native);
-        assert(s.output_res >= 0 && s.output_res < OutputCount);
-        write_config("output_res=2560x1440\n");
-        Load();
-        assert(!s.output_native && s.output_res == 2);
+        config = std::fopen(path, "r");
+        assert(config);
+        char text[4096] = {};
+        const size_t n = std::fread(text, 1, sizeof(text) - 1, config);
+        std::fclose(config);
+        assert(n > 0 && std::strstr(text, "output_res=1920x1080\n"));
     }
     // The guest size of the session: the startup render resolution, built-in or a mod's.
     {

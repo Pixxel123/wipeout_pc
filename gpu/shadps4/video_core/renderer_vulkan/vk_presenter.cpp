@@ -12,7 +12,6 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
-#include "video_core/renderer_vulkan/output_resolution.h"
 #include "gow3_overlay.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
@@ -663,7 +662,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     fsr_settings.rcas_attenuation = Gow3Graphics::RcasAttenuation(graphics.rcas_strength);
     Gow3Settings::Get().image_width = int(image_size.width);
     Gow3Settings::Get().image_height = int(image_size.height);
-    // gow3: the guest display buffer, before the upscaler's override ("Native (window)").
+    // gow3: the guest display buffer, before the upscaler's override.
     Gow3Settings::Get().game_width = int(attribute.attrib.width);
     Gow3Settings::Get().game_height = int(attribute.attrib.height);
     static bool mismatch_logged = false;
@@ -1080,23 +1079,17 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     if (width <= 0 || height <= 0) {
         return; // no surface (minimized window): keep the last frame size
     }
-    // gow3: "Native (window)" reads the swapchain (output_resolution.h). Its frame is the output
-    // size, so the image reaches it without a rescale.
-    auto& settings = Gow3Settings::Get();
-    settings.window_width = width;
-    settings.window_height = height;
-    if (settings.output_native && !Gow3Settings::FixedRenderSession() &&
-        SceneResolution::NativeRender({u32(settings.game_width), u32(settings.game_height)})) {
-        const auto [w, h] = OutputResolution::Frame(width, height);
-        if (w) {
-            expected_frame_width = w;
-            expected_frame_height = h;
-            return;
-        }
+    // gow3: the window (swapchain) size, for the overlay.
+    Gow3Settings::Get().window_width = width;
+    Gow3Settings::Get().window_height = height;
+    const float ratio = float(width) / float(height);
+    expected_frame_width = width;
+    expected_frame_height = height;
+    if (ratio > expected_ratio) {
+        expected_frame_width = u32(height * expected_ratio);
+    } else {
+        expected_frame_height = u32(width / expected_ratio);
     }
-    const auto [w, h] = OutputResolution::Fit(width, height, expected_ratio);
-    expected_frame_width = w;
-    expected_frame_height = h;
 }
 
 } // namespace Vulkan

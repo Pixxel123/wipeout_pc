@@ -200,7 +200,6 @@ private:
     bool done_this_frame = false;
     u32 preset_file_frames = 0; ///< GOW3_PRESET_FILE polling
     u32 applied_output_width = 0, applied_output_height = 0;
-    OutputResolution::Settled native_settled; ///< "Native (window)" resizes
     bool snapshot_taken = false;
     bool opaque_valid = false;
     bool mask_ready = false;
