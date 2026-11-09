@@ -226,6 +226,17 @@ class MonitorModesTest(unittest.TestCase):
     def test_a_saved_size_and_mods_are_kept_once(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='2256x1504', modes=QHD_MODES)
         self.assertEqual([v for v, _t in options], ['1440p', '2256x1504', 'native'])
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='3840x1080', mods=['3840x1080'], modes=QHD_MODES)
+        self.assertEqual([v for v, _t in options], ['1440p', 'native'])
+
+    def test_a_kept_size_that_is_the_saved_one_is_listed_once(self):
+        # At launcher open the live value is the ini value: both reach the list as the same name.
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='2256x1504', keep=('2256x1504',), modes=QHD_MODES)
+        self.assertEqual([v for v, _t in options], ['1440p', '2256x1504', 'native'])
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='4K', keep=('4K',), modes=QHD_MODES)
+        self.assertEqual([v for v, _t in options], ['1440p', '4K', 'native'])
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080), saved='2256x1504', keep=('2256x1504',))
+        self.assertEqual([v for v, _t in options], ['native', '2256x1504'])
 
     def test_kept_sizes_stay_like_the_saved_one(self):
         # The size the launcher opened with is kept beside the live one the Render scale row set.
@@ -244,8 +255,6 @@ class MonitorModesTest(unittest.TestCase):
         self.assertEqual(options['1440p'], ('2560 × 1440 (Native)',))
         self.assertEqual(launcher.your_screen_choice((3840, 2160)), ('4K', ('3840 × 2160 (Native)',)))
         self.assertEqual(launcher.your_screen_choice((5120, 2880)), ('5120x2880', ('5120 × 2880 (Native)  ⚠',)))
-        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='3840x1080', mods=['3840x1080'], modes=QHD_MODES)
-        self.assertEqual([v for v, _t in options], ['1440p', 'native'])
 
     def test_a_saved_size_below_the_floor_stays_listed(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='720p', modes=QHD_MODES)
@@ -326,6 +335,13 @@ class GameGateTest(unittest.TestCase):
         for options in (app.game_resolution_options(), app.resolution_options()):
             self.assertIn('2256x1504', self.values(options))
             self.assertIn('4K', self.values(options))
+
+    def test_the_opened_size_is_listed_once_before_anything_changes(self):
+        app = self.app('CUSA07671', saved='2256x1504')  # no live variable yet: live and opened-with are the same name
+        app.screen_size = (2560, 1440)
+        app.display_modes = QHD_MODES
+        for options in (app.game_resolution_options(), app.resolution_options()):
+            self.assertEqual(self.values(options).count('2256x1504'), 1, self.values(options))
 
     def test_wipeout_lists_start_with_the_screen(self):
         app = self.app('CUSA07671')
