@@ -146,6 +146,11 @@ class GraphicsOptionsTest(unittest.TestCase):
             ],
         )
 
+    def test_generated_sizes_are_labelled_beta(self):
+        self.assertEqual(g.resolution_label('2256x1504'), '2256 × 1504 · 3:2 (beta)')
+        self.assertEqual(g.resolution_label('1366x768'), '1366 × 768 · 16:9 (beta)')
+        self.assertEqual(g.resolution_label('1440p'), '1440p · 2560 × 1440 · 16:9')
+
     def test_resolution_labels_show_the_size_and_aspect_ratio(self):
         self.assertEqual(g.resolution_label('native'), 'Native · 1920 × 1080 · 16:9')
         self.assertEqual(g.resolution_label('480p'), '480p · 854 × 480 · 16:9')
@@ -156,8 +161,8 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertEqual(g.resolution_label('1280x800'), '1280 × 800 · 16:10')  # the Steam Deck's screen, tested
         self.assertEqual(g.resolution_label('1280x960'), '1280 × 960 · 4:3')
         self.assertEqual(g.resolution_label('1920x1440'), '1920 × 1440 · 4:3 (beta)')
-        self.assertEqual(g.resolution_label('3840x1080'), '3840 × 1080 · 32:9')  # a mod's size, not beta
-        self.assertEqual(g.resolution_label('1600x1200'), '1600 × 1200 · 4:3')
+        self.assertEqual(g.resolution_label('3840x1080'), '3840 × 1080 · 32:9 (beta)')  # not built in: beta
+        self.assertEqual(g.resolution_label('1600x1200'), '1600 × 1200 · 4:3 (beta)')
         self.assertEqual(g.resolution_label('custom'), 'custom')
         # Every ultrawide and 16:10 size is beta; the 16:9 ones are not.
         self.assertEqual([r for r in g.RESOLUTIONS if g.resolution_label(r).endswith('(beta)')],

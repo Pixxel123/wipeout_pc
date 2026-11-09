@@ -131,7 +131,7 @@ def resolution_label(name, aspect=True):
         return name
     title = 'Native' if name == 'native' else name if name in SIZES else None
     label = ' · '.join(p for p in (title, f'{width} × {height}', aspect and aspect_name(width, height)) if p)
-    return label + (' (beta)' if name in BETA_RESOLUTIONS else '')
+    return label + (' (beta)' if name in BETA_RESOLUTIONS or (name not in RESOLUTIONS and name not in TESTED_RESOLUTIONS) else '')
 
 
 def startup_options(ini, extra=()):

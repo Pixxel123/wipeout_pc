@@ -41,7 +41,7 @@ class ModResolutionsTest(LauncherOverTemporaryFiles):
         self.app.refresh_lists()  # the Mods page lists the new folder
         self.assertEqual(self.sizes(), builtin + ['3840x1080'])
         label = dict(self.app.resolution_options())['3840x1080'][0]
-        self.assertEqual(label, '3840 × 1080 · 32:9 (mod)')
+        self.assertEqual(label, '3840 × 1080 · 32:9 (beta) (mod)')
         self.app.mod_vars['Ultrawide'].set(False)  # unticked on the Mods page
         self.assertEqual(self.sizes(), builtin)
         self.app.mod_vars['Ultrawide'].set(True)
@@ -54,7 +54,7 @@ class ModResolutionsTest(LauncherOverTemporaryFiles):
         self.app.var('render_resolution', 'ini').set('3840x1080')
         self.root.update()
         self.assertEqual(self.app.var('render_resolution', 'ini').get(), '3840x1080')
-        self.assertIn('3840 × 1080 · 32:9 (mod)', self.app.summary())
+        self.assertIn('3840 × 1080 · 32:9 (beta) (mod)', self.app.summary())
 
 
 if __name__ == '__main__':

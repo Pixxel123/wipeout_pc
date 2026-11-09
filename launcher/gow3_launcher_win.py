@@ -247,6 +247,64 @@ def monitor_under_pointer(root):
     return monitors[0] if monitors else (0, 0, 0, 0)
 
 
+MIN_SCREEN = (1280, 720)  # smaller screens keep the game's own sizes: the presets would render below 640x360
+
+
+def monitor_size(root):
+    """(width, height) of the monitor the launcher is on, in pixels; (0, 0) if unknown."""
+    try:
+        if root.tk.call('tk', 'windowingsystem') == 'x11':
+            _x, _y, width, height = monitor_under_pointer(root)
+            if width and height:
+                return width, height
+        return root.winfo_screenwidth(), root.winfo_screenheight()
+    except Exception:
+        return 0, 0
+
+
+def your_screen_choice(size):
+    """(value, (label,)) of the monitor's size as a render resolution: a hand-made size by its name,
+    any other even size as "<width>x<height>" (generated at start, beta); None below MIN_SCREEN."""
+    width, height = int(size[0]) & ~1, int(size[1]) & ~1
+    if width < MIN_SCREEN[0] or height < MIN_SCREEN[1]:
+        return None
+    name = next((n for n in graphics_options.RESOLUTIONS if graphics_options.resolution_size(n) == (width, height)),
+                f'{width}x{height}')
+    beta = name not in graphics_options.RESOLUTIONS
+    label = f'Your screen · {width} × {height} · {graphics_options.aspect_name(width, height)}' + (' (beta)' if beta else '')
+    return name, (label,)
+
+
+def resolution_choices_for(names, size, saved=None):
+    """The Render resolution list: "Your screen" first, then `names` (hand-made and profile sizes,
+    without a duplicate), then a saved size nobody lists (generated, beta) so it stays selectable."""
+    choices = []
+    screen = your_screen_choice(size)
+    if screen:
+        choices.append(screen)
+    choices += [(n, (graphics_options.resolution_label(n),)) for n in names if not screen or n != screen[0]]
+    if saved and saved not in dict(choices) and graphics_options.generated_resolution(saved, names):
+        choices.append((saved, (graphics_options.resolution_label(saved),)))
+    return choices
+
+
+def default_render_resolution(ini, size):
+    """A fresh gow3.ini starts at the monitor's size; a saved value is never overridden."""
+    if ini.get('render_resolution'):
+        return ini['render_resolution']
+    screen = your_screen_choice(size)
+    return screen[0] if screen else 'native'
+
+
+def fresh_render_resolution(lines, size, offered):
+    """What a new gow3.ini (no file, or one without lines) is given, None to leave it alone: a file
+    that has other keys is an existing install, and native is what the file's absence means."""
+    if lines or not offered:
+        return None
+    value = default_render_resolution({}, size)
+    return None if value == 'native' else value
+
+
 def pick_fonts(families):
     """Prefer installed desktop fonts, ending with Tk's portable font aliases."""
     global UI_FONT, MONO_FONT, SERIF_FONT, FONT_LOADED
@@ -1420,6 +1478,8 @@ class Launcher:
         self.desktop_scale = desktop_ui_scale(root)
         self.monitor = (monitor_under_pointer(root) if root.tk.call('tk', 'windowingsystem') == 'x11'
                         else (0, 0, 0, 0))
+        self.screen_size = monitor_size(root)
+        self.write_fresh_render_resolution()
         self.apply_ui_scale()
         self.size_window()
         self.set_icon()
@@ -1655,8 +1715,33 @@ class Launcher:
                 if size not in graphics_options.RESOLUTIONS]
 
     def resolution_options(self):
-        """The render resolutions to choose from: the built-in ones and those of the enabled mods."""
-        return RESOLUTION_CHOICES + self.mod_resolutions()
+        """The render resolutions to choose from: the built-in ones and those of the enabled mods,
+        for WipEout after "Your screen"."""
+        if not self.offers_your_screen():
+            return RESOLUTION_CHOICES + self.mod_resolutions()
+        return resolution_choices_for([v for v, _t in RESOLUTION_CHOICES], self.screen_size,
+                                      saved=self.ini.get('render_resolution')) + self.mod_resolutions()
+
+    def offers_your_screen(self):
+        """Whether "Your screen" is on the lists: it may need a generated patch, and only WipEout's binary
+        has the sites for one. With no game chosen, or no readable title id, it is: this launcher ships for WipEout."""
+        from patches import game_title_id
+        folder = self.vars['game_dir'].get() if 'game_dir' in self.vars else self.app.get('game_dir')
+        title_id = game_title_id(folder) if folder else None
+        return not title_id or title_id in graphics_options.GENERATED_TITLES
+
+    def write_fresh_render_resolution(self):
+        """A new gow3.ini starts at the monitor's size. Written here, before any variable shows it:
+        run.py reads the file, and Save skips a value that matches what the launcher opened with."""
+        value = fresh_render_resolution(self.ini_lines, self.screen_size, self.offers_your_screen())
+        if not value:
+            return
+        self.ini['render_resolution'] = value
+        try:
+            save_ini({'render_resolution': value}, self.ini_lines)
+            self.ini_lines = load_ini()[1]
+        except OSError:
+            pass  # a read-only folder: the window still shows it, and Save reports the problem
 
     def aspect_var(self):
         """The Aspect ratio filter (Home and Performance): not saved, it follows the render resolution;
@@ -1681,18 +1766,23 @@ class Launcher:
 
     def game_resolution_options(self):
         """The render resolutions with a patch for the chosen game (its profile's
-        GOW3_ALLOWED_RESOLUTIONS), else all built-in ones."""
+        GOW3_ALLOWED_RESOLUTIONS), else all built-in ones; for WipEout after "Your screen"."""
         import game_profiles
         from patches import game_title_id
         folder = self.var('game_dir', 'app').get()
         title_id = game_title_id(folder) if folder else None
         allowed = game_profiles.PROFILES.get(title_id, {}).get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS')
-        if not allowed:
-            return RESOLUTION_CHOICES
-        names = allowed.split(';')
-        return [(n, t) for n, t in RESOLUTION_CHOICES if n in names] + \
-            [(n, (graphics_options.resolution_label(n),)) for n in names
-             if n not in dict(RESOLUTION_CHOICES)]
+        if allowed:
+            names = allowed.split(';')
+            choices = [(n, t) for n, t in RESOLUTION_CHOICES if n in names] + \
+                [(n, (graphics_options.resolution_label(n),)) for n in names
+                 if n not in dict(RESOLUTION_CHOICES)]
+        else:
+            choices = RESOLUTION_CHOICES
+        if not self.offers_your_screen():
+            return choices
+        return resolution_choices_for([v for v, _t in choices], self.screen_size,
+                                      saved=self.ini.get('render_resolution'))
 
     def aspect_options(self):
         """The aspect ratios the render resolutions have (built-in and mods)."""
@@ -2027,6 +2117,9 @@ class Launcher:
         self.build_display(f)
         self.section(f, _('Resolution'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options()),
+                 _('Your screen is the size of this monitor. Sizes with a patch are tested; any other size is '
+                   'generated at start (beta). Wider than 16:9 keeps the HUD at 16:9.')
+                 if self.offers_your_screen() else
                  _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
         self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
