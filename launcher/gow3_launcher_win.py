@@ -250,11 +250,12 @@ def monitor_under_pointer(root):
 MIN_SCREEN = graphics_options.MIN_GENERATED  # smaller monitors get no row of their own: see MIN_GENERATED
 
 
-def monitor_size(root):
-    """(width, height) of the monitor the launcher is on, in pixels; (0, 0) if unknown."""
+def monitor_size(root, monitor):
+    """(width, height) of the monitor the launcher is on, in pixels; (0, 0) if unknown. `monitor` is
+    monitor_under_pointer's answer (X11 only), so xrandr runs once."""
     try:
         if root.tk.call('tk', 'windowingsystem') == 'x11':
-            _x, _y, width, height = monitor_under_pointer(root)
+            _x, _y, width, height = monitor
             if width and height:
                 return width, height
         return root.winfo_screenwidth(), root.winfo_screenheight()
@@ -279,23 +280,41 @@ def plain_size_label(name):
     return f'{size[0]} × {size[1]}' if size else name
 
 
-def resolution_choices_for(names, size, saved=None):
-    """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then `names`
-    (hand-made and profile sizes, without a duplicate) that fit the monitor, then a saved size nobody
-    lists (generated) so it stays selectable. The game's own size and the saved size are never dropped."""
-    choices = []
+def resolution_choices_for(names, size, saved=None, mods=()):
+    """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then, largest
+    first, `names` (hand-made and profile sizes, without a duplicate) that take effect and fit the monitor,
+    with a saved size nobody lists (generated) so it stays selectable. Below MIN_GENERATED a size is inert
+    (the game keeps 1920x1080 and the upscaler stays off). The game's own size and the saved size are never
+    dropped. `mods`: the sizes the enabled mods list themselves, which need no saved row here."""
     screen = your_screen_choice(size)
-    if screen:
-        choices.append(screen)
+    choices = [screen] if screen else []
     limit = screen and graphics_options.resolution_size(screen[0])
+    floor = graphics_options.MIN_GENERATED
 
-    def fits(name):
+    def listed(name):
         row = graphics_options.resolution_size(name)
-        return not limit or not row or name in ('native', saved) or (row[0] <= limit[0] and row[1] <= limit[1])
-    choices += [(n, (plain_size_label(n),)) for n in names if (not screen or n != screen[0]) and fits(n)]
-    if saved and saved not in dict(choices) and graphics_options.generated_resolution(saved, names):
+        if not row or name in ('native', saved):
+            return True
+        if row[0] < floor[0] or row[1] < floor[1]:
+            return False
+        return not limit or (row[0] <= limit[0] and row[1] <= limit[1])
+
+    def largest_first(choice):
+        row = graphics_options.resolution_size(choice[0])
+        return (0, -row[0], -row[1]) if row else (1, 0, 0)
+    choices += [(n, (plain_size_label(n),)) for n in names if (not screen or n != screen[0]) and listed(n)]
+    if saved and saved not in dict(choices) and graphics_options.generated_resolution(saved, [*names, *mods]):
         choices.append((saved, (plain_size_label(saved),)))
-    return choices
+    head = 1 if screen else 0
+    return choices[:head] + sorted(choices[head:], key=largest_first)
+
+
+def stale_render_resolution(options, size, deck):
+    """What a saved render resolution that is not in `options` becomes. The first row is right only when
+    it is the monitor's and this is no Deck: a docked Deck must not land on its monitor's size, and
+    without a monitor's row the first row is simply the largest size."""
+    values = [v for v, _t in options]
+    return 'native' if (deck or not your_screen_choice(size)) and 'native' in values else values[0]
 
 
 def default_render_resolution(ini, size):
@@ -1489,7 +1508,7 @@ class Launcher:
         self.desktop_scale = desktop_ui_scale(root)
         self.monitor = (monitor_under_pointer(root) if root.tk.call('tk', 'windowingsystem') == 'x11'
                         else (0, 0, 0, 0))
-        self.screen_size = monitor_size(root)
+        self.screen_size = monitor_size(root, self.monitor)
         self.write_fresh_render_resolution()
         self.apply_ui_scale()
         self.size_window()
@@ -1678,9 +1697,10 @@ class Launcher:
             self.vars[key] = v
         return self.vars[key]
 
-    def choice(self, parent, key, store, options, width=30, var=None):
+    def choice(self, parent, key, store, options, width=30, var=None, stale=None):
         """A combobox over (value, (english, russian)) pairs, kept in sync with its variable.
-        `options` can be a function returning the pairs: it is asked again each time the list opens."""
+        `options` can be a function returning the pairs: it is asked again each time the list opens.
+        `stale(pairs)`: the value a variable that is not on the list becomes (default: the first row)."""
         var = var if var is not None else self.var(key, store)
         pairs = options if callable(options) else (lambda: options)
 
@@ -1700,7 +1720,7 @@ class Launcher:
         texts = labels()
         box = self.ttk.Combobox(parent, values=texts, state='readonly', width=fit(texts), postcommand=reload)
         if var.get() not in values():
-            var.set(values()[0])
+            var.set(stale(pairs()) if stale else values()[0])
 
         def show(*_args):
             reload()  # the list may have changed since it was last opened
@@ -1730,8 +1750,9 @@ class Launcher:
         for WipEout after the monitor's row."""
         if not self.offers_your_screen():
             return RESOLUTION_CHOICES + self.mod_resolutions()
+        mods = self.mod_resolutions()
         return resolution_choices_for([v for v, _t in RESOLUTION_CHOICES], self.screen_size,
-                                      saved=self.ini.get('render_resolution')) + self.mod_resolutions()
+                                      saved=self.ini.get('render_resolution'), mods=[v for v, _t in mods]) + mods
 
     def offers_your_screen(self):
         """Whether the monitor's row is on the lists: it may need a generated patch, and only WipEout's binary
@@ -2128,7 +2149,9 @@ class Launcher:
         f = self.scrolled_page('graphics', _('Graphics', 'Графика'), _('How the game appears on your screen.'))
         self.build_display(f)
         self.section(f, _('Resolution'))
-        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options()),
+        stale = ((lambda options: stale_render_resolution(options, self.screen_size, steam_deck()))
+                 if self.offers_your_screen() else None)
+        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options(), stale=stale),
                  _('Native is the size of this monitor when it is 1920 × 1080 or larger. Sizes without a patch are '
                    'generated at start. Wider than 16:9 keeps the HUD at 16:9.')
                  if self.offers_your_screen() else

@@ -2,8 +2,8 @@
 
 **English** | [Português (Brasil)](#português-brasil)
 
-The ultrawide sizes are **built in**: choose one in **Render resolution** (launcher or in-game menu); they are
-marked "(beta)". Before that they were a **mod**, still available for older versions: the folder
+The ultrawide sizes are **built in**: choose one in **Render resolution** (launcher or in-game menu); the in-game
+menu marks them "(beta)", and WipEout's launcher list shows the plain size. Before that they were a **mod**, still available for older versions: the folder
 [`extras/mods/Ultrawide`](../extras/mods/Ultrawide)
 (install steps in its README). It uses the patch support of mods: a mod folder can carry game patches
 (XML files with signatures, in its `patches/` folder), applied while the mod is ticked on the Mods
@@ -23,27 +23,33 @@ its proportions, and the vertical view is the same as at 16:9.
 | 5120 × 2160 | 21:9 | **Tested in game** by two players (issue #505); it uses the largest Video Arena the patch can hold (3.98 GiB) |
 | 1920 × 1200 | 16:10 | **Tested in game** (taller than 16:9: no field of view change) |
 | 2560 × 1600 | 16:10 | **Tested in game** (taller than 16:9: no field of view change) |
-| 1280 × 800 | 16:10 | **Tested in game** (the Steam Deck's screen) |
-| 1280 × 960, 1440 × 1080, 1920 × 1440, 2048 × 1536, 2560 × 1920 | 4:3 | **1280 × 960 and 1920 × 1440 tested** (menu and gameplay: 1280 × 960 on a 5:4 monitor, 1920 × 1440 by a player on a 4:3 CRT, issue #519); the others are not (taller than 16:9, but the game letterboxes on exactly 4:3: the patch avoids that) |
-| 1440 × 900 | 16:10 | **Tested in game** |
-| 1360 × 768 | 16:9 | **Tested in game** (the shape of the original picture; no aspect ratio or field of view change) |
+| 1280 × 800 | 16:10 | **Tested in game** (the Steam Deck's screen); see the WipEout note below |
+| 1280 × 960, 1440 × 1080, 1920 × 1440, 2048 × 1536, 2560 × 1920 | 4:3 | **1280 × 960 and 1920 × 1440 tested** (menu and gameplay: 1280 × 960 on a 5:4 monitor, 1920 × 1440 by a player on a 4:3 CRT, issue #519); the others are not (taller than 16:9, but the game letterboxes on exactly 4:3: the patch avoids that); see the WipEout note below |
+| 1440 × 900 | 16:10 | **Tested in game**; see the WipEout note below |
+| 1360 × 768 | 16:9 | **Tested in game** (the shape of the original picture; no aspect ratio or field of view change); see the WipEout note below |
 
 Every size but 1440x1080, 2048x1536 and 2560x1920 was tested in game: on an RX 6700 XT (Windows 11, reference build `d85c8135…`), and
 3440x1440, 5120x1440, 1920x1200 and 2560x1600 also by players in issue #180, 5120x2160 by two players in #505 and 1920x1440 by a player in #519 (thank you!). They stay marked
 "(beta)" until more screens and GPUs confirm them. **If something looks wrong on yours, please say how it looks**
 (an issue): the resolution, your GPU, and whether anything is cropped, stretched or missing at the edges.
 
+**WipEout note:** in WipEout, a size below 1920 × 1080 does not take effect. Measured on the Steam Deck with 720p, 900p
+and 1280 × 800: the patch applies, but the game keeps its 1920 × 1080 targets and the upscaler stays off. The launcher
+does not list those sizes for WipEout. This was not measured on God of War III, and says nothing about it.
+
 ### Any size
 
 The launcher's **Render resolution** list for WipEout starts with the size of the monitor the launcher is on, marked
-**(Native)**, when that monitor is 1920 × 1080 or larger, and then lists the plain sizes that fit it. A size in the
+**(Native)**, when that monitor is 1920 × 1080 or larger, and then lists, largest first, the plain sizes that fit it
+and take effect. A size in the
 table above uses its tested entry. Any other even size (a 3:2 laptop at 2256 × 1504) is **generated at start** from
 the same sites by `scripts/graphics_options.py`
 (`resolution_patch_lines`): output size, half-resolution buffers, the camera aspect ratio, and 1 GB more video memory
 from 4.5 megapixels. Generated sizes are beta until tested; the HUD stays 16:9 in the middle, and sizes
 3840 pixels wide and up need the "Native 4K rendering" patch, which is on by default. The upscaling presets render
 below any render resolution and upscale back to it. Generated sizes need at least 1920 × 1080: below the game's own
-size, the size does not take effect.
+size, the size does not take effect. A generated size appears in the in-game menu only while it is the current
+setting, so switching back needs the launcher.
 
 ### Known limitations (outside 16:9)
 
@@ -58,9 +64,9 @@ They come from the game, which is built for 16:9, and are already known; they wi
 
 ## Using it
 
-Choose a size in **Render resolution** (launcher, **Home** and **Performance**) or in the in-game menu (Insert or
-R3+L2 → Performance → Render resolution). Each one shows its exact size and aspect ratio, for example
-`3440 × 1440 · 21:9 (beta)`. Pick one and **PLAY** (in the game menu: "Apply and restart"). The **Engine frame
+Choose a size in **Render resolution** (launcher, **Graphics** page) or in the in-game menu (Insert or
+R3+L2 → Performance → Render resolution). The in-game menu shows the exact size and aspect ratio, for example
+`3440 × 1440 · 21:9 (beta)`; WipEout's launcher list shows `3440 × 1440`, with `(Native)` on the monitor's own row. Pick one and **PLAY** (in the game menu: "Apply and restart"). The **Engine frame
 rate** (60, 100, 120 or 240) is a separate choice that works with any resolution.
 
 **Older versions (before 2.4.0):** put `Ultrawide.zip` (made with `python tools/zip_mod.py extras/mods/Ultrawide`)
@@ -129,14 +135,14 @@ python tools/make_ultrawide_patch.py --rebase path/to/eboot_d85c.bin 3440 1440 -
 
 ## Português (Brasil)
 
-As resoluções ultrawide são **embutidas**: escolha em **Resolução de renderização** (launcher ou menu do jogo);
-elas aparecem com "(beta)". Antes eram um **mod**, que continua disponível para versões antigas: a pasta
+As resoluções ultrawide são **embutidas**: escolha em **Resolução de renderização** (launcher ou menu do jogo).
+Antes eram um **mod**, que continua disponível para versões antigas: a pasta
 [`extras/mods/Ultrawide`](../extras/mods/Ultrawide) (o passo a
 passo está no README dela). Ele usa o suporte a patches dos mods: uma pasta de mod pode trazer patches de
 jogo (arquivos XML com assinaturas, na pasta `patches/`), aplicados enquanto o mod está marcado na página
 Mods. Veja [MODS.md](MODS.md).
 
-A lista **Resolução de renderização** começa, no WipEout, com o tamanho do monitor, marcado **(Nativa)**, quando ele tem 1920 × 1080 ou mais, e depois mostra os tamanhos que cabem nele. Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par de pelo menos 1920 × 1080 é gerado ao iniciar (beta): abaixo do tamanho do próprio jogo, o tamanho não tem efeito.
+A lista **Resolução de renderização** começa, no WipEout, com o tamanho do monitor, marcado **(Nativa)**, quando ele tem 1920 × 1080 ou mais, e depois mostra, do maior para o menor, os tamanhos que cabem nele e têm efeito. Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par de pelo menos 1920 × 1080 é gerado ao iniciar (beta): abaixo do tamanho do próprio jogo, o tamanho não tem efeito. No WipEout, nada abaixo de 1920 × 1080 tem efeito (medido no Steam Deck com 720p, 900p e 1280 × 800; o God of War III não foi medido), a lista do launcher mostra `3440 × 1440`, com `(Nativa)` na linha do próprio monitor, o menu do jogo mantém os rótulos longos com "(beta)", e um tamanho gerado só aparece no menu do jogo enquanto for o atual, então voltar exige o launcher.
 
 A câmera do jogo tem campo de visão *horizontal* fixo. Aumentar a resolução para um tamanho ultrawide sem
 mexer na câmera só corta a imagem de 16:9 em cima e embaixo, e ela parece com zoom. Cada entrada
@@ -150,8 +156,8 @@ resolução, a placa de vídeo e o que aparece cortado, esticado ou faltando nas
 (1920x1200 e 2560x1600): como a câmera mantém o campo horizontal, uma imagem mais alta só mostra mais em cima e
 embaixo, então essas entradas mudam apenas a resolução e o aspect ratio.
 
-**Como usar:** escolha um tamanho em **Resolução de renderização** (launcher, páginas **Início** e
-**Desempenho**) ou no menu do jogo (Insert ou R3+L2 → Performance → Render resolution). Cada opção mostra a
+**Como usar:** escolha um tamanho em **Resolução de renderização** (launcher, página
+**Gráficos**) ou no menu do jogo (Insert ou R3+L2 → Performance → Render resolution). O menu do jogo mostra a
 resolução exata e a proporção, por exemplo `3440 × 1440 · 21:9 (beta)`. Escolha e clique em **JOGAR**. A **Taxa
 de quadros do motor** (60, 100, 120 ou 240) é uma escolha à parte e vale com qualquer resolução. **Versões antigas
 (antes da 2.4.0):** coloque o `Ultrawide.zip` (gerado com `python tools/zip_mod.py extras/mods/Ultrawide`) ou a

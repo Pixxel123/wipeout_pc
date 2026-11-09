@@ -10,6 +10,10 @@ import gow3_launcher_win as launcher  # noqa: E402
 import test_launcher_diagnostics_layout as layout  # noqa: E402
 
 
+WIPEOUT_SIZES = ['native', '720p', '900p', '1440p', '4K', '2560x1080', '3440x1440', '3840x1600', '5120x1440', '1920x1200',
+                 '2560x1600', '2880x1800', '1920x1440', '5120x2160']
+
+
 class YourScreenTest(unittest.TestCase):
     def test_hand_made_sizes_keep_their_name(self):
         self.assertEqual(launcher.your_screen_choice((2560, 1440)), ('1440p', ('2560 × 1440 (Native)',)))
@@ -36,27 +40,32 @@ class YourScreenTest(unittest.TestCase):
     def test_options_put_your_screen_first_without_duplicates(self):
         options = launcher.resolution_choices_for(['native', '1440p', '3440x1440'], (2560, 1440), saved='3440x1440')
         self.assertEqual(options[0], ('1440p', ('2560 × 1440 (Native)',)))
-        self.assertEqual([v for v, _t in options], ['1440p', 'native', '3440x1440'])
+        self.assertEqual([v for v, _t in options], ['1440p', '3440x1440', 'native'])
         options = launcher.resolution_choices_for(['native', '1440p'], (2256, 1504), saved='1440p')
-        self.assertEqual([v for v, _t in options], ['2256x1504', 'native', '1440p'])
+        self.assertEqual([v for v, _t in options], ['2256x1504', '1440p', 'native'])
 
     def test_a_saved_generated_size_stays_selectable(self):
         options = launcher.resolution_choices_for(['native', '720p'], (1920, 1080), saved='2256x1504')
-        self.assertEqual([v for v, _t in options], ['native', '720p', '2256x1504'])
+        self.assertEqual([v for v, _t in options], ['native', '2256x1504'])
         self.assertEqual(dict(options)['2256x1504'], ('2256 × 1504',))
 
     def test_a_saved_size_below_the_floor_is_not_kept(self):
         for saved in ('1280x800', '1366x768'):
             options = launcher.resolution_choices_for(['native', '720p'], (1920, 1080), saved=saved)
-            self.assertEqual([v for v, _t in options], ['native', '720p'], saved)
+            self.assertEqual([v for v, _t in options], ['native'], saved)
 
     def test_rows_are_plain_sizes(self):
-        options = dict(launcher.resolution_choices_for(['native', '720p', '1440p'], (2560, 1440)))
-        self.assertEqual(options, {'1440p': ('2560 × 1440 (Native)',), 'native': ('1920 × 1080',), '720p': ('1280 × 720',)})
+        options = dict(launcher.resolution_choices_for(['native', '2560x1080', '1440p'], (2560, 1440)))
+        self.assertEqual(options, {'1440p': ('2560 × 1440 (Native)',), 'native': ('1920 × 1080',),
+                                   '2560x1080': ('2560 × 1080',)})
 
     def test_a_1080p_monitor_has_one_native_row(self):
         options = launcher.resolution_choices_for(['native', '1440p'], (1920, 1080), saved='1440p')
         self.assertEqual(options, [('native', ('1920 × 1080 (Native)',)), ('1440p', ('2560 × 1440',))])
+
+    def test_a_1080p_monitor_lists_exactly_one_row(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080))
+        self.assertEqual(options, [('native', ('1920 × 1080 (Native)',))])
 
     def test_exactly_one_row_says_native(self):
         for size in ((2560, 1440), (2256, 1504), (1920, 1080)):
@@ -65,29 +74,52 @@ class YourScreenTest(unittest.TestCase):
 
     def test_only_sizes_that_fit_the_monitor_are_listed(self):
         options = launcher.resolution_choices_for(['native', '720p', '900p', '1440p', '4K', '3440x1440'], (2560, 1440))
-        self.assertEqual([v for v, _t in options], ['1440p', 'native', '720p', '900p'])
+        self.assertEqual([v for v, _t in options], ['1440p', 'native'])
 
     def test_a_size_too_tall_for_the_monitor_is_dropped(self):
         options = launcher.resolution_choices_for(['native', '2560x1080', '2560x1600'], (2560, 1440))
-        self.assertEqual([v for v, _t in options], ['1440p', 'native', '2560x1080'])
+        self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', 'native'])
+
+    def test_sizes_below_the_games_own_are_dropped(self):
+        for size in ((2560, 1440), (1280, 800)):
+            values = [v for v, _t in launcher.resolution_choices_for(['native', '720p', '900p', '1280x800', '1360x768'], size)]
+            self.assertEqual([v for v in values if v in ('720p', '900p', '1280x800', '1360x768')], [], size)
+            self.assertIn('native', values, size)
+
+    def test_a_saved_size_below_the_games_own_stays_listed(self):
+        options = launcher.resolution_choices_for(['native', '720p', '900p'], (2560, 1440), saved='720p')
+        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('native', ('1920 × 1080',)), ('720p', ('1280 × 720',))])
+
+    def test_rows_after_the_native_one_are_largest_first(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (3840, 2160))
+        self.assertEqual([v for v, _t in options], ['4K', '3840x1600', '3440x1440', '2880x1800', '2560x1600', '1440p', '2560x1080',
+                                                    '1920x1440', '1920x1200', 'native'])
+
+    def test_a_name_without_a_size_stays_at_the_end(self):
+        options = launcher.resolution_choices_for(['custom', 'native', 'other', '2560x1080'], (2560, 1440))
+        self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', 'native', 'custom', 'other'])
+
+    def test_a_saved_mod_size_has_no_row_of_its_own(self):
+        options = launcher.resolution_choices_for(['native'], (2560, 1440), saved='3840x1080', mods=['3840x1080'])
+        self.assertEqual([v for v, _t in options], ['1440p', 'native'])
 
     def test_a_saved_size_that_does_not_fit_stays_listed(self):
         options = launcher.resolution_choices_for(['native', '1440p', '4K'], (2560, 1440), saved='4K')
-        self.assertEqual([v for v, _t in options], ['1440p', 'native', '4K'])
+        self.assertEqual([v for v, _t in options], ['1440p', '4K', 'native'])
         self.assertEqual(dict(options)['4K'], ('3840 × 2160',))
         options = launcher.resolution_choices_for(['native', '1440p'], (2560, 1440), saved='2880x1920')
-        self.assertEqual(options[-1], ('2880x1920', ('2880 × 1920',)))
+        self.assertEqual(options[1], ('2880x1920', ('2880 × 1920',)))
 
     def test_no_generated_row_is_marked_beta(self):
         for size, saved in (((2256, 1504), None), ((1920, 1080), '2256x1504')):
             labels = [t for _v, (t,) in launcher.resolution_choices_for(['native', '1440p'], size, saved=saved)]
             self.assertFalse([t for t in labels if 'beta' in t], size)
 
-    def test_without_a_monitor_row_nothing_is_filtered(self):
+    def test_without_a_monitor_row_larger_sizes_stay(self):
         names = ['native', '720p', '1280x800', '1440p', '4K', '3440x1440']
         for size in ((1280, 800), (0, 0)):
             options = launcher.resolution_choices_for(names, size)
-            self.assertEqual([v for v, _t in options], names, size)
+            self.assertEqual([v for v, _t in options], ['4K', '3440x1440', '1440p', 'native'], size)
             self.assertFalse([t for _v, (t,) in options if '(Native)' in t], size)
             self.assertEqual(dict(options)['native'], ('1920 × 1080',), size)
 
@@ -96,6 +128,46 @@ class YourScreenTest(unittest.TestCase):
         self.assertEqual(launcher.default_render_resolution({'render_resolution': '1440p'}, (2256, 1504)), '1440p')
         self.assertEqual(launcher.default_render_resolution({}, (0, 0)), 'native')
         self.assertEqual(launcher.default_render_resolution({}, (1280, 800)), 'native')
+
+
+class StaleResolutionTest(unittest.TestCase):
+    """What a saved render resolution that is not on the list becomes."""
+
+    def test_a_deck_falls_to_native_docked_or_not(self):
+        for size in ((3840, 2160), (2560, 1440), (1280, 800)):
+            options = launcher.resolution_choices_for(WIPEOUT_SIZES, size)
+            self.assertEqual(launcher.stale_render_resolution(options, size, True), 'native', size)
+
+    def test_a_pc_falls_to_its_monitors_row(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (3840, 2160))
+        self.assertEqual(launcher.stale_render_resolution(options, (3840, 2160), False), '4K')
+
+    def test_without_a_monitor_row_the_largest_size_is_not_picked(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (1366, 768))
+        self.assertEqual(options[0][0], '5120x2160')
+        self.assertEqual(launcher.stale_render_resolution(options, (1366, 768), False), 'native')
+
+    def test_a_list_without_native_keeps_its_first_row(self):
+        options = [('720p', ('1280 × 720',)), ('900p', ('1600 × 900',))]
+        self.assertEqual(launcher.stale_render_resolution(options, (1280, 800), True), '720p')
+
+
+class MonitorSizeTest(unittest.TestCase):
+    def root(self):
+        root = mock.Mock()
+        root.tk.call.return_value = 'x11'
+        root.winfo_screenwidth.return_value, root.winfo_screenheight.return_value = 1024, 768
+        return root
+
+    def test_x11_reuses_the_monitor_already_read(self):
+        with mock.patch.object(launcher, 'monitor_under_pointer') as read:
+            self.assertEqual(launcher.monitor_size(self.root(), (100, 0, 2560, 1440)), (2560, 1440))
+        read.assert_not_called()
+
+    def test_an_unknown_monitor_uses_the_screen_size(self):
+        with mock.patch.object(launcher, 'monitor_under_pointer') as read:
+            self.assertEqual(launcher.monitor_size(self.root(), (0, 0, 0, 0)), (1024, 768))
+        read.assert_not_called()
 
 
 class FreshInstallTest(unittest.TestCase):
@@ -171,14 +243,15 @@ class GameGateTest(unittest.TestCase):
 
     def test_wipeout_lists_start_with_the_screen(self):
         app = self.app('CUSA07671')
-        self.assertEqual(self.values(app.game_resolution_options())[:2], ['2256x1504', 'native'])
-        self.assertEqual(self.values(app.resolution_options())[:2], ['2256x1504', 'native'])
+        self.assertEqual(self.values(app.game_resolution_options()), ['2256x1504', '1920x1440', '1920x1200', 'native'])
+        self.assertEqual(self.values(app.resolution_options()), ['2256x1504', '1920x1440', '1920x1200', 'native'])
 
-    def test_no_game_lists_every_built_in_size_after_the_screen(self):
+    def test_no_game_lists_every_built_in_size_that_takes_effect(self):
         app = self.app(None, folder='')
         app.screen_size = (7680, 4320)  # every built-in size fits
-        builtin = self.values(launcher.RESOLUTION_CHOICES)
-        self.assertEqual(self.values(app.game_resolution_options()), ['7680x4320'] + builtin)
+        self.assertEqual(self.values(app.game_resolution_options()),
+                         ['7680x4320', '5120x2160', '5120x1440', '4K', '3840x1600', '3440x1440', '1800p', '2560x1920', '2560x1600',
+                          '1440p', '2560x1080', '2048x1536', '1920x1440', '1920x1200', 'native'])
 
     def test_wipeout_lists_only_what_fits(self):
         app = self.app('CUSA07671')
@@ -205,9 +278,18 @@ class GameGateTest(unittest.TestCase):
             self.assertEqual(dict(app.resolution_options())['3840x1080'], ('3840 × 1080 · 32:9 (mod)',))
             self.assertEqual(dict(app.aspect_resolution_options())['3840x1080'], ('3840 × 1080 (mod)',))
 
+    def test_a_saved_mods_size_is_listed_once(self):
+        app = self.app('CUSA07671', saved='3840x1080')
+        app.vars.update({'mods_enabled': Var(True), 'mods_dir': Var('mods')})
+        app.mod_order, app.mod_vars = ['Ultrawide'], {'Ultrawide': Var(True)}
+        with mock.patch('mods.patch_files', return_value=['u.xml']), \
+                mock.patch('patches.resolution_names', return_value=['3840x1080']):
+            rows = [t for v, (t,) in app.resolution_options() if v == '3840x1080']
+        self.assertEqual(rows, ['3840 × 1080 · 32:9 (mod)'])
+
     def test_a_saved_size_is_kept_in_the_wipeout_list(self):
         app = self.app('CUSA07671', saved='1800p')  # built in, but WipEout has no patch of its own for it
-        self.assertEqual(self.values(app.game_resolution_options())[-1], '1800p')
+        self.assertEqual(self.values(app.game_resolution_options()), ['2256x1504', '1800p', '1920x1440', '1920x1200', 'native'])
 
 
 class FreshWindowTest(unittest.TestCase):
