@@ -250,9 +250,6 @@ def monitor_under_pointer(root):
 MIN_SCREEN = graphics_options.MIN_GENERATED  # smaller monitors get no row of their own: see MIN_GENERATED
 
 
-GAME_SIZE_LABEL = '1080p · 1920 × 1080 · 16:9'  # the 'native' row when the monitor's row says Native
-
-
 def monitor_size(root):
     """(width, height) of the monitor the launcher is on, in pixels; (0, 0) if unknown."""
     try:
@@ -267,31 +264,37 @@ def monitor_size(root):
 
 def your_screen_choice(size):
     """(value, (label,)) of the monitor's size as a render resolution: a hand-made size by its name,
-    any other even size as "<width>x<height>" (generated at start, beta); None below MIN_SCREEN. The row
-    reads "Native": the size a PC game calls native."""
+    any other even size as "<width>x<height>" (generated at start); None below MIN_SCREEN."""
     width, height = int(size[0]) & ~1, int(size[1]) & ~1
     if width < MIN_SCREEN[0] or height < MIN_SCREEN[1]:
         return None
     name = next((n for n in graphics_options.RESOLUTIONS if graphics_options.resolution_size(n) == (width, height)),
                 f'{width}x{height}')
-    beta = name not in graphics_options.RESOLUTIONS
-    label = f'Native · {width} × {height} · {graphics_options.aspect_name(width, height)}' + (' (beta)' if beta else '')
-    return name, (label,)
+    return name, (f"{width} × {height} ({_('Native', 'Родное')})",)
+
+
+def plain_size_label(name):
+    """A render resolution as a PC game lists it: '2560 × 1440'; anything without a size as it is."""
+    size = graphics_options.resolution_size(name)
+    return f'{size[0]} × {size[1]}' if size else name
 
 
 def resolution_choices_for(names, size, saved=None):
-    """The Render resolution list: the monitor's row first, then `names` (hand-made and profile sizes,
-    without a duplicate), then a saved size nobody lists (generated, beta) so it stays selectable. Only
-    one row says Native: beside a bigger monitor's row the game's own size reads 1080p."""
+    """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then `names`
+    (hand-made and profile sizes, without a duplicate) that fit the monitor, then a saved size nobody
+    lists (generated) so it stays selectable. The game's own size and the saved size are never dropped."""
     choices = []
     screen = your_screen_choice(size)
     if screen:
         choices.append(screen)
-    game_size = lambda n: screen and screen[0] != 'native' and n == 'native'
-    choices += [(n, (GAME_SIZE_LABEL if game_size(n) else graphics_options.resolution_label(n, generated=False),))
-                for n in names if not screen or n != screen[0]]
+    limit = screen and graphics_options.resolution_size(screen[0])
+
+    def fits(name):
+        row = graphics_options.resolution_size(name)
+        return not limit or not row or name in ('native', saved) or (row[0] <= limit[0] and row[1] <= limit[1])
+    choices += [(n, (plain_size_label(n),)) for n in names if (not screen or n != screen[0]) and fits(n)]
     if saved and saved not in dict(choices) and graphics_options.generated_resolution(saved, names):
-        choices.append((saved, (graphics_options.resolution_label(saved),)))
+        choices.append((saved, (plain_size_label(saved),)))
     return choices
 
 
@@ -2126,8 +2129,8 @@ class Launcher:
         self.build_display(f)
         self.section(f, _('Resolution'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options()),
-                 _('Native is the size of this monitor when it is 1920 × 1080 or larger. Sizes with a patch are '
-                   'tested; any other size is generated at start (beta). Wider than 16:9 keeps the HUD at 16:9.')
+                 _('Native is the size of this monitor when it is 1920 × 1080 or larger. Sizes without a patch are '
+                   'generated at start. Wider than 16:9 keeps the HUD at 16:9.')
                  if self.offers_your_screen() else
                  _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
