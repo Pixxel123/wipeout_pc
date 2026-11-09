@@ -959,6 +959,10 @@ EXTRA = {
         'Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.': 'Tamanhos com um patch de resolução para este jogo. Mais largo que 16:9 mantém o HUD em 16:9.',
         'Native is the size of this monitor when it is 1920 × 1080 or larger. Sizes without a patch are generated at start. Wider than 16:9 keeps the HUD at 16:9.': 'Nativa é o tamanho deste monitor quando ele tem 1920 × 1080 ou mais. Tamanhos sem patch são gerados ao iniciar. Mais largo que 16:9 mantém o HUD em 16:9.',
         'Native': 'Nativa',
+        'Render scale': 'Escala de renderização',
+        'Custom': 'Personalizado',
+        "Renders at this share of the monitor's size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Sizes above 3840 × 2160 are untested.":
+            'Renderiza nesta fração do tamanho do monitor e mostra no tamanho do monitor. Acima de 100 % é supersampling: mais nítido, mais lento. Tamanhos acima de 3840 × 2160 não foram testados.',
         'Rendering': 'Renderização',
         'For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). Other render resolutions output at their own size.': 'Para a resolução de renderização nativa de 1920 × 1080: o que o upscaler produz (o HUD também). As outras resoluções de renderização saem no próprio tamanho.',
         'Temporal anti-aliasing': 'Antisserrilhamento temporal',
@@ -1360,6 +1364,10 @@ EXTRA = {
         'Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.': 'Tamaños con un parche de resolución para este juego. Más ancho que 16:9 mantiene el HUD en 16:9.',
         'Native is the size of this monitor when it is 1920 × 1080 or larger. Sizes without a patch are generated at start. Wider than 16:9 keeps the HUD at 16:9.': 'Nativa es el tamaño de este monitor cuando tiene 1920 × 1080 o más. Los tamaños sin parche se generan al iniciar. Más ancho que 16:9 mantiene el HUD en 16:9.',
         'Native': 'Nativa',
+        'Render scale': 'Escala de renderizado',
+        'Custom': 'Personalizado',
+        "Renders at this share of the monitor's size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Sizes above 3840 × 2160 are untested.":
+            'Renderiza a esta fracción del tamaño del monitor y lo muestra al tamaño del monitor. Por encima de 100 % es supersampling: más nítido, más lento. Los tamaños mayores de 3840 × 2160 no están probados.',
         'Rendering': 'Renderizado',
         'For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). Other render resolutions output at their own size.': 'Para la resolución de renderizado nativa de 1920 × 1080: lo que produce el upscaler (también el HUD). Las demás resoluciones de renderizado salen a su propio tamaño.',
         'Temporal anti-aliasing': 'Antialiasing temporal',

@@ -1898,6 +1898,42 @@ class Launcher:
             resolution.trace_add('write', resolution_chosen)
         return self.aspect
 
+    def render_scale_var(self):
+        """The Render scale row (not saved): the render resolution as a percentage of the monitor's size.
+        It follows the render resolution ('custom' when the size is none of RENDER_SCALES), and choosing a
+        percentage sets the render resolution to that size, by its built-in name when it has one, else as a
+        size generated at start."""
+        if getattr(self, 'render_scale', None) is None:
+            resolution = self.var('render_resolution', 'ini')
+
+            def current():
+                return str(graphics_options.render_scale_of(self.screen_size, resolution.get()) or 'custom')
+            self.render_scale = self.tk.StringVar(value=current())
+
+            def scale_chosen(*_a):
+                percent = self.render_scale.get()
+                name = dict(graphics_options.render_scales_for(self.screen_size)).get(int(percent)) if percent.isdigit() else None
+                if name and name != resolution.get():
+                    resolution.set(name)
+
+            def resolution_chosen(*_a):
+                if current() != self.render_scale.get():
+                    self.render_scale.set(current())
+            self.render_scale.trace_add('write', scale_chosen)
+            resolution.trace_add('write', resolution_chosen)
+        return self.render_scale
+
+    def render_scale_options(self):
+        """The Render scale rows: each percentage with the size it means, and Custom while the render
+        resolution is none of them."""
+        rows = []
+        for percent, name in graphics_options.render_scales_for(self.screen_size):
+            width, height = graphics_options.resolution_size(name)
+            rows.append((str(percent), (f'{percent} % · {width} × {height}',)))
+        if self.render_scale_var().get() == 'custom':
+            rows.append(('custom', ('Custom', 'Другое')))  # choice() translates option pairs itself
+        return rows
+
     def game_resolution_options(self):
         """The render resolutions with a patch for the chosen game (its profile's
         GOW3_ALLOWED_RESOLUTIONS), else all built-in ones; for WipEout after the monitor's row."""
@@ -2253,12 +2289,19 @@ class Launcher:
         self.section(f, _('Resolution'))
         stale = ((lambda options: stale_render_resolution(options, self.screen_size, steam_deck()))
                  if self.offers_your_screen() else None)
-        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options(), stale=stale),
+        # The list is a function: read again on every change, it keeps the size the Render scale row sets.
+        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options, stale=stale),
                  _('Native is the size of this monitor when it is 1920 × 1080 or larger. Sizes without a patch are '
                    'generated at start. Wider than 16:9 keeps the HUD at 16:9.')
                  if self.offers_your_screen() else
                  _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
+        if self.offers_your_screen() and graphics_options.render_scales_for(self.screen_size):
+            self.row(f, _('Render scale', 'Масштаб рендеринга'),
+                     self.choice(f, 'render_scale', None, self.render_scale_options, var=self.render_scale_var()),
+                     _('Renders at this share of the monitor\'s size and shows it at the monitor\'s size. Above 100 % is '
+                       'supersampling: sharper, slower. Sizes above 3840 × 2160 are untested.'),
+                     restart=True)
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
                    'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)

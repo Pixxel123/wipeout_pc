@@ -426,5 +426,91 @@ class DisplayModesTest(unittest.TestCase):
             self.assertEqual(launcher.monitor_under_pointer(root, DESKTOP_XRANDR), (2560, 0, 1920, 1080))
 
 
+class TracedVar:
+    """A Tk StringVar stand-in: get/set and write traces, no display."""
+    def __init__(self, value=''):
+        self.value, self.traces = value, []
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+        for callback in list(self.traces):
+            callback()
+
+    def trace_add(self, _mode, callback):
+        self.traces.append(callback)
+
+
+class RenderScaleTest(unittest.TestCase):
+    def app(self, size, resolution):
+        import types
+        app = launcher.Launcher.__new__(launcher.Launcher)
+        app.screen_size = size
+        app.display_modes = []
+        app.ini = {'render_resolution': resolution}
+        app.vars = {'render_resolution': TracedVar(resolution)}
+        app.tk = types.SimpleNamespace(StringVar=lambda value='': TracedVar(value))
+        return app
+
+    def test_the_row_reads_the_current_scale_and_lists_the_sizes(self):
+        app = self.app((2560, 1440), '1440p')
+        self.assertEqual(app.render_scale_var().get(), '100')
+        self.assertEqual(app.render_scale_options(),
+                         [('100', ('100 % · 2560 × 1440',)), ('125', ('125 % · 3200 × 1800',)),
+                          ('150', ('150 % · 3840 × 2160',)), ('200', ('200 % · 5120 × 2880',))])
+
+    def test_choosing_a_scale_sets_the_render_resolution(self):
+        app = self.app((2560, 1440), '1440p')
+        app.render_scale_var().set('150')
+        self.assertEqual(app.vars['render_resolution'].get(), '4K')
+        app.render_scale_var().set('125')
+        self.assertEqual(app.vars['render_resolution'].get(), '1800p')
+        app.render_scale_var().set('100')
+        self.assertEqual(app.vars['render_resolution'].get(), '1440p')
+
+    def test_a_size_that_is_no_scale_reads_custom_and_is_left_alone(self):
+        app = self.app((2560, 1440), '1440p')
+        app.render_scale_var()
+        app.vars['render_resolution'].set('native')
+        self.assertEqual(app.render_scale_var().get(), 'custom')
+        self.assertEqual(app.render_scale_options()[-1], ('custom', ('Custom', 'Другое')))
+        self.assertEqual(app.vars['render_resolution'].get(), 'native')
+        app.vars['render_resolution'].set('4K')
+        self.assertEqual(app.render_scale_var().get(), '150')
+        self.assertNotIn('custom', [v for v, _t in app.render_scale_options()])
+
+    def test_the_deck_panel_offers_only_scales_that_take_effect(self):
+        app = self.app((1280, 800), 'native')
+        self.assertEqual([v for v, _t in app.render_scale_options()], ['150', '200', 'custom'])
+        app.render_scale_var().set('150')
+        self.assertEqual(app.vars['render_resolution'].get(), '1920x1200')
+
+    def test_an_unknown_monitor_has_no_scales(self):
+        app = self.app((0, 0), 'native')
+        self.assertEqual(launcher.graphics_options.render_scales_for(app.screen_size), [])
+        self.assertEqual(app.render_scale_var().get(), 'custom')
+
+
+class RenderScaleWindowTest(unittest.TestCase):
+    """A real window on a 2560 × 1440 monitor: the Render resolution box shows the size the scale row picks."""
+    window = layout.DiagnosticsLayoutTest.window
+    SCREEN = (2560, 1440)
+
+    @unittest.skipUnless(layout.tk, 'requires Tk')
+    def test_the_render_resolution_box_shows_the_scaled_size(self):
+        with self.window('en', 1.0) as (root, app):
+            app.show('graphics')
+            root.update()
+            boxes = [w for w in layout.descendants(app.pages['graphics']) if w.winfo_class() == 'TCombobox']
+            resolution = next(b for b in boxes if any('Native' in v for v in b.cget('values')))
+            self.assertEqual(resolution.get(), '2560 × 1440 (Native)')
+            app.render_scale_var().set('150')
+            root.update()
+            self.assertEqual(app.var('render_resolution', 'ini').get(), '4K')
+            self.assertEqual(resolution.get(), '3840 × 2160')
+
+
 if __name__ == '__main__':
     unittest.main()
