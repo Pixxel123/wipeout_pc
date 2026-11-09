@@ -244,8 +244,13 @@ void Load() {
         unsigned width = 0, height = 0;
         if (std::sscanf(text, "%ux%u", &width, &height) == 2) floor = {width, height};
     }
-    const auto guest = Vulkan::SceneResolution::ClampGuest(
-        {uint32_t(render_width), uint32_t(render_height)}, floor);
+    const Vulkan::SceneResolution::Size wanted{uint32_t(render_width), uint32_t(render_height)};
+    const auto guest = Vulkan::SceneResolution::ClampGuest(wanted, floor);
+    if (guest != wanted) {
+        // Below the title's own size, above the largest patched size or odd (a mod's): shown once here.
+        std::printf("Settings: render resolution %ux%u runs at %ux%u\n", wanted.width, wanted.height,
+                    guest.width, guest.height);
+    }
     v.startup_render_width = int(guest.width);
     v.startup_render_height = int(guest.height);
     v.startup_engine_fps = v.engine_fps;
