@@ -207,11 +207,13 @@ QHD_MODES = [(2560, 1440), (1920, 1080), (1680, 1050), (1280, 720)]
 class MonitorModesTest(unittest.TestCase):
     def test_the_list_is_the_monitors_modes_from_the_floor_up(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=QHD_MODES)
-        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('native', ('1920 × 1080',))])
+        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('2560x1080', ('2560 × 1080',)),
+                                   ('1920x1440', ('1920 × 1440',)), ('1920x1200', ('1920 × 1200',)), ('native', ('1920 × 1080',))])
 
     def test_modes_above_the_desktop_size_stay(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=[(3840, 2160), (2560, 1440), (1920, 1080)])
-        self.assertEqual([v for v, _t in options], ['1440p', '4K', 'native'])
+        self.assertEqual([v for v, _t in options], ['1440p', '4K', '3840x1600', '3440x1440', '2880x1800', '2560x1600', '2560x1080',
+                                                    '1920x1440', '1920x1200', 'native'])
         self.assertEqual(dict(options)['4K'], ('3840 × 2160',))
 
     def test_the_deck_panel_lists_only_the_games_own_size(self):
@@ -221,27 +223,29 @@ class MonitorModesTest(unittest.TestCase):
     def test_odd_small_and_absent_sizes_are_not_listed(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (3840, 2160),
                                                   modes=[(3840, 2160), (2560, 1440), (1920, 1080), (1366, 768), (1280, 720)])
-        self.assertEqual([v for v, _t in options], ['4K', '1440p', 'native'])  # no 3440x1440: the monitor has no such mode
+        # 1366x768 and 1280x720 are below the game's own size; the hand-made sizes that fit 4K are listed.
+        self.assertEqual([v for v, _t in options], ['4K', '3840x1600', '3440x1440', '2880x1800', '2560x1600', '1440p', '2560x1080',
+                                                    '1920x1440', '1920x1200', 'native'])
 
     def test_a_saved_size_and_mods_are_kept_once(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='2256x1504', modes=QHD_MODES)
-        self.assertEqual([v for v, _t in options], ['1440p', '2256x1504', 'native'])
+        self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', '2256x1504', '1920x1440', '1920x1200', 'native'])
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='3840x1080', mods=['3840x1080'], modes=QHD_MODES)
-        self.assertEqual([v for v, _t in options], ['1440p', 'native'])
+        self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native'])
 
     def test_a_kept_size_that_is_the_saved_one_is_listed_once(self):
         # At launcher open the live value is the ini value: both reach the list as the same name.
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='2256x1504', keep=('2256x1504',), modes=QHD_MODES)
-        self.assertEqual([v for v, _t in options], ['1440p', '2256x1504', 'native'])
+        self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', '2256x1504', '1920x1440', '1920x1200', 'native'])
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='4K', keep=('4K',), modes=QHD_MODES)
-        self.assertEqual([v for v, _t in options], ['1440p', '4K', 'native'])
+        self.assertEqual([v for v, _t in options], ['1440p', '4K', '2560x1080', '1920x1440', '1920x1200', 'native'])
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080), saved='2256x1504', keep=('2256x1504',))
         self.assertEqual([v for v, _t in options], ['native', '2256x1504'])
 
     def test_kept_sizes_stay_like_the_saved_one(self):
         # The size the launcher opened with is kept beside the live one the Render scale row set.
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='4K', keep=('2256x1504',), modes=QHD_MODES)
-        self.assertEqual([v for v, _t in options], ['1440p', '4K', '2256x1504', 'native'])
+        self.assertEqual([v for v, _t in options], ['1440p', '4K', '2560x1080', '2256x1504', '1920x1440', '1920x1200', 'native'])
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080), saved='4K', keep=('2256x1504', None))
         self.assertEqual([v for v, _t in options], ['native', '4K', '2256x1504'])
         self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='1440p', keep=('1440p',), modes=QHD_MODES),
@@ -258,16 +262,45 @@ class MonitorModesTest(unittest.TestCase):
 
     def test_a_saved_size_below_the_floor_stays_listed(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='720p', modes=QHD_MODES)
-        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('native', ('1920 × 1080',)), ('720p', ('1280 × 720',))])
+        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('2560x1080', ('2560 × 1080',)), ('1920x1440', ('1920 × 1440',)),
+                                   ('1920x1200', ('1920 × 1200',)), ('native', ('1920 × 1080',)), ('720p', ('1280 × 720',))])
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='1280x800', modes=QHD_MODES)
         self.assertEqual(options[-1], ('1280x800', ('1280 × 800',)))
-        self.assertEqual([v for v, _t in options], ['1440p', 'native', '1280x800'])
+        self.assertEqual([v for v, _t in options], ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native', '1280x800'])
 
     def test_without_modes_the_list_is_todays(self):
         self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=()),
                          launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440)))
         self.assertEqual([v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440))],
                          ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native'])
+
+    def test_one_mode_keeps_the_hand_made_sizes_that_fit(self):
+        values = [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1600), modes=[(2560, 1600)])]
+        self.assertEqual(values[0], '2560x1600')
+        for name in ('1920x1200', '1440p', '2560x1080', '1920x1440', 'native'):
+            self.assertIn(name, values)
+        self.assertEqual(len(values), len(set(values)))
+        for name in values:
+            width, height = launcher.graphics_options.resolution_size(name)
+            self.assertTrue(width <= 2560 and height <= 1600, name)
+        sizes = [launcher.graphics_options.resolution_size(v) for v in values[1:]]
+        self.assertEqual(sizes, sorted(sizes, key=lambda s: (-s[0], -s[1])))
+
+    def test_a_4k_monitor_with_one_mode_lists_1440p(self):
+        values = [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (3840, 2160), modes=[(3840, 2160)])]
+        self.assertIn('1440p', values)
+
+    def test_a_mode_above_the_largest_generated_size_is_not_listed(self):
+        values = [v for v, _t in launcher.resolution_choices_for(
+            WIPEOUT_SIZES, (5120, 2880), modes=[(10240, 5760), (5120, 2880), (3200, 1800)])]
+        self.assertNotIn('10240x5760', values)
+        self.assertIn('1800p', values)       # 3200x1800, a mode WipEout's list has no size for, stays
+        self.assertIn('5120x1440', values)   # a hand-made size that fits the monitor
+
+    def test_a_monitor_below_its_largest_mode_still_lists_that_mode(self):
+        # A 1440p monitor whose desktop runs at 1080p: the limit is the largest mode, not the desktop.
+        values = [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080), modes=[(1920, 1080), (2560, 1440)])]
+        self.assertEqual(values, ['native', '1440p', '2560x1080', '1920x1440', '1920x1200'])
 
 
 class Var:
@@ -316,8 +349,8 @@ class GameGateTest(unittest.TestCase):
         app = self.app('CUSA07671')
         app.screen_size = (2560, 1440)
         app.display_modes = QHD_MODES
-        self.assertEqual(self.values(app.game_resolution_options()), ['1440p', 'native'])
-        self.assertEqual(self.values(app.resolution_options()), ['1440p', 'native'])
+        self.assertEqual(self.values(app.game_resolution_options()), ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native'])
+        self.assertEqual(self.values(app.resolution_options()), ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native'])
 
     def test_the_live_render_resolution_stays_listed(self):
         app = self.app('CUSA07671')
