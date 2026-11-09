@@ -380,7 +380,7 @@ def plain_size_label(name):
 def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
     """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then, largest
     first, the sizes that take effect. With the monitor's `modes` known the list is those modes plus the
-    `names` that fit inside the largest mode; without them, `names` (hand-made and profile sizes) that fit
+    `names` that fit inside one of its modes; without them, `names` (hand-made and profile sizes) that fit
     the monitor. Below MIN_GENERATED a size is inert (the game keeps 1920x1080 and the upscaler stays off). The
     game's own size, the saved size and the `keep` sizes (the one the launcher opened with) are never
     dropped; one nobody lists (generated) is appended so it stays selectable. `mods`: the sizes the enabled
@@ -392,14 +392,15 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
     ceiling = graphics_options.MAX_GENERATED
     modes = [(w, h) for w, h in modes if not (w % 2 or h % 2) and w <= ceiling[0] and h <= ceiling[1]]
     if modes:
-        # The monitor's modes, and the hand-made sizes that fit inside its largest one: a panel with a
-        # single mode (a laptop's, a gamescope session's) keeps the lower sizes a PC game would list.
+        # The monitor's modes, and the hand-made sizes that fit inside one of them: a panel with a single
+        # mode (a laptop's, a gamescope session's) keeps the lower sizes a PC game would list.
         # Kept sizes stay, as without modes (a mod lists its own); each name once.
-        limit = (max(w for w, _h in modes), max(h for _w, h in modes))
+        bounds = modes
         mode_names = [graphics_options.size_name(w, h) for w, h in modes]
         names = list(dict.fromkeys(['native', *mode_names, *names, *(n for n in kept if n not in mods)]))
     else:
         limit = screen and graphics_options.resolution_size(screen[0])
+        bounds = [limit] if limit else []
 
     def listed(name):
         row = graphics_options.resolution_size(name)
@@ -407,7 +408,7 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
             return True
         if row[0] < floor[0] or row[1] < floor[1]:
             return False
-        return not limit or (row[0] <= limit[0] and row[1] <= limit[1])
+        return not bounds or any(row[0] <= w and row[1] <= h for w, h in bounds)
 
     def largest_first(choice):
         row = graphics_options.resolution_size(choice[0])

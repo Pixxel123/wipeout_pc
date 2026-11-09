@@ -220,9 +220,10 @@ class MonitorModesTest(unittest.TestCase):
         self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (1280, 800), modes=[(1280, 800), (160, 256)]),
                          [('native', ('1920 × 1080',))])
 
-    def test_odd_small_and_absent_sizes_are_not_listed(self):
+    def test_odd_modes_and_modes_below_the_games_own_size_are_not_listed(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (3840, 2160),
-                                                  modes=[(3840, 2160), (2560, 1440), (1920, 1080), (1366, 768), (1280, 720)])
+                                                  modes=[(3840, 2160), (2561, 1440), (2560, 1440), (1920, 1080), (1366, 768), (1280, 720)])
+        self.assertNotIn('2561x1440', [v for v, _t in options])  # an odd mode
         # 1366x768 and 1280x720 are below the game's own size; the hand-made sizes that fit 4K are listed.
         self.assertEqual([v for v, _t in options], ['4K', '3840x1600', '3440x1440', '2880x1800', '2560x1600', '1440p', '2560x1080',
                                                     '1920x1440', '1920x1200', 'native'])
@@ -301,6 +302,23 @@ class MonitorModesTest(unittest.TestCase):
         # A 1440p monitor whose desktop runs at 1080p: the limit is the largest mode, not the desktop.
         values = [v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080), modes=[(1920, 1080), (2560, 1440)])]
         self.assertEqual(values, ['native', '1440p', '2560x1080', '1920x1440', '1920x1200'])
+
+    def test_a_listed_size_fits_one_of_the_monitors_modes(self):
+        # A super-ultrawide with a 4K mode: 5120x2160 is inside neither 5120x1440 nor 3840x2160.
+        values = [v for v, _t in launcher.resolution_choices_for(
+            WIPEOUT_SIZES, (5120, 1440), modes=[(5120, 1440), (3840, 2160), (1920, 1080)])]
+        self.assertNotIn('5120x2160', values)
+        for name in ('5120x1440', '4K', '3840x1600', '3440x1440', '2880x1800', '2560x1600', '1440p'):
+            self.assertIn(name, values)  # 3840x1600, 2880x1800 and 2560x1600 fit the 4K mode
+        self.assertEqual(len(values), len(set(values)))
+        # 3840x1600 is inside the two modes' bounding box (5120x1600) but inside neither mode.
+        values = [v for v, _t in launcher.resolution_choices_for(
+            WIPEOUT_SIZES, (5120, 1440), modes=[(5120, 1440), (2560, 1600), (1920, 1080)])]
+        for name in ('3840x1600', '2880x1800', '5120x2160', '4K'):
+            self.assertNotIn(name, values)
+        for name in ('5120x1440', '3440x1440', '2560x1600', '1440p'):
+            self.assertIn(name, values)
+        self.assertEqual(len(values), len(set(values)))
 
 
 class Var:
