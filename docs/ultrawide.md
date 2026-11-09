@@ -34,27 +34,38 @@ Every size but 1440x1080, 2048x1536 and 2560x1920 was tested in game: on an RX 6
 (an issue): the resolution, your GPU, and whether anything is cropped, stretched or missing at the edges.
 
 **WipEout note:** in WipEout, a size below 1920 × 1080 does not take effect. Measured on the Steam Deck with 720p, 900p
-and 1280 × 800: the patch applies, but the game keeps its 1920 × 1080 targets and the upscaler stays off. The launcher
-does not list those sizes for WipEout. This was not measured on God of War III, and says nothing about it.
+and 1280 × 800: the patch applies, but the game keeps its 1920 × 1080 targets. Such a size therefore runs as the game's
+own 1920 × 1080, and the upscaler presets keep working there. The launcher does not list those sizes for WipEout. This
+was not measured on God of War III, and says nothing about it.
 
 ### Any size
 
-For WipEout, the launcher's **Render resolution** list is the monitor's own display modes from 1920 × 1080 up, as a
-PC game lists them: plain sizes, largest first, the monitor's current size marked **(Native)**, plus the game's own
-1920 × 1080. Where the launcher cannot read the modes (where xrandr is missing, or outside X11 and Windows) it lists
-the hand-made sizes that fit the monitor instead. A **Render scale** row under it offers 100, 125, 150 and 200 % of
-this monitor's current size: the game renders at that size and the picture is shown at the monitor's size, so above
-100 % is supersampling (sharper, slower); any other size reads **Custom**. Generated or scaled sizes above 3840 × 2160
-are untested (every size above it is marked ⚠ in both lists), and the memory patch adds a
-fixed 1 GB. A size in the
+For WipEout, the launcher's **Render resolution** list is built as a PC game lists its sizes: plain sizes, largest
+first, the monitor's current size marked **(Native)** at the top, plus the game's own 1920 × 1080. Where the launcher
+can read the monitor's display modes, the list is those modes from 1920 × 1080 up to 7680 × 4320, plus the hand-made
+sizes that fit inside one of them, so a monitor with a single mode still lists the smaller sizes. Where it cannot read
+the modes (where xrandr is missing, or outside X11 and Windows) it lists the hand-made sizes that fit the monitor
+instead; where it cannot tell which monitor it is on, there is no (Native) row and every hand-made size from
+1920 × 1080 up is listed. A monitor wider than 7680 or taller than 4320 gets no row of its own. The saved size is
+never dropped from the list. A **Render scale** row under it offers 100, 125, 150 and 200 % of this monitor's current
+size (those from 1920 × 1080 to 7680 × 4320): the game renders at that size and the picture is shown at the monitor's
+size, so above 100 % is supersampling (sharper, slower); any other size reads **Custom**.
+
+A new install starts at the monitor's size. On a monitor with more pixels than 3840 × 2160 it starts at
+half the monitor's width and height instead (a 7680 × 4320 monitor starts at 3840 × 2160); the monitor's own row
+stays in the list to choose. A monitor wider than 7680 or taller than 4320 starts at the game's own 1920 × 1080.
+
+Generated or scaled sizes above 3840 × 2160 are untested, and the memory patch adds a fixed 1 GB. Every listed size
+wider than 3840 or taller than 2160, except a mod's, is marked ⚠ in both lists. A size in the
 table above uses its tested entry. Any other even size (a 3:2 laptop at 2256 × 1504) is **generated at start** from
 the same sites by `scripts/graphics_options.py`
 (`resolution_patch_lines`): output size, half-resolution buffers, the camera aspect ratio, and 1 GB more video memory
 from 4.5 megapixels. Generated sizes are beta until tested; the HUD stays 16:9 in the middle, and sizes
 3840 pixels wide and up need the "Native 4K rendering" patch, which is on by default. The upscaling presets render
-below any render resolution and upscale back to it. Generated sizes need at least 1920 × 1080: below the game's own
-size, the size does not take effect. A generated size appears in the in-game menu only while it is the current
-setting, so switching back needs the launcher.
+below any render resolution and upscale back to it. Generated sizes run from 1920 × 1080 to 7680 × 4320: below the
+game's own size, the size does not take effect, and a larger size in `gow3.ini`, other than a mod's, starts at the
+game's own 1920 × 1080. A generated size appears in the in-game menu only while it is the current setting, so
+switching back needs the launcher.
 
 ### Known limitations (outside 16:9)
 
@@ -147,7 +158,7 @@ passo está no README dela). Ele usa o suporte a patches dos mods: uma pasta de 
 jogo (arquivos XML com assinaturas, na pasta `patches/`), aplicados enquanto o mod está marcado na página
 Mods. Veja [MODS.md](MODS.md).
 
-No WipEout, a lista **Resolução de renderização** mostra os modos do próprio monitor a partir de 1920 × 1080, do maior para o menor, com o tamanho atual marcado **(Nativa)**, mais o 1920 × 1080 do jogo; sem leitura dos modos, os tamanhos que cabem no monitor. A linha **Escala de renderização** oferece 100, 125, 150 e 200 % do tamanho atual deste monitor (acima de 100 % é supersampling); tamanhos gerados ou escalados acima de 3840 × 2160 não foram testados (todos os tamanhos acima disso são marcados com ⚠ nas duas listas). Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par de pelo menos 1920 × 1080 é gerado ao iniciar (beta): abaixo do tamanho do próprio jogo, o tamanho não tem efeito. No WipEout, nada abaixo de 1920 × 1080 tem efeito (medido no Steam Deck com 720p, 900p e 1280 × 800; o God of War III não foi medido), a lista do launcher mostra `3440 × 1440`, com `(Nativa)` na linha do próprio monitor, o menu do jogo mantém os rótulos longos com "(beta)", e um tamanho gerado só aparece no menu do jogo enquanto for o atual, então voltar exige o launcher.
+No WipEout, a lista **Resolução de renderização** mostra os tamanhos como um jogo de PC: do maior para o menor, com o tamanho atual do monitor marcado **(Nativa)** no topo, mais o 1920 × 1080 do jogo. Com os modos do monitor lidos, a lista são esses modos de 1920 × 1080 até 7680 × 4320, mais os tamanhos feitos à mão que cabem em um deles, então um monitor com um só modo continua mostrando os tamanhos menores; sem leitura dos modos, os tamanhos feitos à mão que cabem no monitor; sem saber em qual monitor está, não há linha (Nativa) e aparecem todos os tamanhos feitos à mão a partir de 1920 × 1080. Um monitor com mais de 7680 de largura ou 4320 de altura não tem linha própria. O tamanho salvo nunca sai da lista. A linha **Escala de renderização** oferece 100, 125, 150 e 200 % do tamanho atual deste monitor (os que ficam entre 1920 × 1080 e 7680 × 4320; acima de 100 % é supersampling). Uma instalação nova começa no tamanho do monitor; num monitor com mais pixels que 3840 × 2160, começa na metade da largura e da altura do monitor (um monitor de 7680 × 4320 começa em 3840 × 2160), e a linha do próprio monitor continua na lista para escolher; um monitor com mais de 7680 de largura ou 4320 de altura começa no 1920 × 1080 do jogo. Tamanhos gerados ou escalados acima de 3840 × 2160 não foram testados; todo tamanho listado com mais de 3840 de largura ou 2160 de altura, exceto o de um mod, é marcado com ⚠ nas duas listas. Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par de 1920 × 1080 até 7680 × 4320 é gerado ao iniciar (beta): abaixo do tamanho do próprio jogo, o tamanho não tem efeito, e um tamanho maior no `gow3.ini`, que não seja de um mod, começa no 1920 × 1080 do jogo. No WipEout, nada abaixo de 1920 × 1080 tem efeito (medido no Steam Deck com 720p, 900p e 1280 × 800; o God of War III não foi medido): o patch se aplica, mas o jogo mantém seus alvos de 1920 × 1080. Por isso esse tamanho roda como o 1920 × 1080 do jogo, e os presets do upscaler continuam funcionando. A lista do launcher mostra `3440 × 1440`, com `(Nativa)` na linha do próprio monitor, o menu do jogo mantém os rótulos longos com "(beta)", e um tamanho gerado só aparece no menu do jogo enquanto for o atual, então voltar exige o launcher.
 
 A câmera do jogo tem campo de visão *horizontal* fixo. Aumentar a resolução para um tamanho ultrawide sem
 mexer na câmera só corta a imagem de 16:9 em cima e embaixo, e ela parece com zoom. Cada entrada
