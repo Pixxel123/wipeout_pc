@@ -1,5 +1,5 @@
-"""The launcher offers the monitor's size as a render resolution ("Your screen"), like a PC game: a
-hand-made size keeps its name, any other even size gets a generated patch at start (beta)."""
+"""The launcher offers the monitor's size as a render resolution (the "Native" row), like a PC game: a
+hand-made size keeps its name, any other even size from 1920x1080 up gets a generated patch at start (beta)."""
 import sys
 import unittest
 from unittest import mock
@@ -12,22 +12,26 @@ import test_launcher_diagnostics_layout as layout  # noqa: E402
 
 class YourScreenTest(unittest.TestCase):
     def test_hand_made_sizes_keep_their_name(self):
-        self.assertEqual(launcher.your_screen_choice((2560, 1440)), ('1440p', ('Your screen · 2560 × 1440 · 16:9',)))
-        self.assertEqual(launcher.your_screen_choice((2561, 1441)), ('1440p', ('Your screen · 2560 × 1440 · 16:9',)))
-        self.assertEqual(launcher.your_screen_choice((1920, 1080)), ('native', ('Your screen · 1920 × 1080 · 16:9',)))
-        self.assertEqual(launcher.your_screen_choice((1280, 800)), ('1280x800', ('Your screen · 1280 × 800 · 16:10',)))
+        self.assertEqual(launcher.your_screen_choice((2560, 1440)), ('1440p', ('Native · 2560 × 1440 · 16:9',)))
+        self.assertEqual(launcher.your_screen_choice((2561, 1441)), ('1440p', ('Native · 2560 × 1440 · 16:9',)))
+        self.assertEqual(launcher.your_screen_choice((1920, 1080)), ('native', ('Native · 1920 × 1080 · 16:9',)))
+        self.assertEqual(launcher.your_screen_choice((1920, 1200)), ('1920x1200', ('Native · 1920 × 1200 · 16:10',)))
 
     def test_other_sizes_are_generated_and_beta(self):
-        self.assertEqual(launcher.your_screen_choice((2256, 1504)), ('2256x1504', ('Your screen · 2256 × 1504 · 3:2 (beta)',)))
-        self.assertEqual(launcher.your_screen_choice((1366, 768)), ('1366x768', ('Your screen · 1366 × 768 · 16:9 (beta)',)))
+        self.assertEqual(launcher.your_screen_choice((2256, 1504)), ('2256x1504', ('Native · 2256 × 1504 · 3:2 (beta)',)))
+        self.assertEqual(launcher.your_screen_choice((2560, 1200)), ('2560x1200', ('Native · 2560 × 1200 · 32:15 (beta)',)))
 
     def test_too_small_or_unknown_monitors_offer_nothing(self):
         self.assertIsNone(launcher.your_screen_choice((1024, 600)))
         self.assertIsNone(launcher.your_screen_choice((0, 0)))
 
+    def test_below_the_games_own_size_offers_nothing(self):
+        for size in ((1280, 800), (1366, 768), (1680, 1050), (1920, 1000), (1800, 1200)):
+            self.assertIsNone(launcher.your_screen_choice(size), size)
+
     def test_options_put_your_screen_first_without_duplicates(self):
         options = launcher.resolution_choices_for(['native', '1440p', '3440x1440'], (2560, 1440), saved='3440x1440')
-        self.assertEqual(options[0], ('1440p', ('Your screen · 2560 × 1440 · 16:9',)))
+        self.assertEqual(options[0], ('1440p', ('Native · 2560 × 1440 · 16:9',)))
         self.assertEqual([v for v, _t in options], ['1440p', 'native', '3440x1440'])
         options = launcher.resolution_choices_for(['native', '1440p'], (2256, 1504), saved='1440p')
         self.assertEqual([v for v, _t in options], ['2256x1504', 'native', '1440p'])
@@ -37,10 +41,36 @@ class YourScreenTest(unittest.TestCase):
         self.assertEqual([v for v, _t in options], ['native', '1440p', '2256x1504'])
         self.assertEqual(dict(options)['2256x1504'], ('2256 × 1504 · 3:2 (beta)',))
 
+    def test_a_saved_size_below_the_floor_is_not_kept(self):
+        for saved in ('1280x800', '1366x768'):
+            options = launcher.resolution_choices_for(['native', '1440p'], (1920, 1080), saved=saved)
+            self.assertEqual([v for v, _t in options], ['native', '1440p'], saved)
+
+    def test_the_games_own_size_reads_1080p_beside_a_bigger_monitor(self):
+        options = dict(launcher.resolution_choices_for(['native', '1440p'], (2560, 1440)))
+        self.assertEqual(options['native'], ('1080p · 1920 × 1080 · 16:9',))
+        self.assertEqual(options['1440p'], ('Native · 2560 × 1440 · 16:9',))
+
+    def test_a_1080p_monitor_has_one_native_row(self):
+        options = launcher.resolution_choices_for(['native', '1440p'], (1920, 1080))
+        self.assertEqual([v for v, _t in options], ['native', '1440p'])
+        self.assertEqual(dict(options)['native'], ('Native · 1920 × 1080 · 16:9',))
+
+    def test_exactly_one_row_says_native(self):
+        for size in ((2560, 1440), (2256, 1504), (1920, 1080), (1280, 800)):
+            options = launcher.resolution_choices_for(['native', '720p', '1440p'], size)
+            self.assertEqual(len([t for _v, (t,) in options if t.startswith('Native')]), 1, size)
+
+    def test_without_a_monitor_row_the_list_is_as_before(self):
+        options = launcher.resolution_choices_for(['native', '720p', '1280x800'], (1280, 800))
+        self.assertEqual([v for v, _t in options], ['native', '720p', '1280x800'])
+        self.assertEqual(dict(options)['native'], ('Native · 1920 × 1080 · 16:9',))
+
     def test_default_is_your_screen_only_without_a_saved_value(self):
         self.assertEqual(launcher.default_render_resolution({}, (2256, 1504)), '2256x1504')
         self.assertEqual(launcher.default_render_resolution({'render_resolution': '1440p'}, (2256, 1504)), '1440p')
         self.assertEqual(launcher.default_render_resolution({}, (0, 0)), 'native')
+        self.assertEqual(launcher.default_render_resolution({}, (1280, 800)), 'native')
 
 
 class FreshInstallTest(unittest.TestCase):
@@ -57,6 +87,8 @@ class FreshInstallTest(unittest.TestCase):
     def test_a_monitor_below_the_minimum_changes_nothing(self):
         self.assertIsNone(launcher.fresh_render_resolution([], (1024, 600), True))
         self.assertIsNone(launcher.fresh_render_resolution([], (0, 0), True))
+        self.assertIsNone(launcher.fresh_render_resolution([], (1280, 800), True))
+        self.assertIsNone(launcher.fresh_render_resolution([], (1366, 768), True))
 
     def test_a_game_without_generated_sizes_changes_nothing(self):
         self.assertIsNone(launcher.fresh_render_resolution([], (2256, 1504), False))
@@ -64,10 +96,9 @@ class FreshInstallTest(unittest.TestCase):
     def test_native_needs_no_line_in_the_file(self):
         self.assertIsNone(launcher.fresh_render_resolution([], (1920, 1080), True))
 
-    def test_a_deck_starts_at_the_screen_only_on_its_panel(self):
-        self.assertEqual(launcher.fresh_render_resolution([], (1280, 800), True, deck=True), '1280x800')
-        self.assertIsNone(launcher.fresh_render_resolution([], (3840, 2160), True, deck=True))
-        self.assertIsNone(launcher.fresh_render_resolution([], (2560, 1440), True, deck=True))
+    def test_a_deck_keeps_its_default_docked_or_not(self):
+        for size in ((1280, 800), (2256, 1504), (2560, 1440), (3840, 2160)):
+            self.assertIsNone(launcher.fresh_render_resolution([], size, True, deck=True), size)
 
     def test_any_other_pc_starts_at_the_screen_at_any_size(self):
         self.assertEqual(launcher.fresh_render_resolution([], (3840, 2160), True, deck=False), '4K')
@@ -155,7 +186,7 @@ class FreshWindowTest(unittest.TestCase):
             self.assertEqual(app.var('render_resolution', 'ini').get(), '2256x1504')
             self.assertEqual(launcher.load_ini()[0]['render_resolution'], '2256x1504')
             self.assertIn('render_resolution=2256x1504', launcher.ini_path().read_text(encoding='utf-8'))
-            self.assertEqual(app.game_resolution_options()[0][1], ('Your screen · 2256 × 1504 · 3:2 (beta)',))
+            self.assertEqual(app.game_resolution_options()[0][1], ('Native · 2256 × 1504 · 3:2 (beta)',))
 
 
 if __name__ == '__main__':

@@ -35,13 +35,15 @@ Every size but 1440x1080, 2048x1536 and 2560x1920 was tested in game: on an RX 6
 
 ### Any size
 
-The launcher's **Render resolution** list starts with **Your screen**, the size of the monitor the launcher is on.
-A size in the table above uses its tested entry. Any other even size (a 3:2 laptop at 2256 × 1504, a 1366 × 768
-panel, the Steam Deck's 1280 × 800) is **generated at start** from the same sites by `scripts/graphics_options.py`
+The launcher's **Render resolution** list starts with **Native**, the size of the monitor the launcher is on, when
+that monitor is 1920 × 1080 or larger; beside a bigger monitor the game's own size reads **1080p**. A size in the
+table above uses its tested entry. Any other even size (a 3:2 laptop at 2256 × 1504) is **generated at start** from
+the same sites by `scripts/graphics_options.py`
 (`resolution_patch_lines`): output size, half-resolution buffers, the camera aspect ratio, and 1 GB more video memory
 from 4.5 megapixels. Generated sizes are marked "(beta)" until tested; the HUD stays 16:9 in the middle, and sizes
 3840 pixels wide and up need the "Native 4K rendering" patch, which is on by default. The upscaling presets render
-below any render resolution and upscale back to it.
+below any render resolution and upscale back to it. Generated sizes need at least 1920 × 1080: below the game's own
+size, the size does not take effect.
 
 ### Known limitations (outside 16:9)
 
@@ -134,7 +136,7 @@ passo está no README dela). Ele usa o suporte a patches dos mods: uma pasta de 
 jogo (arquivos XML com assinaturas, na pasta `patches/`), aplicados enquanto o mod está marcado na página
 Mods. Veja [MODS.md](MODS.md).
 
-A lista **Resolução de renderização** começa com **Sua tela**, o tamanho do monitor. Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par é gerado ao iniciar (beta).
+A lista **Resolução de renderização** começa com **Native**, o tamanho do monitor, quando ele tem 1920 × 1080 ou mais. Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par de pelo menos 1920 × 1080 é gerado ao iniciar (beta): abaixo do tamanho do próprio jogo, o tamanho não tem efeito.
 
 A câmera do jogo tem campo de visão *horizontal* fixo. Aumentar a resolução para um tamanho ultrawide sem
 mexer na câmera só corta a imagem de 16:9 em cima e embaixo, e ela parece com zoom. Cada entrada

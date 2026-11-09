@@ -31,6 +31,7 @@ DEFAULTS = {'render_resolution': 'native', 'engine_fps': '120', 'deferred_readba
 RESOLUTION_PREFIX = 'Resolution Patch'
 # The games the generated resolution patches apply to (WipEout Omega Collection).
 GENERATED_TITLES = ('CUSA07671', 'CUSA05670')
+MIN_GENERATED = (1920, 1080)  # measured: below the game's own size the buffer stays 1920x1080 while the camera changes
 FPS_PREFIX = 'Frame Rate Patch'
 TEXTURE_FIX = 'Bug Fix - Texture Corruption Fix'
 
@@ -303,12 +304,12 @@ def resolution_patch_note(width, height):
 
 
 def generated_resolution(value, known):
-    """(width, height) when `value` is an even size ("<width>x<height>" or a built-in name) that no
-    resolution in `known` provides, else None (nothing to generate)."""
+    """(width, height) when `value` is an even size ("<width>x<height>" or a built-in name), at least
+    MIN_GENERATED, that no resolution in `known` provides, else None (nothing to generate)."""
     if not value or value == 'native' or value in known:
         return None
     size = resolution_size(value)
-    if not size or size[0] % 2 or size[1] % 2 or min(size) < 2:
+    if not size or size[0] % 2 or size[1] % 2 or size[0] < MIN_GENERATED[0] or size[1] < MIN_GENERATED[1]:
         return None
     return size
 

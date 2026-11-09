@@ -54,13 +54,20 @@ class GeneratedResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
             path = out / 'generated-resolution.xml'
-            self.assertEqual(run.generated_resolution_files({'render_resolution': '1280x800'}, [], OWN, out),
-                             ([path], ['1280x800']))
-            self.assertIn('Resolution Patch - 1280x800', path.read_text())
+            self.assertEqual(run.generated_resolution_files({'render_resolution': '2048x1536'}, [], OWN, out),
+                             ([path], ['2048x1536']))
+            self.assertIn('Resolution Patch - 2048x1536', path.read_text())
             path.unlink()
             for value in ('3440x1440', 'native', '1440p'):
                 self.assertEqual(run.generated_resolution_files({'render_resolution': value}, [], OWN, out), ([], []), value)
             self.assertFalse(path.exists())
+
+    def test_below_the_games_own_size_generates_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            for value in ('1280x800', '1366x768'):
+                self.assertEqual(run.generated_resolution_files({'render_resolution': value}, [], OWN, out), ([], []), value)
+            self.assertFalse((out / 'generated-resolution.xml').exists())
 
     def test_named_size_wipeout_lacks_is_generated_under_its_name(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -77,7 +84,7 @@ class GeneratedResolutionTest(unittest.TestCase):
 
     def test_no_own_list_means_the_shared_one_counts(self):
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(run.generated_resolution_files({'render_resolution': '1280x800'}, [], [''], Path(directory)),
+            self.assertEqual(run.generated_resolution_files({'render_resolution': '2048x1536'}, [], [''], Path(directory)),
                              ([], []))
 
     def test_only_wipeout_generates(self):

@@ -258,6 +258,12 @@ class GraphicsOptionsTest(unittest.TestCase):
         for value in ('1440p', '3440x1440', '3840x1080', '1365x768', 'native', 'abc', '0x0', '1366x', None):
             self.assertIsNone(g.generated_resolution(value, known), value)
 
+    def test_generated_resolution_starts_at_the_games_own_size(self):
+        for value in ('1280x800', '1366x768', '1680x1050', '1920x1000', '1800x1200'):
+            self.assertIsNone(g.generated_resolution(value, ()), value)
+        self.assertEqual(g.generated_resolution('1920x1200', ()), (1920, 1200))
+        self.assertEqual(g.generated_resolution('2256x1504', ()), (2256, 1504))
+
 
 class WindowSizeTest(unittest.TestCase):
     def test_the_game_knows_the_launcher_sizes(self):
