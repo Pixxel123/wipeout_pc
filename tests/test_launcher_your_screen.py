@@ -164,10 +164,23 @@ class MonitorSizeTest(unittest.TestCase):
             self.assertEqual(launcher.monitor_size(self.root(), (100, 0, 2560, 1440)), (2560, 1440))
         read.assert_not_called()
 
-    def test_an_unknown_monitor_uses_the_screen_size(self):
+    def test_an_unknown_monitor_on_x11_is_unknown(self):
+        root = self.root()
+        root.winfo_screenwidth.side_effect = AssertionError('the X screen spans every monitor')
+        root.winfo_screenheight.side_effect = AssertionError('the X screen spans every monitor')
         with mock.patch.object(launcher, 'monitor_under_pointer') as read:
-            self.assertEqual(launcher.monitor_size(self.root(), (0, 0, 0, 0)), (1024, 768))
+            self.assertEqual(launcher.monitor_size(root, (0, 0, 0, 0)), (0, 0))
         read.assert_not_called()
+        root.winfo_screenwidth.assert_not_called()
+        root.winfo_screenheight.assert_not_called()
+
+    def test_windows_and_macos_use_the_screen_size(self):
+        for system in ('win32', 'aqua'):
+            root = self.root()
+            root.tk.call.return_value = system
+            with mock.patch.object(launcher, 'monitor_under_pointer') as read:
+                self.assertEqual(launcher.monitor_size(root, (0, 0, 0, 0)), (1024, 768), system)
+            read.assert_not_called()
 
 
 class FreshInstallTest(unittest.TestCase):
@@ -199,6 +212,19 @@ class FreshInstallTest(unittest.TestCase):
 
     def test_any_other_pc_starts_at_the_screen_at_any_size(self):
         self.assertEqual(launcher.fresh_render_resolution([], (3840, 2160), True, deck=False), '4K')
+
+    def test_a_fresh_install_above_4k_starts_at_half_the_monitor(self):
+        cases = {(5120, 2880): '1440p', (7680, 4320): '4K', (5120, 2160): '2560x1080', (3840, 2160): '4K',
+                 (5120, 1440): '5120x1440', (2560, 1440): '1440p', (3440, 1440): '3440x1440'}
+        for size, expected in cases.items():
+            self.assertEqual(launcher.fresh_render_resolution([], size, True), expected, size)
+        self.assertEqual(launcher.default_render_resolution({'render_resolution': '5120x2880'}, (5120, 2880)),
+                         '5120x2880')  # saved: never overridden
+        self.assertIsNone(launcher.fresh_render_resolution([], (5120, 2880), True, deck=True))
+
+    def test_a_monitor_above_the_largest_generated_size_has_no_row(self):
+        self.assertIsNone(launcher.your_screen_choice((10240, 4320)))
+        self.assertIsNotNone(launcher.your_screen_choice((7680, 4320)))
 
 
 QHD_MODES = [(2560, 1440), (1920, 1080), (1680, 1050), (1280, 720)]

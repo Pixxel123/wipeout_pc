@@ -340,12 +340,12 @@ MIN_SCREEN = graphics_options.MIN_GENERATED  # smaller monitors get no row of th
 
 def monitor_size(root, monitor):
     """(width, height) of the monitor the launcher is on, in pixels; (0, 0) if unknown. `monitor` is
-    monitor_under_pointer's answer (X11 only), so xrandr runs once."""
+    monitor_under_pointer's answer (X11 only), so xrandr runs once. On X11 the screen spans every monitor,
+    so without that answer the size is unknown, not the screen's."""
     try:
         if root.tk.call('tk', 'windowingsystem') == 'x11':
             _x, _y, width, height = monitor
-            if width and height:
-                return width, height
+            return (width, height) if width and height else (0, 0)
         return root.winfo_screenwidth(), root.winfo_screenheight()
     except Exception:
         return 0, 0
@@ -353,9 +353,12 @@ def monitor_size(root, monitor):
 
 def your_screen_choice(size):
     """(value, (label,)) of the monitor's size as a render resolution: a hand-made size by its name,
-    any other even size as "<width>x<height>" (generated at start); None below MIN_SCREEN."""
+    any other even size as "<width>x<height>" (generated at start); None below MIN_SCREEN or above
+    MAX_GENERATED."""
     width, height = int(size[0]) & ~1, int(size[1]) & ~1
     if width < MIN_SCREEN[0] or height < MIN_SCREEN[1]:
+        return None
+    if width > graphics_options.MAX_GENERATED[0] or height > graphics_options.MAX_GENERATED[1]:
         return None
     name = graphics_options.size_name(width, height)
     return name, (f"{width} × {height} ({_('Native', 'Родное')})" + untested_mark(name),)
@@ -430,11 +433,18 @@ def stale_render_resolution(options, size, deck):
 
 
 def default_render_resolution(ini, size):
-    """A fresh gow3.ini starts at the monitor's size; a saved value is never overridden."""
+    """A fresh gow3.ini starts at the monitor's size, or at half of it per side when the monitor has more
+    pixels than UNTESTED_ABOVE (an integer scale of a size known to load); a saved value is never overridden."""
     if ini.get('render_resolution'):
         return ini['render_resolution']
     screen = your_screen_choice(size)
-    return screen[0] if screen else 'native'
+    if not screen:
+        return 'native'
+    width, height = graphics_options.resolution_size(screen[0])
+    if width * height > UNTESTED_ABOVE[0] * UNTESTED_ABOVE[1]:
+        half = your_screen_choice((width // 2, height // 2))
+        return half[0] if half else 'native'
+    return screen[0]
 
 
 def fresh_render_resolution(lines, size, offered, deck=False):
