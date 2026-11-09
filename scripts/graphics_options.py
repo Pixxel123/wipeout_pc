@@ -29,6 +29,8 @@ ENGINE_FPS = (60, 100, 120, 240)
 DEFAULTS = {'render_resolution': 'native', 'engine_fps': '120', 'deferred_readback': '1',
             'stale_readback': '1', 'async_shaders': '1'}
 RESOLUTION_PREFIX = 'Resolution Patch'
+# The games the generated resolution patches apply to (WipEout Omega Collection).
+GENERATED_TITLES = ('CUSA07671', 'CUSA05670')
 FPS_PREFIX = 'Frame Rate Patch'
 TEXTURE_FIX = 'Bug Fix - Texture Corruption Fix'
 
@@ -298,14 +300,26 @@ def resolution_patch_note(width, height):
     return note + ' Generated for this size: not tested in game.'
 
 
-def resolution_patch_xml(width, height, out):
-    """Writes a patch file with the generated "Resolution Patch - <width>x<height>" and returns its path."""
+def generated_resolution(value, known):
+    """(width, height) when `value` is an even size ("<width>x<height>" or a built-in name) that no
+    resolution in `known` provides, else None (nothing to generate)."""
+    if not value or value == 'native' or value in known:
+        return None
+    size = resolution_size(value)
+    if not size or size[0] % 2 or size[1] % 2 or min(size) < 2:
+        return None
+    return size
+
+
+def resolution_patch_xml(width, height, out, name=None):
+    """Writes a patch file with the generated "Resolution Patch - <name>" (default "<width>x<height>") and
+    returns its path."""
     root = ET.Element('Patch')
     ids = ET.SubElement(root, 'TitleID')
-    for title in ('CUSA07671', 'CUSA05670'):
+    for title in GENERATED_TITLES:
         ET.SubElement(ids, 'ID').text = title
     meta = ET.SubElement(root, 'Metadata', Title='WipEout Omega Collection',
-                         Name=f'{RESOLUTION_PREFIX} - {width}x{height}', Note=resolution_patch_note(width, height),
+                         Name=f'{RESOLUTION_PREFIX} - {name or f"{width}x{height}"}', Note=resolution_patch_note(width, height),
                          Author=GENERATED_AUTHOR, PatchVer='1.0', AppVer='01.00', AppElf='eboot.bin',
                          isEnabled='false')
     patch_list = ET.SubElement(meta, 'PatchList')

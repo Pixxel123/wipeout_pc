@@ -242,6 +242,14 @@ class GraphicsOptionsTest(unittest.TestCase):
         )
 
 
+    def test_generated_resolution_is_an_even_size_nobody_provides(self):
+        known = g.RESOLUTIONS + ('3840x1080',)
+        self.assertEqual(g.generated_resolution('2256x1504', known), (2256, 1504))
+        self.assertEqual(g.generated_resolution('1800p', ('720p',)), (3200, 1800))
+        for value in ('1440p', '3440x1440', '3840x1080', '1365x768', 'native', 'abc', '0x0', '1366x', None):
+            self.assertIsNone(g.generated_resolution(value, known), value)
+
+
 class WindowSizeTest(unittest.TestCase):
     def test_the_game_knows_the_launcher_sizes(self):
         """gpu/shim/gow3_graphics.h ResolutionSizes, which sizes the window, matches SIZES."""
