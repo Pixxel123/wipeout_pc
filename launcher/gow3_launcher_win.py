@@ -2125,11 +2125,6 @@ class Launcher:
                  if self.offers_your_screen() else
                  _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
-        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('What the upscaler produces at the native render resolution; other render resolutions '
-                   'output at their own size.',
-                   'Что выдаёт апскейлер при родном разрешении рендеринга; другие разрешения выводятся в '
-                   'своём размере.'), restart=True)
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
                    'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)
@@ -2977,6 +2972,12 @@ class Launcher:
         ttk.Label(holder, text=f'v{VERSION}', style='Muted.TLabel').pack(side='left', padx=self.px(10))
         if not WINDOWS:
             self.build_linux_options(f)
+        self.section(f, _('Rendering', 'Рендеринг'))
+        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
+                 _('For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). '
+                   'Other render resolutions output at their own size.',
+                   'Для родного разрешения 1920 × 1080: что выдаёт апскейлер (и интерфейс). '
+                   'Другие разрешения выводятся в своём размере.'), restart=True)
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((6, 0)))
