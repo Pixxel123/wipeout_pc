@@ -248,6 +248,7 @@ def monitor_under_pointer(root):
 
 
 MIN_SCREEN = (1280, 720)  # smaller screens keep the game's own sizes: the presets would render below 640x360
+DECK_PANEL = (1280, 800)
 
 
 def monitor_size(root):
@@ -282,7 +283,7 @@ def resolution_choices_for(names, size, saved=None):
     screen = your_screen_choice(size)
     if screen:
         choices.append(screen)
-    choices += [(n, (graphics_options.resolution_label(n),)) for n in names if not screen or n != screen[0]]
+    choices += [(n, (graphics_options.resolution_label(n, generated=False),)) for n in names if not screen or n != screen[0]]
     if saved and saved not in dict(choices) and graphics_options.generated_resolution(saved, names):
         choices.append((saved, (graphics_options.resolution_label(saved),)))
     return choices
@@ -296,10 +297,11 @@ def default_render_resolution(ini, size):
     return screen[0] if screen else 'native'
 
 
-def fresh_render_resolution(lines, size, offered):
+def fresh_render_resolution(lines, size, offered, deck=False):
     """What a new gow3.ini (no file, or one without lines) is given, None to leave it alone: a file
-    that has other keys is an existing install, and native is what the file's absence means."""
-    if lines or not offered:
+    that has other keys is an existing install, and native is what the file's absence means. A Deck
+    docked to a bigger monitor keeps its tuned default: its GPU cannot race at that monitor's size."""
+    if lines or not offered or (deck and tuple(size) != DECK_PANEL):
         return None
     value = default_render_resolution({}, size)
     return None if value == 'native' else value
@@ -1711,7 +1713,7 @@ class Launcher:
         names = ([n for n in self.mod_order if self.mod_vars.get(n) is None or self.mod_vars[n].get()]
                  if getattr(self, 'mod_vars', None) else selected(root, DATA_DIR / 'mods.json', self.var('game_dir', 'app').get()))
         files = [f for n in names for f in patch_files(root / n)]
-        return [(size, (graphics_options.resolution_label(size) + ' (mod)',)) for size in resolution_names(files)
+        return [(size, (graphics_options.resolution_label(size, generated=False) + ' (mod)',)) for size in resolution_names(files)
                 if size not in graphics_options.RESOLUTIONS]
 
     def resolution_options(self):
@@ -1733,7 +1735,7 @@ class Launcher:
     def write_fresh_render_resolution(self):
         """A new gow3.ini starts at the monitor's size. Written here, before any variable shows it:
         run.py reads the file, and Save skips a value that matches what the launcher opened with."""
-        value = fresh_render_resolution(self.ini_lines, self.screen_size, self.offers_your_screen())
+        value = fresh_render_resolution(self.ini_lines, self.screen_size, self.offers_your_screen(), deck=steam_deck())
         if not value:
             return
         self.ini['render_resolution'] = value
@@ -1775,7 +1777,7 @@ class Launcher:
         if allowed:
             names = allowed.split(';')
             choices = [(n, t) for n, t in RESOLUTION_CHOICES if n in names] + \
-                [(n, (graphics_options.resolution_label(n),)) for n in names
+                [(n, (graphics_options.resolution_label(n, generated=False),)) for n in names
                  if n not in dict(RESOLUTION_CHOICES)]
         else:
             choices = RESOLUTION_CHOICES
@@ -1794,7 +1796,8 @@ class Launcher:
         options = dict(self.resolution_options())
         names = graphics_options.resolutions_for(self.aspect_var().get(), list(options))
         mod = ' (mod)'
-        return [(n, (graphics_options.resolution_label(n, aspect=False) + (mod if options[n][0].endswith(mod) else ''),))
+        return [(n, (graphics_options.resolution_label(n, aspect=False, generated=not options[n][0].endswith(mod))
+                     + (mod if options[n][0].endswith(mod) else ''),))
                 for n in names]
 
     def next_row(self, parent):

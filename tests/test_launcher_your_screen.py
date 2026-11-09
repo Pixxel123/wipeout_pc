@@ -64,6 +64,14 @@ class FreshInstallTest(unittest.TestCase):
     def test_native_needs_no_line_in_the_file(self):
         self.assertIsNone(launcher.fresh_render_resolution([], (1920, 1080), True))
 
+    def test_a_deck_starts_at_the_screen_only_on_its_panel(self):
+        self.assertEqual(launcher.fresh_render_resolution([], (1280, 800), True, deck=True), '1280x800')
+        self.assertIsNone(launcher.fresh_render_resolution([], (3840, 2160), True, deck=True))
+        self.assertIsNone(launcher.fresh_render_resolution([], (2560, 1440), True, deck=True))
+
+    def test_any_other_pc_starts_at_the_screen_at_any_size(self):
+        self.assertEqual(launcher.fresh_render_resolution([], (3840, 2160), True, deck=False), '4K')
+
 
 class Var:
     def __init__(self, value):
@@ -114,6 +122,22 @@ class GameGateTest(unittest.TestCase):
         app = self.app(None, folder='')
         builtin = self.values(launcher.RESOLUTION_CHOICES)
         self.assertEqual(self.values(app.game_resolution_options()), ['2256x1504'] + builtin)
+
+    def test_a_size_with_a_patch_is_not_beta_in_the_wipeout_list(self):
+        self.assertEqual(dict(self.app('CUSA07671').game_resolution_options())['2880x1800'], ('2880 × 1800 · 16:10',))
+
+    def test_a_saved_size_nobody_lists_is_beta(self):
+        options = dict(self.app('CUSA07671', saved='2880x1920').game_resolution_options())
+        self.assertEqual(options['2880x1920'], ('2880 × 1920 · 3:2 (beta)',))
+
+    def test_a_mods_size_is_not_beta(self):
+        app = self.app('CUSA07671')
+        app.vars.update({'mods_enabled': Var(True), 'mods_dir': Var('mods')})
+        app.mod_order, app.mod_vars, app.aspect = ['Ultrawide'], {'Ultrawide': Var(True)}, Var('32:9')
+        with mock.patch('mods.patch_files', return_value=['u.xml']), \
+                mock.patch('patches.resolution_names', return_value=['3840x1080']):
+            self.assertEqual(dict(app.resolution_options())['3840x1080'], ('3840 × 1080 · 32:9 (mod)',))
+            self.assertEqual(dict(app.aspect_resolution_options())['3840x1080'], ('3840 × 1080 (mod)',))
 
     def test_a_saved_size_is_kept_in_the_wipeout_list(self):
         app = self.app('CUSA07671', saved='1800p')  # built in, but WipEout has no patch of its own for it

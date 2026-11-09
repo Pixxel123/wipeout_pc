@@ -121,17 +121,19 @@ def closest_resolution(aspect, current, names):
     return min(chosen, key=lambda n: abs(resolution_size(n)[0] * resolution_size(n)[1] - size[0] * size[1]))
 
 
-def resolution_label(name, aspect=True):
+def resolution_label(name, aspect=True, generated=True):
     """What the lists show for a render resolution: '1440p · 2560 × 1440 · 16:9', '3440 × 1440 · 21:9 (beta)'.
     `name` is a built-in name or a mod's "<width>x<height>"; anything else is shown as it is. Without
-    `aspect` the ratio is left out (the launcher's list beside the Aspect ratio filter)."""
+    `aspect` the ratio is left out (the launcher's list beside the Aspect ratio filter). `generated=False`:
+    a patch provides the size (a mod's, a game's own), so being outside the built-in list is not beta."""
     try:
         width, height = SIZES.get(name) or map(int, name.split('x'))
     except ValueError:
         return name
     title = 'Native' if name == 'native' else name if name in SIZES else None
     label = ' · '.join(p for p in (title, f'{width} × {height}', aspect and aspect_name(width, height)) if p)
-    return label + (' (beta)' if name in BETA_RESOLUTIONS or (name not in RESOLUTIONS and name not in TESTED_RESOLUTIONS) else '')
+    beta = name in BETA_RESOLUTIONS or (generated and name not in RESOLUTIONS and name not in TESTED_RESOLUTIONS)
+    return label + (' (beta)' if beta else '')
 
 
 def startup_options(ini, extra=()):
