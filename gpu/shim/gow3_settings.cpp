@@ -2,6 +2,7 @@
 #include "gow3_settings.h"
 #include "gow3_orbs.h"
 #include "gow3_graphics.h"
+#include "../shadps4/video_core/renderer_vulkan/scene_resolution.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -237,8 +238,16 @@ void Load() {
     const auto names = Gow3Graphics::ResolutionNames();
     const auto [render_width, render_height] = Gow3Graphics::ResolutionSize(
         names[std::clamp(v.render_resolution.load(), 0, int(names.size()) - 1)]);
-    v.startup_render_width = render_width;
-    v.startup_render_height = render_height;
+    // A title's own render size (WipEout: its profile sets 1920x1080): below it the game keeps that buffer.
+    Vulkan::SceneResolution::Size floor{0, 0};
+    if (const char* text = std::getenv("GOW3_MIN_RENDER_SIZE"); text && text[0]) {
+        unsigned width = 0, height = 0;
+        if (std::sscanf(text, "%ux%u", &width, &height) == 2) floor = {width, height};
+    }
+    const auto guest = Vulkan::SceneResolution::ClampGuest(
+        {uint32_t(render_width), uint32_t(render_height)}, floor);
+    v.startup_render_width = int(guest.width);
+    v.startup_render_height = int(guest.height);
     v.startup_engine_fps = v.engine_fps;
     const char* applied = std::getenv("GOW3_ENGINE_FPS");
     v.applied_engine_fps = applied && applied[0] ? Gow3Graphics::ParseEngineFps(std::atoi(applied))

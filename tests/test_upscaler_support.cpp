@@ -18,6 +18,7 @@ int main() {
     setenv("GOW3_CONFIG", path, 1);
     unsetenv("GOW3_UPSCALER");
     unsetenv("GOW3_UPSCALE_PRESET");
+    unsetenv("GOW3_MIN_RENDER_SIZE");
     unsetenv("GOW3_RENDER_RES");
     auto& s = Get();
     s.upscaler = UpscalerTaa;
@@ -111,6 +112,13 @@ int main() {
         setenv("GOW3_EXTRA_RESOLUTIONS", "3840x1080", 1);
         assert(guest("render_resolution=3840x1080\n") == std::pair(3840, 1080));
         unsetenv("GOW3_EXTRA_RESOLUTIONS");
+        // A title's own render size (WipEout's profile): below it the game keeps that buffer.
+        assert(guest("render_resolution=720p\n") == std::pair(1280, 720)); // no floor: God of War III
+        setenv("GOW3_MIN_RENDER_SIZE", "1920x1080", 1);
+        assert(guest("render_resolution=720p\n") == std::pair(1920, 1080));
+        assert(guest("render_resolution=900p\n") == std::pair(1920, 1080));
+        assert(guest("render_resolution=2560x1080\n") == std::pair(2560, 1080));
+        unsetenv("GOW3_MIN_RENDER_SIZE");
     }
     std::remove(path);
     std::puts("Upscaler support: saved choices and FSR 3.1 fallback PASS");

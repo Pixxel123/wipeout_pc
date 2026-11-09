@@ -25,5 +25,18 @@ int main() {
     assert((ForPreset(3, {2560, 1080}) == Size{1280, 540}));
     static_assert(NativeRender({1920, 1080}) && !NativeRender({2560, 1080}) &&
                   !NativeRender({1920, 1200}));
+    // The session's guest: below the game's own size the game keeps its whole buffer, above the
+    // largest generated size nothing is patched, and half-resolution targets need even sides.
+    constexpr Size floor{1920, 1080};
+    static_assert(ClampGuest({1280, 720}, floor) == Size{1920, 1080});
+    static_assert(ClampGuest({1600, 900}, floor) == Size{1920, 1080});
+    static_assert(ClampGuest({1280, 1440}, floor) == Size{1920, 1080}); // one side below: inert
+    static_assert(ClampGuest({2560, 1080}, floor) == Size{2560, 1080});
+    static_assert(ClampGuest({1280, 720}, Size{0, 0}) == Size{1280, 720}); // no floor for this title
+    static_assert(ClampGuest({9000, 5000}, floor) == Size{7680, 4320});
+    static_assert(ClampGuest({9000, 5000}, Size{0, 0}) == Size{7680, 4320});
+    static_assert(ClampGuest({2561, 1081}, Size{0, 0}) == Size{2560, 1080});
+    static_assert(ClampGuest({3200, 1350}, floor) == Size{3200, 1350}); // odd half size is the game's business
+    static_assert(Unpack(Pack({7680, 4320})) == Size{7680, 4320});
     std::puts("Guest size: PASS (scene and half-resolution divisors)");
 }

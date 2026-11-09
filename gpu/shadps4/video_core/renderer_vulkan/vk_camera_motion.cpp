@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
+#include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -168,8 +170,10 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
                 .layout = *pipeline_layout,
             }));
     device.destroyShaderModule(module);
+    const auto guest = SceneResolution::Guest();
+    const u64 pixels = std::max<u64>(u64(guest.width) * guest.height, 3840ull * 2160);
     for (auto& frame : frames) {
-        frame = std::make_unique<VideoCore::Buffer>(instance, 0, 3840ull * 2160 * 4,
+        frame = std::make_unique<VideoCore::Buffer>(instance, 0, pixels * 4,
                                                     VideoCore::MemoryType::DeviceLocal);
     }
     std::printf("GPU: camera motion debug overlay on\n");
@@ -319,7 +323,8 @@ void CameraMotion::Overlay(VideoCore::ImageId frame) {
         color.info.pixel_format != vk::Format::eR8G8B8A8Unorm ||
         !(color.usage_flags & vk::ImageUsageFlagBits::eStorage) ||
         color.info.size.width != depth.info.size.width ||
-        color.info.size.height != depth.info.size.height) {
+        color.info.size.height != depth.info.size.height ||
+        u64(color.info.size.width) * color.info.size.height * 4 > frames[0]->SizeBytes()) {
         static bool warned = false;
         if (!warned) {
             warned = true;

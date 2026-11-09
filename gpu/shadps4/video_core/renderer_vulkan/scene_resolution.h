@@ -14,6 +14,15 @@ struct Size {
 constexpr bool NativeRender(Size size) {
     return size == Size{};
 }
+/// The largest size a render resolution patch is generated for.
+inline constexpr Size MaxGuest{7680, 4320};
+/// The session's guest size from the saved render size: a size below the game's own (`floor`,
+/// {0, 0} for a title without one) leaves the game on its whole buffer, nothing above MaxGuest
+/// is patched, and both sides are even.
+constexpr Size ClampGuest(Size wanted, Size floor) {
+    if (wanted.width < floor.width || wanted.height < floor.height) wanted = floor;
+    return {std::min(wanted.width, MaxGuest.width) & ~1u, std::min(wanted.height, MaxGuest.height) & ~1u};
+}
 inline Size ForPreset(int preset, Size output) {
     // Even dimensions for half-resolution effects; match the preset labels exactly.
     constexpr std::array<double, 5> scales{1.0, 1.5, 1.7, 2.0, 3.0};
