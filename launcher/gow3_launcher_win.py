@@ -357,8 +357,7 @@ def your_screen_choice(size):
     width, height = int(size[0]) & ~1, int(size[1]) & ~1
     if width < MIN_SCREEN[0] or height < MIN_SCREEN[1]:
         return None
-    name = next((n for n in graphics_options.RESOLUTIONS if graphics_options.resolution_size(n) == (width, height)),
-                f'{width}x{height}')
+    name = graphics_options.size_name(width, height)
     return name, (f"{width} × {height} ({_('Native', 'Родное')})",)
 
 
@@ -368,16 +367,21 @@ def plain_size_label(name):
     return f'{size[0]} × {size[1]}' if size else name
 
 
-def resolution_choices_for(names, size, saved=None, mods=()):
+def resolution_choices_for(names, size, saved=None, mods=(), modes=()):
     """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then, largest
-    first, `names` (hand-made and profile sizes, without a duplicate) that take effect and fit the monitor,
-    with a saved size nobody lists (generated) so it stays selectable. Below MIN_GENERATED a size is inert
-    (the game keeps 1920x1080 and the upscaler stays off). The game's own size and the saved size are never
-    dropped. `mods`: the sizes the enabled mods list themselves, which need no saved row here."""
+    first, the sizes that take effect. With the monitor's `modes` known they are the list (a hand-made size
+    only when the monitor has that mode); without them, `names` (hand-made and profile sizes) that fit the
+    monitor. Below MIN_GENERATED a size is inert (the game keeps 1920x1080 and the upscaler stays off). The
+    game's own size and the saved size are never dropped; a saved size nobody lists (generated) is appended
+    so it stays selectable. `mods`: the sizes the enabled mods list themselves, which need no saved row."""
     screen = your_screen_choice(size)
     choices = [screen] if screen else []
-    limit = screen and graphics_options.resolution_size(screen[0])
     floor = graphics_options.MIN_GENERATED
+    if modes:
+        names = list(dict.fromkeys(['native'] + [graphics_options.size_name(w, h) for w, h in modes if not (w % 2 or h % 2)]))
+        limit = None  # a mode is the monitor's, whatever the desktop runs at
+    else:
+        limit = screen and graphics_options.resolution_size(screen[0])
 
     def listed(name):
         row = graphics_options.resolution_size(name)
@@ -1842,7 +1846,13 @@ class Launcher:
             return RESOLUTION_CHOICES + self.mod_resolutions()
         mods = self.mod_resolutions()
         return resolution_choices_for([v for v, _t in RESOLUTION_CHOICES], self.screen_size,
-                                      saved=self.ini.get('render_resolution'), mods=[v for v, _t in mods]) + mods
+                                      saved=self.current_render_resolution(), mods=[v for v, _t in mods],
+                                      modes=self.display_modes) + mods
+
+    def current_render_resolution(self):
+        """The render resolution as shown now: the live variable once it exists (the Render scale row
+        sets it), else the value the launcher opened with."""
+        return self.vars['render_resolution'].get() if 'render_resolution' in self.vars else self.ini.get('render_resolution')
 
     def offers_your_screen(self):
         """Whether the monitor's row is on the lists: it may need a generated patch, and only WipEout's binary
@@ -1904,7 +1914,7 @@ class Launcher:
         if not self.offers_your_screen():
             return choices
         return resolution_choices_for([v for v, _t in choices], self.screen_size,
-                                      saved=self.ini.get('render_resolution'))
+                                      saved=self.current_render_resolution(), modes=self.display_modes)
 
     def aspect_options(self):
         """The aspect ratios the render resolutions have (built-in and mods)."""

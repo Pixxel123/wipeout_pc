@@ -201,6 +201,41 @@ class FreshInstallTest(unittest.TestCase):
         self.assertEqual(launcher.fresh_render_resolution([], (3840, 2160), True, deck=False), '4K')
 
 
+QHD_MODES = [(2560, 1440), (1920, 1080), (1680, 1050), (1280, 720)]
+
+
+class MonitorModesTest(unittest.TestCase):
+    def test_the_list_is_the_monitors_modes_from_the_floor_up(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=QHD_MODES)
+        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('native', ('1920 × 1080',))])
+
+    def test_modes_above_the_desktop_size_stay(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=[(3840, 2160), (2560, 1440), (1920, 1080)])
+        self.assertEqual([v for v, _t in options], ['1440p', '4K', 'native'])
+        self.assertEqual(dict(options)['4K'], ('3840 × 2160',))
+
+    def test_the_deck_panel_lists_only_the_games_own_size(self):
+        self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (1280, 800), modes=[(1280, 800), (160, 256)]),
+                         [('native', ('1920 × 1080',))])
+
+    def test_odd_small_and_absent_sizes_are_not_listed(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (3840, 2160),
+                                                  modes=[(3840, 2160), (2560, 1440), (1920, 1080), (1366, 768), (1280, 720)])
+        self.assertEqual([v for v, _t in options], ['4K', '1440p', 'native'])  # no 3440x1440: the monitor has no such mode
+
+    def test_a_saved_size_and_mods_are_kept_once(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='2256x1504', modes=QHD_MODES)
+        self.assertEqual([v for v, _t in options], ['1440p', '2256x1504', 'native'])
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='3840x1080', mods=['3840x1080'], modes=QHD_MODES)
+        self.assertEqual([v for v, _t in options], ['1440p', 'native'])
+
+    def test_without_modes_the_list_is_todays(self):
+        self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=()),
+                         launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440)))
+        self.assertEqual([v for v, _t in launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440))],
+                         ['1440p', '2560x1080', '1920x1440', '1920x1200', 'native'])
+
+
 class Var:
     def __init__(self, value):
         self.value = value
@@ -218,6 +253,7 @@ class GameGateTest(unittest.TestCase):
         app.vars = {'game_dir': Var(folder), 'mods_enabled': Var(False)} if var else {}
         app.ini = {'render_resolution': saved}
         app.screen_size = (2256, 1504)
+        app.display_modes = []
         self.addCleanup(mock.patch.stopall)
         mock.patch('patches.game_title_id', return_value=title_id).start()
         return app
@@ -237,9 +273,25 @@ class GameGateTest(unittest.TestCase):
 
     def test_god_of_war_keeps_todays_lists(self):
         app = self.app('CUSA01623', saved='2256x1504')
+        app.display_modes = QHD_MODES
         self.assertFalse(app.offers_your_screen())
         self.assertEqual(app.game_resolution_options(), launcher.RESOLUTION_CHOICES)
         self.assertEqual(app.resolution_options(), launcher.RESOLUTION_CHOICES)
+
+    def test_wipeout_lists_the_monitors_modes_when_known(self):
+        app = self.app('CUSA07671')
+        app.screen_size = (2560, 1440)
+        app.display_modes = QHD_MODES
+        self.assertEqual(self.values(app.game_resolution_options()), ['1440p', 'native'])
+        self.assertEqual(self.values(app.resolution_options()), ['1440p', 'native'])
+
+    def test_the_live_render_resolution_stays_listed(self):
+        app = self.app('CUSA07671')
+        app.screen_size = (2560, 1440)
+        app.display_modes = QHD_MODES
+        app.vars['render_resolution'] = Var('4K')  # set live, as the Render scale row does
+        self.assertIn('4K', self.values(app.game_resolution_options()))
+        self.assertIn('4K', self.values(app.resolution_options()))
 
     def test_wipeout_lists_start_with_the_screen(self):
         app = self.app('CUSA07671')

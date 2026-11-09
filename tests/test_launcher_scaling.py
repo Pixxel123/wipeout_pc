@@ -134,6 +134,7 @@ class LauncherScalingTest(unittest.TestCase):
             mock.patch.object(launcher, 'monitor_under_pointer', return_value=(0, 0, 3840, 2160)),
             # A new gow3.ini starts at the monitor's size: unknown here, so the test sees native.
             mock.patch.object(launcher, 'monitor_size', return_value=(0, 0)),
+            mock.patch.object(launcher, 'display_modes', return_value=[]),
         ]
         for patcher in patchers:
             patcher.start()

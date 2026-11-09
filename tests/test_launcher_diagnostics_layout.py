@@ -37,6 +37,7 @@ class DiagnosticsLayoutTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(launcher, 'list_gpus', return_value=[]))
             # A new gow3.ini starts at the monitor's size: unknown here, so tests see native on any desktop.
             stack.enter_context(mock.patch.object(launcher, 'monitor_size', return_value=getattr(self, 'SCREEN', (0, 0))))
+            stack.enter_context(mock.patch.object(launcher, 'display_modes', return_value=[]))
             try:
                 root = tk.Tk()
             except tk.TclError as error:
