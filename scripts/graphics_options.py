@@ -314,6 +314,42 @@ def generated_resolution(value, known):
     return size
 
 
+RENDER_SCALES = (100, 125, 150, 200)  # of the monitor's size; above 100 % the game renders more pixels than it shows
+MAX_GENERATED = (7680, 4320)  # 8K: sizes above 3840x2160 are untested, and the memory line adds a fixed 1 GB
+
+
+def size_name(width, height):
+    """The render resolution name of a size: a built-in name with exactly that size ('1440p', 'native'),
+    else '<width>x<height>' (generated at start for WipEout)."""
+    return next((n for n in RESOLUTIONS if resolution_size(n) == (width, height)), f'{width}x{height}')
+
+
+def scaled_size(size, percent):
+    """`size` at `percent`, each side rounded to the nearest even pixel (the game halves its buffers)."""
+    return tuple(int(side * percent / 100 / 2 + 0.5) * 2 for side in size)
+
+
+def render_scales_for(size):
+    """[(percent, name)] of RENDER_SCALES whose result is between MIN_GENERATED and MAX_GENERATED, for a
+    monitor of `size` (rounded down to even); [] when the monitor is unknown (0, 0)."""
+    if not all(size):
+        return []
+    size = (int(size[0]) & ~1, int(size[1]) & ~1)
+    scales = []
+    for percent in RENDER_SCALES:
+        width, height = scaled_size(size, percent)
+        if MIN_GENERATED[0] <= width <= MAX_GENERATED[0] and MIN_GENERATED[1] <= height <= MAX_GENERATED[1]:
+            scales.append((percent, size_name(width, height)))
+    return scales
+
+
+def render_scale_of(size, value):
+    """The percent of the monitor `size` that the render resolution `value` is, or None when it is none of
+    RENDER_SCALES. Compared by size, so '4K' is 150 % of 2560x1440 and '2560x1440' is 100 % like '1440p'."""
+    target = resolution_size(value) if value else None
+    return next((p for p, name in render_scales_for(size) if target and resolution_size(name) == target), None)
+
+
 def resolution_patch_xml(width, height, out, name=None):
     """Writes a patch file with the generated "Resolution Patch - <name>" (default "<width>x<height>") and
     returns its path."""

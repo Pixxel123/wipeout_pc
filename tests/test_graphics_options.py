@@ -264,6 +264,46 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertEqual(g.generated_resolution('1920x1200', ()), (1920, 1200))
         self.assertEqual(g.generated_resolution('2256x1504', ()), (2256, 1504))
 
+    def test_size_name_prefers_a_built_in_name(self):
+        self.assertEqual(g.size_name(2560, 1440), '1440p')
+        self.assertEqual(g.size_name(1920, 1080), 'native')
+        self.assertEqual(g.size_name(3200, 1800), '1800p')
+        self.assertEqual(g.size_name(3840, 2160), '4K')
+        self.assertEqual(g.size_name(2256, 1504), '2256x1504')
+
+    def test_scaled_size_is_even(self):
+        self.assertEqual(g.scaled_size((2560, 1440), 100), (2560, 1440))
+        self.assertEqual(g.scaled_size((2560, 1440), 150), (3840, 2160))
+        self.assertEqual(g.scaled_size((2256, 1504), 125), (2820, 1880))
+        self.assertEqual(g.scaled_size((2256, 1504), 150), (3384, 2256))
+        self.assertEqual(g.scaled_size((1366, 768), 125), (1708, 960))
+        for size in ((2560, 1440), (2256, 1504), (1366, 768), (3440, 1440)):
+            for percent in g.RENDER_SCALES:
+                width, height = g.scaled_size(size, percent)
+                self.assertEqual((width % 2, height % 2), (0, 0), (size, percent))
+
+    def test_render_scales_use_the_hand_made_size_when_there_is_one(self):
+        self.assertEqual(g.render_scales_for((2560, 1440)),
+                         [(100, '1440p'), (125, '1800p'), (150, '4K'), (200, '5120x2880')])
+        self.assertEqual(g.render_scales_for((2561, 1441)), g.render_scales_for((2560, 1440)))
+
+    def test_render_scales_stay_between_the_floor_and_the_cap(self):
+        self.assertEqual(g.render_scales_for((1280, 800)), [(150, '1920x1200'), (200, '2560x1600')])
+        self.assertEqual(g.render_scales_for((3840, 2160)),
+                         [(100, '4K'), (125, '4800x2700'), (150, '5760x3240'), (200, '7680x4320')])
+        self.assertEqual([p for p, _n in g.render_scales_for((5120, 2880))], [100, 125, 150])
+        self.assertEqual(g.render_scales_for((0, 0)), [])
+        self.assertEqual(g.MAX_GENERATED, (7680, 4320))
+
+    def test_render_scale_of_compares_by_size(self):
+        self.assertEqual(g.render_scale_of((2560, 1440), '4K'), 150)
+        self.assertEqual(g.render_scale_of((2560, 1440), '1440p'), 100)
+        self.assertEqual(g.render_scale_of((2560, 1440), '2560x1440'), 100)
+        self.assertEqual(g.render_scale_of((2560, 1440), '1800p'), 125)
+        self.assertIsNone(g.render_scale_of((2560, 1440), 'native'))
+        self.assertIsNone(g.render_scale_of((2560, 1440), None))
+        self.assertIsNone(g.render_scale_of((0, 0), '1440p'))
+
 
 class WindowSizeTest(unittest.TestCase):
     def test_the_game_knows_the_launcher_sizes(self):
