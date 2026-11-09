@@ -306,5 +306,66 @@ class FreshWindowTest(unittest.TestCase):
             self.assertEqual(app.game_resolution_options()[0][1], ('2256 × 1504 (Native)',))
 
 
+DECK_XRANDR = """Screen 0: minimum 320 x 200, current 1280 x 800, maximum 16384 x 16384
+eDP connected primary 1280x800+0+0 right (normal left inverted right x axis y axis) 60mm x 60mm
+   800x1280      60.00*+
+   256x160       58.79  
+DisplayPort-0 disconnected (normal left inverted right x axis y axis)
+"""
+
+DESKTOP_XRANDR = """Screen 0: minimum 8 x 8, current 4480 x 1440, maximum 32767 x 32767
+DP-0 connected primary 2560x1440+0+0 (normal left inverted right x axis y axis) 597mm x 336mm
+   2560x1440     59.95*+ 143.97   119.88
+   1920x1080     60.00    59.94    50.00
+   1920x1080i    60.00    59.94
+   1680x1050     59.95
+   1280x720      60.00    59.94
+HDMI-0 connected 1920x1080+2560+0 (normal left inverted right x axis y axis) 527mm x 296mm
+   1920x1080     60.00*+
+   1366x768      59.79
+DP-1 disconnected (normal left inverted right x axis y axis)
+"""
+
+
+class DisplayModesTest(unittest.TestCase):
+    def test_a_rotated_panel_is_read_landscape(self):
+        self.assertEqual(launcher.xrandr_modes(DECK_XRANDR, (0, 0, 1280, 800)), [(1280, 800), (160, 256)])
+
+    def test_the_pointer_monitor_largest_first_without_rates_or_interlaced(self):
+        self.assertEqual(launcher.xrandr_modes(DESKTOP_XRANDR, (0, 0, 2560, 1440)),
+                         [(2560, 1440), (1920, 1080), (1680, 1050), (1280, 720)])
+        self.assertEqual(launcher.xrandr_modes(DESKTOP_XRANDR, (2560, 0, 1920, 1080)), [(1920, 1080), (1366, 768)])
+
+    def test_unknown_monitor_or_no_output_gives_no_modes(self):
+        self.assertEqual(launcher.xrandr_modes(DESKTOP_XRANDR, (0, 0, 0, 0)), [])
+        self.assertEqual(launcher.xrandr_modes('', (0, 0, 2560, 1440)), [])
+        self.assertEqual(launcher.xrandr_modes(DESKTOP_XRANDR, (0, 0, 3840, 2160)), [])
+
+    def test_windows_modes_dedupe_rates_and_sort(self):
+        table = [(1920, 1080), (1280, 720), (2560, 1440), (1920, 1080), (2560, 1440), (1024, 768)]
+        self.assertEqual(launcher.windows_modes(mode_at=lambda i: table[i] if i < len(table) else None),
+                         [(2560, 1440), (1920, 1080), (1280, 720), (1024, 768)])
+        with mock.patch.object(launcher, 'WINDOWS', False):
+            self.assertEqual(launcher.windows_modes(), [])
+
+    def test_display_modes_by_platform_without_a_subprocess(self):
+        root = mock.Mock()
+        root.tk.call.return_value = 'x11'
+        with mock.patch.object(launcher.subprocess, 'run', side_effect=AssertionError('no subprocess here')):
+            self.assertEqual(launcher.display_modes(root, (0, 0, 2560, 1440), DESKTOP_XRANDR),
+                             [(2560, 1440), (1920, 1080), (1680, 1050), (1280, 720)])
+            root.tk.call.return_value = 'win32'
+            with mock.patch.object(launcher, 'windows_modes', return_value=[(1920, 1080)]):
+                self.assertEqual(launcher.display_modes(root, (0, 0, 0, 0), ''), [(1920, 1080)])
+            root.tk.call.return_value = 'aqua'
+            self.assertEqual(launcher.display_modes(root, (0, 0, 0, 0), ''), [])
+
+    def test_monitor_under_pointer_takes_the_text(self):
+        root = mock.Mock()
+        root.winfo_pointerxy.return_value = (3000, 100)
+        with mock.patch.object(launcher.subprocess, 'run', side_effect=AssertionError('no subprocess here')):
+            self.assertEqual(launcher.monitor_under_pointer(root, DESKTOP_XRANDR), (2560, 0, 1920, 1080))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -230,13 +230,19 @@ FONT_LOADED = False  # set by main() for the window; the command-line roles neve
 WARN = '  ⚠'  # marks a risky choice; the text before it is translated as usual
 
 
-def monitor_under_pointer(root):
-    """(x, y, width, height) of the monitor holding the mouse pointer, from xrandr; zeros if unknown."""
+def xrandr_query():
+    """The text of `xrandr --query`, '' when xrandr is missing or hangs (then no monitor is known)."""
     try:
-        text = subprocess.run(['xrandr', '--query'], capture_output=True, text=True, timeout=3,
+        return subprocess.run(['xrandr', '--query'], capture_output=True, text=True, timeout=3,
                               env=host_environment()).stdout
     except (OSError, subprocess.SubprocessError):
-        return 0, 0, 0, 0
+        return ''
+
+
+def monitor_under_pointer(root, text=None):
+    """(x, y, width, height) of the monitor holding the mouse pointer, from xrandr (`text`, or a query
+    when None); zeros if unknown."""
+    text = xrandr_query() if text is None else text
     pointer_x, pointer_y = root.winfo_pointerxy()
     monitors = [(x, y, width, height) for width, height, x, y in
                 (tuple(map(int, match.groups())) for match in
@@ -245,6 +251,88 @@ def monitor_under_pointer(root):
         if x <= pointer_x < x + width and y <= pointer_y < y + height:
             return x, y, width, height
     return monitors[0] if monitors else (0, 0, 0, 0)
+
+
+def xrandr_modes(text, monitor):
+    """[(width, height)] the monitor at `monitor` (x, y, width, height, as monitor_under_pointer gives it)
+    can show, from `xrandr --query`, largest first, without duplicates or interlaced modes. A rotated output
+    (the Steam Deck's panel is 800x1280 turned right) lists its modes portrait; they are swapped to match the
+    geometry. [] when the monitor's block is not in the text."""
+    x, y, width, height = monitor
+    if not (width and height):
+        return []
+    block = re.search(r'^\S+ connected (?:primary )?%dx%d\+%d\+%d(?: (normal|left|right|inverted))?[^\n]*(?:\n|$)'
+                      r'((?:[ \t]+\S[^\n]*(?:\n|$))*)' % (width, height, x, y), text, re.M)
+    if not block:
+        return []
+    swap = block.group(1) in ('left', 'right')
+    modes = []
+    for match in re.finditer(r'^[ \t]+(\d+)x(\d+)\s', block.group(2), re.M):
+        w, h = map(int, match.groups())
+        if swap:
+            w, h = h, w
+        if (w, h) not in modes:
+            modes.append((w, h))
+    return sorted(modes, key=lambda m: (-m[0], -m[1]))
+
+
+def windows_modes(mode_at=None):
+    """[(width, height)] the primary display can show, from EnumDisplaySettingsW, largest first, without
+    duplicates (refresh rates and colour depths). `mode_at(index)` returns (width, height) or None past the
+    last mode; the default asks Windows. [] off Windows."""
+    if mode_at is None:
+        if not WINDOWS:
+            return []
+
+        class DEVMODEW(ctypes.Structure):
+            _fields_ = [('dmDeviceName', ctypes.c_wchar * 32), ('dmSpecVersion', ctypes.c_ushort),
+                        ('dmDriverVersion', ctypes.c_ushort), ('dmSize', ctypes.c_ushort),
+                        ('dmDriverExtra', ctypes.c_ushort), ('dmFields', ctypes.c_ulong),
+                        ('dmPositionX', ctypes.c_long), ('dmPositionY', ctypes.c_long),
+                        ('dmDisplayOrientation', ctypes.c_ulong), ('dmDisplayFixedOutput', ctypes.c_ulong),
+                        ('dmColor', ctypes.c_short), ('dmDuplex', ctypes.c_short),
+                        ('dmYResolution', ctypes.c_short), ('dmTTOption', ctypes.c_short),
+                        ('dmCollate', ctypes.c_short), ('dmFormName', ctypes.c_wchar * 32),
+                        ('dmLogPixels', ctypes.c_ushort), ('dmBitsPerPel', ctypes.c_ulong),
+                        ('dmPelsWidth', ctypes.c_ulong), ('dmPelsHeight', ctypes.c_ulong),
+                        ('dmDisplayFlags', ctypes.c_ulong), ('dmDisplayFrequency', ctypes.c_ulong),
+                        ('dmICMMethod', ctypes.c_ulong), ('dmICMIntent', ctypes.c_ulong),
+                        ('dmMediaType', ctypes.c_ulong), ('dmDitherType', ctypes.c_ulong),
+                        ('dmReserved1', ctypes.c_ulong), ('dmReserved2', ctypes.c_ulong),
+                        ('dmPanningWidth', ctypes.c_ulong), ('dmPanningHeight', ctypes.c_ulong)]
+        user32 = ctypes.windll.user32
+
+        def mode_at(index):
+            mode = DEVMODEW()
+            mode.dmSize = ctypes.sizeof(DEVMODEW)
+            if not user32.EnumDisplaySettingsW(None, index, ctypes.byref(mode)):
+                return None
+            return int(mode.dmPelsWidth), int(mode.dmPelsHeight)
+    modes = []
+    index = 0
+    while index < 4096:
+        mode = mode_at(index)
+        if mode is None:
+            break
+        if tuple(mode) not in modes:
+            modes.append(tuple(mode))
+        index += 1
+    return sorted(modes, key=lambda m: (-m[0], -m[1]))
+
+
+def display_modes(root, monitor, xrandr):
+    """The monitor's display modes for the Render resolution list: xrandr's on X11 (`xrandr` is the query's
+    text, read once), the primary display's on Windows, [] elsewhere or when unknown (the list then falls
+    back to the sizes that fit the monitor)."""
+    try:
+        system = root.tk.call('tk', 'windowingsystem')
+        if system == 'x11':
+            return xrandr_modes(xrandr, monitor)
+        if system == 'win32':
+            return windows_modes()
+    except Exception:
+        pass
+    return []
 
 
 MIN_SCREEN = graphics_options.MIN_GENERATED  # smaller monitors get no row of their own: see MIN_GENERATED
@@ -1506,9 +1594,11 @@ class Launcher:
         root.configure(bg=BG)
         self.fonts = {}
         self.desktop_scale = desktop_ui_scale(root)
-        self.monitor = (monitor_under_pointer(root) if root.tk.call('tk', 'windowingsystem') == 'x11'
-                        else (0, 0, 0, 0))
+        x11 = root.tk.call('tk', 'windowingsystem') == 'x11'
+        xrandr = xrandr_query() if x11 else ''
+        self.monitor = monitor_under_pointer(root, xrandr) if x11 else (0, 0, 0, 0)
         self.screen_size = monitor_size(root, self.monitor)
+        self.display_modes = display_modes(root, self.monitor, xrandr)
         self.write_fresh_render_resolution()
         self.apply_ui_scale()
         self.size_window()
