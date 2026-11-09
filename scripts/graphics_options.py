@@ -9,6 +9,7 @@ never did, the next start goes back to the last confirmed values.
 """
 import json
 import math
+import re
 import struct
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -32,6 +33,7 @@ RESOLUTION_PREFIX = 'Resolution Patch'
 # The games the generated resolution patches apply to (WipEout Omega Collection).
 GENERATED_TITLES = ('CUSA07671', 'CUSA05670')
 MIN_GENERATED = (1920, 1080)  # measured: below the game's own size the buffer stays 1920x1080 while the camera changes
+MAX_GENERATED = (7680, 4320)  # 8K: sizes above 3840x2160 are untested, and the memory line adds a fixed 1 GB
 FPS_PREFIX = 'Frame Rate Patch'
 TEXTURE_FIX = 'Bug Fix - Texture Corruption Fix'
 
@@ -84,13 +86,16 @@ def aspect_name(width, height):
 
 
 
+_SIZE_NAME = re.compile(r'([1-9]\d{0,4})x([1-9]\d{0,4})')
+
+
 def resolution_size(name):
-    """(width, height) of a built-in name or a mod's "<width>x<height>"; None for anything else."""
-    try:
-        width, height = SIZES.get(name) or map(int, name.split('x'))
-    except ValueError:
-        return None
-    return width, height
+    """(width, height) of a built-in name or a mod's "<width>x<height>" (plain digits, no sign, space or
+    leading zero); None for anything else."""
+    if name in SIZES:
+        return tuple(SIZES[name])
+    match = _SIZE_NAME.fullmatch(name) if isinstance(name, str) else None
+    return (int(match[1]), int(match[2])) if match else None
 
 
 def aspect_of(name):
@@ -127,10 +132,10 @@ def resolution_label(name, aspect=True, generated=True):
     `name` is a built-in name or a mod's "<width>x<height>"; anything else is shown as it is. Without
     `aspect` the ratio is left out (the launcher's list beside the Aspect ratio filter). `generated=False`:
     a patch provides the size (a mod's, a game's own), so being outside the built-in list is not beta."""
-    try:
-        width, height = SIZES.get(name) or map(int, name.split('x'))
-    except ValueError:
+    size = resolution_size(name)
+    if not size:
         return name
+    width, height = size
     title = 'Native' if name == 'native' else name if name in SIZES else None
     label = ' · '.join(p for p in (title, f'{width} × {height}', aspect and aspect_name(width, height)) if p)
     beta = name in BETA_RESOLUTIONS or (generated and name not in RESOLUTIONS and name not in TESTED_RESOLUTIONS)
@@ -305,17 +310,18 @@ def resolution_patch_note(width, height):
 
 def generated_resolution(value, known):
     """(width, height) when `value` is an even size ("<width>x<height>" or a built-in name), at least
-    MIN_GENERATED, that no resolution in `known` provides, else None (nothing to generate)."""
+    MIN_GENERATED and at most MAX_GENERATED, that no resolution in `known` provides, else None (nothing to
+    generate)."""
     if not value or value == 'native' or value in known:
         return None
     size = resolution_size(value)
-    if not size or size[0] % 2 or size[1] % 2 or size[0] < MIN_GENERATED[0] or size[1] < MIN_GENERATED[1]:
+    if (not size or size[0] % 2 or size[1] % 2 or size[0] < MIN_GENERATED[0] or size[1] < MIN_GENERATED[1]
+            or size[0] > MAX_GENERATED[0] or size[1] > MAX_GENERATED[1]):
         return None
     return size
 
 
 RENDER_SCALES = (100, 125, 150, 200)  # of the monitor's size; above 100 % the game renders more pixels than it shows
-MAX_GENERATED = (7680, 4320)  # 8K: sizes above 3840x2160 are untested, and the memory line adds a fixed 1 GB
 
 
 def size_name(width, height):

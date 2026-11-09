@@ -95,6 +95,13 @@ class GeneratedResolutionTest(unittest.TestCase):
             self.assertFalse((out / 'generated-resolution.xml').exists())
             self.assertEqual(run.generated_resolution_files(ini, [], [], out, 'CUSA07671')[1], ['2256x1504'])
 
+    def test_above_the_largest_size_generates_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            self.assertEqual(run.generated_resolution_files({'render_resolution': '70000x2000'}, [], [], out, 'CUSA07671'),
+                             ([], []))
+            self.assertFalse((out / 'generated-resolution.xml').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

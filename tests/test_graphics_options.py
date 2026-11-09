@@ -258,6 +258,19 @@ class GraphicsOptionsTest(unittest.TestCase):
         for value in ('1440p', '3440x1440', '3840x1080', '1365x768', 'native', 'abc', '0x0', '1366x', None):
             self.assertIsNone(g.generated_resolution(value, known), value)
 
+    def test_generated_resolution_stops_at_the_largest_size(self):
+        self.assertEqual(g.generated_resolution('7680x4320', ()), (7680, 4320))
+        for value in ('10240x5760', '7682x4320', '7680x4322', '70000x2000'):
+            self.assertIsNone(g.generated_resolution(value, ()), value)
+
+    def test_a_size_name_is_digits_x_digits(self):
+        self.assertEqual(g.resolution_size('2256x1504'), (2256, 1504))
+        for value in ('+2256x1504', '2_256x1504', '01920x1200', ' 1920x1200', '1920x1200 ', '1920x1200x3',
+                      '1920X1200', 'x', '', '0x0'):
+            self.assertIsNone(g.resolution_size(value), repr(value))
+        for name in g.RESOLUTIONS:
+            self.assertIsNotNone(g.resolution_size(name), name)
+
     def test_generated_resolution_starts_at_the_games_own_size(self):
         for value in ('1280x800', '1366x768', '1680x1050', '1920x1000', '1800x1200'):
             self.assertIsNone(g.generated_resolution(value, ()), value)
