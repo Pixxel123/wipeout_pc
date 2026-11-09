@@ -266,7 +266,7 @@ class GraphicsOptionsTest(unittest.TestCase):
     def test_a_size_name_is_digits_x_digits(self):
         self.assertEqual(g.resolution_size('2256x1504'), (2256, 1504))
         for value in ('+2256x1504', '2_256x1504', '01920x1200', ' 1920x1200', '1920x1200 ', '1920x1200x3',
-                      '1920X1200', 'x', '', '0x0'):
+                      '1920X1200', 'x', '', '0x0', '1٩20x1200', '100000x2000'):
             self.assertIsNone(g.resolution_size(value), repr(value))
         for name in g.RESOLUTIONS:
             self.assertIsNotNone(g.resolution_size(name), name)

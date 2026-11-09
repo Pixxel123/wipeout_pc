@@ -86,7 +86,7 @@ def aspect_name(width, height):
 
 
 
-_SIZE_NAME = re.compile(r'([1-9]\d{0,4})x([1-9]\d{0,4})')
+_SIZE_NAME = re.compile(r'([1-9][0-9]{0,4})x([1-9][0-9]{0,4})')
 
 
 def resolution_size(name):
