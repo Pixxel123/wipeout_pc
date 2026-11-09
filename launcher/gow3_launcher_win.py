@@ -379,6 +379,8 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=()):
     floor = graphics_options.MIN_GENERATED
     if modes:
         names = list(dict.fromkeys(['native'] + [graphics_options.size_name(w, h) for w, h in modes if not (w % 2 or h % 2)]))
+        if saved and saved not in names and saved not in mods:
+            names.append(saved)  # the saved size stays, as without modes (a mod lists its own)
         limit = None  # a mode is the monitor's, whatever the desktop runs at
     else:
         limit = screen and graphics_options.resolution_size(screen[0])

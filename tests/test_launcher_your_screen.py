@@ -229,6 +229,13 @@ class MonitorModesTest(unittest.TestCase):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='3840x1080', mods=['3840x1080'], modes=QHD_MODES)
         self.assertEqual([v for v, _t in options], ['1440p', 'native'])
 
+    def test_a_saved_size_below_the_floor_stays_listed(self):
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='720p', modes=QHD_MODES)
+        self.assertEqual(options, [('1440p', ('2560 × 1440 (Native)',)), ('native', ('1920 × 1080',)), ('720p', ('1280 × 720',))])
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='1280x800', modes=QHD_MODES)
+        self.assertEqual(options[-1], ('1280x800', ('1280 × 800',)))
+        self.assertEqual([v for v, _t in options], ['1440p', 'native', '1280x800'])
+
     def test_without_modes_the_list_is_todays(self):
         self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), modes=()),
                          launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440)))
