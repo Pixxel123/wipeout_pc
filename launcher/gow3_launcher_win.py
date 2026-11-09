@@ -384,7 +384,7 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
     """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then, largest
     first, the sizes that take effect. With the monitor's `modes` known the list is those modes plus the
     `names` that fit inside one of its modes; without them, `names` (hand-made and profile sizes) that fit
-    the monitor. Below MIN_GENERATED a size is inert (the game keeps 1920x1080 and the upscaler stays off). The
+    the monitor. Below MIN_GENERATED a size is inert (the game keeps 1920x1080, and the session runs at that size). The
     game's own size, the saved size and the `keep` sizes (the one the launcher opened with) are never
     dropped; one nobody lists (generated) is appended so it stays selectable. `mods`: the sizes the enabled
     mods list themselves, which need no saved row."""
