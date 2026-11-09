@@ -116,6 +116,24 @@ class GraphicsOptionsTest(unittest.TestCase):
             '240',
         )
 
+    def test_launch_ini_is_what_prepare_will_use(self):
+        config, state = self.ini, self.state
+        config.write_text('render_resolution=4K\nrestart_unconfirmed=1\n', encoding='utf-8')
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K')  # no state
+        for broken in ('{broken', '[1]'):
+            state.write_text(broken, encoding='utf-8')
+            self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K', broken)
+        state.write_text(json.dumps({'attempt': False, 'last_good': {'render_resolution': '2256x1504'}}),
+                         encoding='utf-8')
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K')  # first try
+        state.write_text(json.dumps({'attempt': True, 'last_good': {'render_resolution': '2256x1504'}}),
+                         encoding='utf-8')
+        before = (config.read_bytes(), state.read_bytes())
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '2256x1504')
+        self.assertEqual((config.read_bytes(), state.read_bytes()), before)
+        config.write_text('render_resolution=4K\n', encoding='utf-8')  # confirmed: the ini wins
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K')
+
     def test_patch_names(self):
         launcher = [
             'Bug Fix - Texture Corruption Fix',

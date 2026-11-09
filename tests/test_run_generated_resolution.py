@@ -1,5 +1,6 @@
 """run.py's generated render resolution: an even size nobody provides gets a patch file of its own,
 fed through the mod-patch path, so it is applied and listed like a mod's size."""
+import json
 import struct
 import sys
 import tempfile
@@ -94,6 +95,22 @@ class GeneratedResolutionTest(unittest.TestCase):
             self.assertEqual(run.generated_resolution_files(ini, [], [], out, 'CUSA01623'), ([], []))
             self.assertFalse((out / 'generated-resolution.xml').exists())
             self.assertEqual(run.generated_resolution_files(ini, [], [], out, 'CUSA07671')[1], ['2256x1504'])
+
+    def test_failed_restart_returns_to_a_generated_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            config, state = out / 'gow3.ini', out / 'graphics_state.json'
+            config.write_text('render_resolution=4K\nrestart_unconfirmed=1\n', encoding='utf-8')
+            state.write_text(json.dumps({'attempt': True, 'last_good': {'render_resolution': '2256x1504'}}),
+                             encoding='utf-8')
+            files, extra = run.generated_resolution_files(g.launch_ini(config, state), [], OWN, out, 'CUSA07671')
+            self.assertEqual(extra, ['2256x1504'])
+            self.assertEqual(files, [out / 'generated-resolution.xml'])
+            self.assertTrue(files[0].is_file())
+            self.assertIn('Resolution Patch - 2256x1504', files[0].read_text())
+            options, reverted = g.prepare(config, state, extra)
+            self.assertEqual(options['render_resolution'], '2256x1504')
+            self.assertTrue(reverted)
 
     def test_above_the_largest_size_generates_nothing(self):
         with tempfile.TemporaryDirectory() as directory:

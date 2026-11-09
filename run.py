@@ -214,7 +214,8 @@ def main():
     extra_resolutions = list(dict.fromkeys(s for s in [*patches.resolution_names(mod_patch_files), *own]
                                            if s and s not in graphics_options.RESOLUTIONS))
     generated_files, generated = generated_resolution_files(
-        graphics_options.read_ini(env['GOW3_CONFIG']), patches.resolution_names(mod_patch_files), own, out, title_id)
+        graphics_options.launch_ini(env['GOW3_CONFIG'], out / 'graphics_state.json'),
+        patches.resolution_names(mod_patch_files), own, out, title_id)
     mod_patch_files += generated_files
     extra_resolutions += generated
     env['GOW3_EXTRA_RESOLUTIONS'] = ';'.join(extra_resolutions)

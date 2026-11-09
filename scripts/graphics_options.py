@@ -155,6 +155,22 @@ def startup_options(ini, extra=()):
     return options
 
 
+def launch_ini(config, state_path):
+    """The options this launch will start with, read without writing anything: the ini's, or the last
+    confirmed ones when prepare() is about to restore them (the previous restart never confirmed its own)."""
+    ini = read_ini(config)
+    if ini.get('restart_unconfirmed') != '1':
+        return ini
+    try:
+        state = json.loads(Path(state_path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return ini
+    if not isinstance(state, dict):
+        return ini
+    last_good = state.get('last_good')
+    return last_good if state.get('attempt') and isinstance(last_good, dict) and last_good else ini
+
+
 def prepare(config, state_path, extra=()):
     """(options, reverted): the startup options of this launch, restoring the last confirmed
     ones when the previous launch after a restart never confirmed its own."""
