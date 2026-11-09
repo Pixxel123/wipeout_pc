@@ -226,6 +226,24 @@ class MonitorModesTest(unittest.TestCase):
     def test_a_saved_size_and_mods_are_kept_once(self):
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='2256x1504', modes=QHD_MODES)
         self.assertEqual([v for v, _t in options], ['1440p', '2256x1504', 'native'])
+
+    def test_kept_sizes_stay_like_the_saved_one(self):
+        # The size the launcher opened with is kept beside the live one the Render scale row set.
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='4K', keep=('2256x1504',), modes=QHD_MODES)
+        self.assertEqual([v for v, _t in options], ['1440p', '4K', '2256x1504', 'native'])
+        options = launcher.resolution_choices_for(WIPEOUT_SIZES, (1920, 1080), saved='4K', keep=('2256x1504', None))
+        self.assertEqual([v for v, _t in options], ['native', '4K', '2256x1504'])
+        self.assertEqual(launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='1440p', keep=('1440p',), modes=QHD_MODES),
+                         launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='1440p', modes=QHD_MODES))
+
+    def test_sizes_above_4k_carry_the_warning_marker(self):
+        options = dict(launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='5120x2880',
+                                                       modes=[(5120, 2160), (2560, 1440), (1920, 1080)]))
+        self.assertEqual(options['5120x2880'], ('5120 × 2880  ⚠',))  # the saved, generated row
+        self.assertEqual(options['5120x2160'], ('5120 × 2160  ⚠',))  # a mode of the monitor
+        self.assertEqual(options['1440p'], ('2560 × 1440 (Native)',))
+        self.assertEqual(launcher.your_screen_choice((3840, 2160)), ('4K', ('3840 × 2160 (Native)',)))
+        self.assertEqual(launcher.your_screen_choice((5120, 2880)), ('5120x2880', ('5120 × 2880 (Native)  ⚠',)))
         options = launcher.resolution_choices_for(WIPEOUT_SIZES, (2560, 1440), saved='3840x1080', mods=['3840x1080'], modes=QHD_MODES)
         self.assertEqual([v for v, _t in options], ['1440p', 'native'])
 
@@ -299,6 +317,15 @@ class GameGateTest(unittest.TestCase):
         app.vars['render_resolution'] = Var('4K')  # set live, as the Render scale row does
         self.assertIn('4K', self.values(app.game_resolution_options()))
         self.assertIn('4K', self.values(app.resolution_options()))
+
+    def test_the_size_the_launcher_opened_with_stays_listed_too(self):
+        app = self.app('CUSA07671', saved='2256x1504')
+        app.screen_size = (2560, 1440)
+        app.display_modes = QHD_MODES
+        app.vars['render_resolution'] = Var('4K')  # the Render scale row moved it; the player can go back
+        for options in (app.game_resolution_options(), app.resolution_options()):
+            self.assertIn('2256x1504', self.values(options))
+            self.assertIn('4K', self.values(options))
 
     def test_wipeout_lists_start_with_the_screen(self):
         app = self.app('CUSA07671')
@@ -450,6 +477,7 @@ class RenderScaleTest(unittest.TestCase):
         app.screen_size = size
         app.display_modes = []
         app.ini = {'render_resolution': resolution}
+        app.app = {'game_dir': ''}  # no game chosen: the launcher ships for WipEout
         app.vars = {'render_resolution': TracedVar(resolution)}
         app.tk = types.SimpleNamespace(StringVar=lambda value='': TracedVar(value))
         return app
@@ -459,7 +487,19 @@ class RenderScaleTest(unittest.TestCase):
         self.assertEqual(app.render_scale_var().get(), '100')
         self.assertEqual(app.render_scale_options(),
                          [('100', ('100 % · 2560 × 1440',)), ('125', ('125 % · 3200 × 1800',)),
-                          ('150', ('150 % · 3840 × 2160',)), ('200', ('200 % · 5120 × 2880',))])
+                          ('150', ('150 % · 3840 × 2160',)), ('200', ('200 % · 5120 × 2880  ⚠',))])
+
+    def test_sizes_above_4k_are_marked(self):
+        app = self.app((3840, 2160), '4K')
+        self.assertEqual(app.render_scale_options(),
+                         [('100', ('100 % · 3840 × 2160',)), ('125', ('125 % · 4800 × 2700  ⚠',)),
+                          ('150', ('150 % · 5760 × 3240  ⚠',)), ('200', ('200 % · 7680 × 4320  ⚠',))])
+
+    def test_another_game_takes_no_scale(self):
+        app = self.app((2560, 1440), '1440p')
+        app.offers_your_screen = lambda: False  # the folder was switched to God of War III in this session
+        app.render_scale_var().set('150')
+        self.assertEqual(app.vars['render_resolution'].get(), '1440p')
 
     def test_choosing_a_scale_sets_the_render_resolution(self):
         app = self.app((2560, 1440), '1440p')

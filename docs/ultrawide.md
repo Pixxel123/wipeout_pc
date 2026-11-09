@@ -41,10 +41,11 @@ does not list those sizes for WipEout. This was not measured on God of War III, 
 
 For WipEout, the launcher's **Render resolution** list is the monitor's own display modes from 1920 × 1080 up, as a
 PC game lists them: plain sizes, largest first, the monitor's current size marked **(Native)**, plus the game's own
-1920 × 1080. Where the launcher cannot read the modes (no `xrandr` on X11; not Windows) it lists the hand-made sizes
-that fit the monitor instead. A **Render scale** row under it offers 100, 125, 150 and 200 % of the monitor's size:
-the game renders at that size and the picture is shown at the monitor's size, so above 100 % is supersampling
-(sharper, slower); any other size reads **Custom**. Sizes above 3840 × 2160 are untested, and the memory patch adds a
+1920 × 1080. Where the launcher cannot read the modes (where xrandr is missing, or outside X11 and Windows) it lists
+the hand-made sizes that fit the monitor instead. A **Render scale** row under it offers 100, 125, 150 and 200 % of
+this monitor's current size: the game renders at that size and the picture is shown at the monitor's size, so above
+100 % is supersampling (sharper, slower); any other size reads **Custom**. Generated or scaled sizes above 3840 × 2160
+are untested (marked ⚠ in both lists), and the memory patch adds a
 fixed 1 GB. A size in the
 table above uses its tested entry. Any other even size (a 3:2 laptop at 2256 × 1504) is **generated at start** from
 the same sites by `scripts/graphics_options.py`
@@ -146,7 +147,7 @@ passo está no README dela). Ele usa o suporte a patches dos mods: uma pasta de 
 jogo (arquivos XML com assinaturas, na pasta `patches/`), aplicados enquanto o mod está marcado na página
 Mods. Veja [MODS.md](MODS.md).
 
-No WipEout, a lista **Resolução de renderização** mostra os modos do próprio monitor a partir de 1920 × 1080, do maior para o menor, com o tamanho atual marcado **(Nativa)**, mais o 1920 × 1080 do jogo; sem leitura dos modos, os tamanhos que cabem no monitor. A linha **Escala de renderização** oferece 100, 125, 150 e 200 % do tamanho do monitor (acima de 100 % é supersampling); tamanhos acima de 3840 × 2160 não foram testados. Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par de pelo menos 1920 × 1080 é gerado ao iniciar (beta): abaixo do tamanho do próprio jogo, o tamanho não tem efeito. No WipEout, nada abaixo de 1920 × 1080 tem efeito (medido no Steam Deck com 720p, 900p e 1280 × 800; o God of War III não foi medido), a lista do launcher mostra `3440 × 1440`, com `(Nativa)` na linha do próprio monitor, o menu do jogo mantém os rótulos longos com "(beta)", e um tamanho gerado só aparece no menu do jogo enquanto for o atual, então voltar exige o launcher.
+No WipEout, a lista **Resolução de renderização** mostra os modos do próprio monitor a partir de 1920 × 1080, do maior para o menor, com o tamanho atual marcado **(Nativa)**, mais o 1920 × 1080 do jogo; sem leitura dos modos, os tamanhos que cabem no monitor. A linha **Escala de renderização** oferece 100, 125, 150 e 200 % do tamanho atual deste monitor (acima de 100 % é supersampling); tamanhos gerados ou escalados acima de 3840 × 2160 não foram testados (marcados com ⚠ nas duas listas). Tamanhos da tabela usam sua entrada testada; qualquer outro tamanho par de pelo menos 1920 × 1080 é gerado ao iniciar (beta): abaixo do tamanho do próprio jogo, o tamanho não tem efeito. No WipEout, nada abaixo de 1920 × 1080 tem efeito (medido no Steam Deck com 720p, 900p e 1280 × 800; o God of War III não foi medido), a lista do launcher mostra `3440 × 1440`, com `(Nativa)` na linha do próprio monitor, o menu do jogo mantém os rótulos longos com "(beta)", e um tamanho gerado só aparece no menu do jogo enquanto for o atual, então voltar exige o launcher.
 
 A câmera do jogo tem campo de visão *horizontal* fixo. Aumentar a resolução para um tamanho ultrawide sem
 mexer na câmera só corta a imagem de 16:9 em cima e embaixo, e ela parece com zoom. Cada entrada

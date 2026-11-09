@@ -358,36 +358,47 @@ def your_screen_choice(size):
     if width < MIN_SCREEN[0] or height < MIN_SCREEN[1]:
         return None
     name = graphics_options.size_name(width, height)
-    return name, (f"{width} × {height} ({_('Native', 'Родное')})",)
+    return name, (f"{width} × {height} ({_('Native', 'Родное')})" + untested_mark(name),)
+
+
+UNTESTED_ABOVE = (3840, 2160)  # generated or scaled sizes larger than this on either side are untested
+
+
+def untested_mark(name):
+    """WARN for a render resolution above UNTESTED_ABOVE on either side, else ''."""
+    size = graphics_options.resolution_size(name)
+    return WARN if size and (size[0] > UNTESTED_ABOVE[0] or size[1] > UNTESTED_ABOVE[1]) else ''
 
 
 def plain_size_label(name):
-    """A render resolution as a PC game lists it: '2560 × 1440'; anything without a size as it is."""
+    """A render resolution as a PC game lists it: '2560 × 1440' (marked above UNTESTED_ABOVE); anything
+    without a size as it is."""
     size = graphics_options.resolution_size(name)
-    return f'{size[0]} × {size[1]}' if size else name
+    return f'{size[0]} × {size[1]}' + untested_mark(name) if size else name
 
 
-def resolution_choices_for(names, size, saved=None, mods=(), modes=()):
+def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
     """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then, largest
     first, the sizes that take effect. With the monitor's `modes` known they are the list (a hand-made size
     only when the monitor has that mode); without them, `names` (hand-made and profile sizes) that fit the
     monitor. Below MIN_GENERATED a size is inert (the game keeps 1920x1080 and the upscaler stays off). The
-    game's own size and the saved size are never dropped; a saved size nobody lists (generated) is appended
-    so it stays selectable. `mods`: the sizes the enabled mods list themselves, which need no saved row."""
+    game's own size, the saved size and the `keep` sizes (the one the launcher opened with) are never
+    dropped; one nobody lists (generated) is appended so it stays selectable. `mods`: the sizes the enabled
+    mods list themselves, which need no saved row."""
+    kept = [n for n in (saved, *keep) if n]
     screen = your_screen_choice(size)
     choices = [screen] if screen else []
     floor = graphics_options.MIN_GENERATED
     if modes:
         names = list(dict.fromkeys(['native'] + [graphics_options.size_name(w, h) for w, h in modes if not (w % 2 or h % 2)]))
-        if saved and saved not in names and saved not in mods:
-            names.append(saved)  # the saved size stays, as without modes (a mod lists its own)
+        names += [n for n in kept if n not in names and n not in mods]  # kept sizes stay, as without modes (a mod lists its own)
         limit = None  # a mode is the monitor's, whatever the desktop runs at
     else:
         limit = screen and graphics_options.resolution_size(screen[0])
 
     def listed(name):
         row = graphics_options.resolution_size(name)
-        if not row or name in ('native', saved):
+        if not row or name == 'native' or name in kept:
             return True
         if row[0] < floor[0] or row[1] < floor[1]:
             return False
@@ -397,8 +408,9 @@ def resolution_choices_for(names, size, saved=None, mods=(), modes=()):
         row = graphics_options.resolution_size(choice[0])
         return (0, -row[0], -row[1]) if row else (1, 0, 0)
     choices += [(n, (plain_size_label(n),)) for n in names if (not screen or n != screen[0]) and listed(n)]
-    if saved and saved not in dict(choices) and graphics_options.generated_resolution(saved, [*names, *mods]):
-        choices.append((saved, (plain_size_label(saved),)))
+    for name in kept:
+        if name not in dict(choices) and graphics_options.generated_resolution(name, [*names, *mods]):
+            choices.append((name, (plain_size_label(name),)))
     head = 1 if screen else 0
     return choices[:head] + sorted(choices[head:], key=largest_first)
 
@@ -1849,7 +1861,7 @@ class Launcher:
         mods = self.mod_resolutions()
         return resolution_choices_for([v for v, _t in RESOLUTION_CHOICES], self.screen_size,
                                       saved=self.current_render_resolution(), mods=[v for v, _t in mods],
-                                      modes=self.display_modes) + mods
+                                      modes=self.display_modes, keep=(self.ini.get('render_resolution'),)) + mods
 
     def current_render_resolution(self):
         """The render resolution as shown now: the live variable once it exists (the Render scale row
@@ -1911,6 +1923,8 @@ class Launcher:
             self.render_scale = self.tk.StringVar(value=current())
 
             def scale_chosen(*_a):
+                if not self.offers_your_screen():
+                    return  # the folder was switched to another game: its sizes are not generated
                 percent = self.render_scale.get()
                 name = dict(graphics_options.render_scales_for(self.screen_size)).get(int(percent)) if percent.isdigit() else None
                 if name and name != resolution.get():
@@ -1929,7 +1943,7 @@ class Launcher:
         rows = []
         for percent, name in graphics_options.render_scales_for(self.screen_size):
             width, height = graphics_options.resolution_size(name)
-            rows.append((str(percent), (f'{percent} % · {width} × {height}',)))
+            rows.append((str(percent), (f'{percent} % · {width} × {height}' + untested_mark(name),)))
         if self.render_scale_var().get() == 'custom':
             rows.append(('custom', ('Custom', 'Другое')))  # choice() translates option pairs itself
         return rows
@@ -1952,7 +1966,8 @@ class Launcher:
         if not self.offers_your_screen():
             return choices
         return resolution_choices_for([v for v, _t in choices], self.screen_size,
-                                      saved=self.current_render_resolution(), modes=self.display_modes)
+                                      saved=self.current_render_resolution(), modes=self.display_modes,
+                                      keep=(self.ini.get('render_resolution'),))
 
     def aspect_options(self):
         """The aspect ratios the render resolutions have (built-in and mods)."""
@@ -2299,8 +2314,8 @@ class Launcher:
         if self.offers_your_screen() and graphics_options.render_scales_for(self.screen_size):
             self.row(f, _('Render scale', 'Масштаб рендеринга'),
                      self.choice(f, 'render_scale', None, self.render_scale_options, var=self.render_scale_var()),
-                     _('Renders at this share of the monitor\'s size and shows it at the monitor\'s size. Above 100 % is '
-                       'supersampling: sharper, slower. Sizes above 3840 × 2160 are untested.'),
+                     _('Renders at this share of this monitor\'s current size and shows it at the monitor\'s size. Above '
+                       '100 % is supersampling: sharper, slower. Generated or scaled sizes above 3840 × 2160 are untested.'),
                      restart=True)
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '

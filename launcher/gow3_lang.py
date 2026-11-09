@@ -961,8 +961,8 @@ EXTRA = {
         'Native': 'Nativa',
         'Render scale': 'Escala de renderização',
         'Custom': 'Personalizado',
-        "Renders at this share of the monitor's size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Sizes above 3840 × 2160 are untested.":
-            'Renderiza nesta fração do tamanho do monitor e mostra no tamanho do monitor. Acima de 100 % é supersampling: mais nítido, mais lento. Tamanhos acima de 3840 × 2160 não foram testados.',
+        "Renders at this share of this monitor's current size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Generated or scaled sizes above 3840 × 2160 are untested.":
+            'Renderiza nesta fração do tamanho atual deste monitor e mostra no tamanho do monitor. Acima de 100 % é supersampling: mais nítido, mais lento. Tamanhos gerados ou escalados acima de 3840 × 2160 não foram testados.',
         'Rendering': 'Renderização',
         'For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). Other render resolutions output at their own size.': 'Para a resolução de renderização nativa de 1920 × 1080: o que o upscaler produz (o HUD também). As outras resoluções de renderização saem no próprio tamanho.',
         'Temporal anti-aliasing': 'Antisserrilhamento temporal',
@@ -1366,8 +1366,8 @@ EXTRA = {
         'Native': 'Nativa',
         'Render scale': 'Escala de renderizado',
         'Custom': 'Personalizado',
-        "Renders at this share of the monitor's size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Sizes above 3840 × 2160 are untested.":
-            'Renderiza a esta fracción del tamaño del monitor y lo muestra al tamaño del monitor. Por encima de 100 % es supersampling: más nítido, más lento. Los tamaños mayores de 3840 × 2160 no están probados.',
+        "Renders at this share of this monitor's current size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Generated or scaled sizes above 3840 × 2160 are untested.":
+            'Renderiza a esta fracción del tamaño actual de este monitor y lo muestra al tamaño del monitor. Por encima de 100 % es supersampling: más nítido, más lento. Los tamaños generados o escalados mayores de 3840 × 2160 no están probados.',
         'Rendering': 'Renderizado',
         'For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). Other render resolutions output at their own size.': 'Para la resolución de renderizado nativa de 1920 × 1080: lo que produce el upscaler (también el HUD). Las demás resoluciones de renderizado salen a su propio tamaño.',
         'Temporal anti-aliasing': 'Antialiasing temporal',
