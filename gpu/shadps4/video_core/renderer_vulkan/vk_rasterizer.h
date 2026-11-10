@@ -32,6 +32,9 @@ namespace Vulkan {
 
 class GraphicsPipeline;
 class Runtime;
+namespace EnvViewDiag {
+class Tracker;
+}
 
 class Rasterizer {
 public:
@@ -56,6 +59,9 @@ public:
     }
 
     void Draw(bool is_indexed, u32 index_offset = 0, const PreparedDraw* prepared = nullptr);
+    /// gow3: Draw's body; EnvDiag adds the GOW3_ENV_VIEW_DIAG hooks (vk_env_view_diag.h).
+    template <bool EnvDiag>
+    void DrawImpl(bool is_indexed, u32 index_offset, const PreparedDraw* prepared);
 
     /// gow3: draw preparation workers (vk_draw_prep.h), fed and consumed by Liverpool.
     DrawPreparation& GetDrawPreparation() {
@@ -338,6 +344,11 @@ private:
     std::unique_ptr<DrawPreparation> draw_prep;
     std::unique_ptr<CameraMotion> camera_motion; // gow3: motion vectors (docs/upscaler.md)
     std::unique_ptr<SceneTargets> scene_targets;
+    /// gow3: GOW3_ENV_VIEW_DIAG (vk_env_view_diag.h); null unless set. Stage A only.
+    std::unique_ptr<EnvViewDiag::Tracker> env_view;
+    bool env_view_pair = false; ///< the current draw passed the register test, not yet decided
+    bool EnvViewEarly(const PreparedDraw* prepared);
+    bool EnvViewLate(const GraphicsPipeline* pipeline);
     bool scene_started = false;
     std::unique_ptr<ObjectMotion> object_motion;
     bool motion_draw = false;

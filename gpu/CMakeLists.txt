@@ -506,6 +506,10 @@ target_compile_options(scene-signature-test PRIVATE -UNDEBUG -Wall -Wextra -Werr
 target_include_directories(scene-signature-test PRIVATE shim shadps4)
 target_link_libraries(scene-signature-test PRIVATE Vulkan::Headers)
 
+add_executable(env-view-diag-test EXCLUDE_FROM_ALL ../tests/test_env_view_diag.cpp)
+target_compile_options(env-view-diag-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(env-view-diag-test PRIVATE shadps4)
+
 add_executable(prep-workers-test EXCLUDE_FROM_ALL ../tests/test_prep_workers.cpp)
 target_compile_options(prep-workers-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(prep-workers-test PRIVATE shim shadps4)

@@ -22,6 +22,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_depth_stencil_state.h"
+#include "video_core/renderer_vulkan/vk_env_view_diag.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -63,6 +64,14 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // submits after the presenter (and this) exist; until then the default hashes as before.
     liverpool->hash_registers = AmdGpu::HashRegisters(draw_prep ? draw_prep->WorkerCount() : 0);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
+    if (const auto mode = EnvViewDiag::ParseMode(std::getenv("GOW3_ENV_VIEW_DIAG"));
+        mode != EnvViewDiag::Mode::Off) {
+        env_view = std::make_unique<EnvViewDiag::Tracker>(mode);
+        std::printf("Env views diagnostic: GOW3_ENV_VIEW_DIAG=%s (%s)\n", EnvViewDiag::Name(mode),
+                    mode == EnvViewDiag::Mode::Count
+                        ? "counting only, nothing dropped"
+                        : "timing only: reflection cube faces are dropped, reflections go stale");
+    }
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
     camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
@@ -994,6 +1003,15 @@ bool Rasterizer::FilterDrawPasses() const {
 }
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
+    if (env_view) [[unlikely]] {
+        DrawImpl<true>(is_indexed, index_offset, prepared);
+        return;
+    }
+    DrawImpl<false>(is_indexed, index_offset, prepared);
+}
+
+template <bool EnvDiag>
+void Rasterizer::DrawImpl(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
     Gow3Stats::draws.fetch_add(1, std::memory_order_relaxed);
 
@@ -1013,6 +1031,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
             return;
         }
     }
+    if constexpr (EnvDiag) {
+        if (EnvViewEarly(prepared)) {
+            return;
+        }
+    }
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
     const PreparedDraw* used_prepared = pipeline_cache.UsedPrepared();
     if (prepared) {
@@ -1021,13 +1044,111 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
     }
     if (!pipeline) {
+        if constexpr (EnvDiag) {
+            env_view_pair = false;
+        }
         return;
+    }
+    if constexpr (EnvDiag) {
+        if (EnvViewLate(pipeline)) {
+            return;
+        }
     }
     if (pipelined && FilterDrawPasses()) {
         PostDraw(pipeline, used_prepared, is_indexed, index_offset);
         return;
     }
     DrawRecord(pipeline, used_prepared, is_indexed, index_offset);
+}
+
+namespace {
+// The target's size as ImageInfo takes it: the game's size hint when it gave one.
+EnvViewDiag::Target EnvViewColour(const AmdGpu::ColorBuffer& cb, AmdGpu::CbDbExtent hint) {
+    if (!cb) {
+        return {false, EnvViewDiag::Kind::Other, 0, 0};
+    }
+    const auto data = cb.GetDataFmt();
+    const auto number = cb.GetNumberFmt();
+    auto kind = EnvViewDiag::Kind::Other;
+    if (number == AmdGpu::NumberFormat::Float) {
+        if (data == AmdGpu::DataFormat::Format10_11_11) {
+            kind = EnvViewDiag::Kind::B10G11R11Float;
+        } else if (data == AmdGpu::DataFormat::Format16) {
+            kind = EnvViewDiag::Kind::R16Float;
+        }
+    }
+    return {true, kind, hint.Valid() ? hint.width : cb.Pitch(),
+            hint.Valid() ? hint.height : cb.Height()};
+}
+
+EnvViewDiag::Target EnvViewDepth(const AmdGpu::DepthBuffer& db, AmdGpu::CbDbExtent hint) {
+    if (!db.DepthValid()) {
+        return {false, EnvViewDiag::Kind::Other, 0, 0};
+    }
+    const auto kind = db.z_info.format == AmdGpu::DepthBuffer::ZFormat::Z16
+                          ? EnvViewDiag::Kind::D16
+                          : EnvViewDiag::Kind::Other;
+    return {true, kind, hint.Valid() ? hint.width : db.Pitch(),
+            hint.Valid() ? hint.height : db.Height()};
+}
+} // namespace
+
+bool Rasterizer::EnvViewEarly(const PreparedDraw* prepared) {
+    // gow3: GOW3_ENV_VIEW_DIAG, stage A before pipeline selection (vk_env_view_diag.h).
+    const auto& regs = Regs();
+    const auto& cb0 = regs.color_buffers[0];
+    if (cb0 && FrameCapture::IsDisplayBuffer(cb0.Address())) {
+        static const bool report = std::getenv("GOW3_FRAME_STATS") != nullptr ||
+                                   env_view->GetMode() == EnvViewDiag::Mode::Count;
+        const double now = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+        if (const auto line = env_view->OnDisplayDraw(cb0.Address(), now, report)) {
+            std::printf("%s\n", line->c_str());
+        }
+        env_view_pair = false;
+        return false;
+    }
+    env_view_pair = EnvViewDiag::ColourPair(
+        EnvViewColour(cb0, CbExtent(0)), regs.color_target_mask.GetMask(0),
+        EnvViewColour(regs.color_buffers[1], CbExtent(1)), regs.color_target_mask.GetMask(1));
+    if (env_view_pair && !EnvViewDiag::ViewDepth(EnvViewDepth(regs.depth_buffer, DbExtent()))) {
+        env_view->OnNearMiss();
+        env_view_pair = false;
+    }
+    if (!env_view_pair || prepared || !env_view->EarlyTrusted()) {
+        return false;
+    }
+    env_view_pair = false;
+    return env_view->OnViewDraw(cb0.Address(), cb0.BaseSlice(),
+                                regs.depth_buffer.DepthValid() ? regs.depth_buffer.DepthAddress()
+                                                               : 0);
+}
+
+bool Rasterizer::EnvViewLate(const GraphicsPipeline* pipeline) {
+    // gow3: GOW3_ENV_VIEW_DIAG after pipeline selection: the pixel shader's colour outputs.
+    constexpr u32 motion = 1u << Shader::MotionVectors::Output;
+    const u32 outputs = pipeline->GetGraphicsKey().mrt_mask & ~motion;
+    const auto& regs = Regs();
+    if (!std::exchange(env_view_pair, false)) {
+        if (outputs == 0 && regs.depth_buffer.DepthValid()) {
+            const auto depth = EnvViewDepth(regs.depth_buffer, DbExtent());
+            const bool square = depth.kind == EnvViewDiag::Kind::D16 &&
+                                depth.width == depth.height && depth.width >= 64 &&
+                                depth.width <= 512;
+            env_view->OnDepthOnlyDraw(square, regs.depth_buffer.DepthAddress());
+        }
+        return false;
+    }
+    if (!EnvViewDiag::Outputs(outputs)) {
+        env_view->OnMismatch();
+        return false;
+    }
+    env_view->OnAgreement();
+    const auto& cb0 = regs.color_buffers[0];
+    return env_view->OnViewDraw(cb0.Address(), cb0.BaseSlice(),
+                                regs.depth_buffer.DepthValid() ? regs.depth_buffer.DepthAddress()
+                                                               : 0);
 }
 
 void Rasterizer::DiagPassBoundary(bool force) {
