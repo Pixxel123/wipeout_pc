@@ -5,8 +5,8 @@
 // reflections stale or empty: they are for measuring, not for playing.
 //
 // A face is recognised by its targets alone: colour slot 0 B10G11R11 float 256x256, slot 1 R16
-// float 256x256, no other colour output (the pixel shader's outputs, checked against the
-// pipeline), depth absent or D16 256x256. The game draws the camera ship's cube (all six faces)
+// float 256x256, no other colour target written (the pixel shader's exports that reach a bound
+// target, checked against the pipeline), depth absent or D16 256x256. The game draws the camera ship's cube (all six faces)
 // every frame, first, and three faces of one other ship's cube after it. A face is a colour
 // target address and first slice. Only the sky and scene draws of a face are dropped: the depth
 // clear before it, the mip chain and the blur after it still run, on the cube's old contents.
@@ -91,10 +91,12 @@ struct Target {
     return !depth.present || (depth.kind == Kind::D16 && depth.width == 256 && depth.height == 256);
 }
 
-/// The pipeline test: the pixel shader writes colour slots 0 and 1 and nothing else (the port's
-/// own motion-vector output excluded by the caller).
-[[nodiscard]] constexpr bool Outputs(std::uint32_t colour_outputs) noexcept {
-    return colour_outputs == 0b11;
+/// The pipeline test: of the pixel shader's colour exports (the port's own motion-vector output
+/// excluded by the caller), the ones that reach a target are slots 0 and 1. `bound` has a bit for
+/// each slot with a target and a non-zero target mask. The faces' shaders are the main scene's
+/// materials, which also export slot 2 with no target bound there.
+[[nodiscard]] constexpr bool Outputs(std::uint32_t exports, std::uint32_t bound) noexcept {
+    return (exports & bound) == 0b11;
 }
 
 class Tracker {

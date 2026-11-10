@@ -1128,10 +1128,16 @@ bool Rasterizer::EnvViewEarly(const PreparedDraw* prepared) {
 bool Rasterizer::EnvViewLate(const GraphicsPipeline* pipeline) {
     // gow3: GOW3_ENV_VIEW_DIAG after pipeline selection: the pixel shader's colour outputs.
     constexpr u32 motion = 1u << Shader::MotionVectors::Output;
-    const u32 outputs = pipeline->GetGraphicsKey().mrt_mask & ~motion;
+    const u32 exports = pipeline->GetGraphicsKey().mrt_mask & ~motion;
     const auto& regs = Regs();
+    u32 bound = 0; // slots with a target and a non-zero target mask, as the key's colour loop
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        if (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) {
+            bound |= 1u << cb;
+        }
+    }
     if (!std::exchange(env_view_pair, false)) {
-        if (outputs == 0 && regs.depth_buffer.DepthValid()) {
+        if ((exports & bound) == 0 && regs.depth_buffer.DepthValid()) {
             const auto depth = EnvViewDepth(regs.depth_buffer, DbExtent());
             const bool square = depth.kind == EnvViewDiag::Kind::D16 &&
                                 depth.width == depth.height && depth.width >= 64 &&
@@ -1140,7 +1146,7 @@ bool Rasterizer::EnvViewLate(const GraphicsPipeline* pipeline) {
         }
         return false;
     }
-    if (!EnvViewDiag::Outputs(outputs)) {
+    if (!EnvViewDiag::Outputs(exports, bound)) {
         env_view->OnMismatch();
         return false;
     }

@@ -60,8 +60,15 @@ int main() {
     assert(ViewDepth({true, Kind::D16, 256, 256}));
     assert(!ViewDepth({true, Kind::D16, 512, 512}));
     assert(!ViewDepth({true, Kind::Other, 256, 256}));
-    // The pipeline test: slots 0 and 1 only.
-    assert(Outputs(0b11) && !Outputs(0b1) && !Outputs(0b111) && !Outputs(0));
+    // The pipeline test: the exports that reach a bound target are slots 0 and 1.
+    assert(Outputs(0b11, 0b11));
+    // The faces' material shaders also export slot 2, with no target bound there: a face.
+    assert(Outputs(0b111, 0b11));
+    // Slot 2 bound (a stale target with a non-zero mask) and written: not a face.
+    assert(!Outputs(0b111, 0b111));
+    // Slot 1 not written (a single-target pass with a stale slot 1 target): not a face.
+    assert(!Outputs(0b1, 0b11));
+    assert(!Outputs(0, 0b11) && !Outputs(0b11, 0b1));
 
     // count: nothing dropped; the camera cube is known from the third frame on.
     {
