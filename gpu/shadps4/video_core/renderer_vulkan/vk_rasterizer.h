@@ -13,6 +13,7 @@
 #include "video_core/renderer_vulkan/vk_constant_ring.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
+#include "video_core/renderer_vulkan/vk_draw_census.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
@@ -468,6 +469,38 @@ private:
         u64 offset;
         vk::IndexType type;
     } index_bind{};
+    /// gow3: GOW3_DRAW_REPEAT_STATS (vk_draw_census.h). Stage B, after each draw packet: compares
+    /// a recorded direct draw with the previous one. `kind` is the packet's PacketKind.
+    void CountDrawPacket(u32 kind, const Pipeline* pipeline, bool is_indexed, bool regs_reset,
+                         const u16* blocks, u32 num_blocks);
+    /// Stage A, after the drain at the end of a submission: logs and prints the counters.
+    void ReportDrawCensus();
+    struct DrawCensusState {
+        DrawCensus::Counters counters{}; ///< stage B (read by stage A after a drain)
+        u64 no_pipeline = 0;             ///< stage A
+        // Stage B: the previous recorded direct draw.
+        bool has_previous = false;
+        vk::Pipeline pipeline;
+        VertexBinds vertex;
+        bool indexed = false;
+        IndexBind index{};
+        std::array<u64, Shader::MaxStageTypes> texture_keys{};
+        u32 num_texture_keys = 0;
+        bool texture_keyed = false;
+        std::vector<u32> selection; ///< the selection register words at that draw
+        std::vector<u32> scratch;
+        // Stage B: since that draw, the register blocks the packets carried and ClearState.
+        std::array<u64, AmdGpu::RegDirty::NumMaskWords> written{};
+        bool reset = false;
+        // Stage B: after the last packet, Scheduler::RenderPasses and the render-state memo's
+        // hit and call counts.
+        u64 passes = 0;
+        u64 memo_hits = 0, memo_calls = 0;
+        u64 run = 0; ///< draws in the open run of draws chained by Same1234
+    };
+    /// Created when enabled, never freed (the draw threads may outlive exit). Static: the
+    /// rasterizer's layout stays as it is.
+    static inline DrawCensusState* draw_census = nullptr;
     /// The direct draw whose vertex/index buffers BindResources may resolve early.
     struct DrawInputs {
         const GraphicsPipeline* pipeline;

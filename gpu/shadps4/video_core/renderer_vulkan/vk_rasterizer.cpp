@@ -5,6 +5,7 @@
 #include <utility>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "gow3_frame_log.h"
 #include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -57,6 +58,9 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+    if (DrawCensus::enabled && !draw_census) {
+        draw_census = new DrawCensusState{}; // gow3: GOW3_DRAW_REPEAT_STATS, before any draw
+    }
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     // Only the workers read the register checksum. Set before any command buffer: the guest
@@ -907,11 +911,266 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
                         packet.is_indexed, packet.index_offset);
     }
+    if (DrawCensus::enabled) [[unlikely]] {
+        self.CountDrawPacket(u32(packet.kind), packet.pipeline, packet.is_indexed,
+                             packet.regs_reset, blocks, packet.num_blocks);
+    }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
     if (self.constant_ring) {
         self.constant_ring->Stamp(packet.ring_end);
     }
+}
+
+namespace {
+/// gow3: GOW3_DRAW_REPEAT_STATS (vk_draw_census.h). The register words pipeline selection reads,
+/// from PipelineCache::GetGraphicsPipeline, RefreshGraphicsKey, RefreshGraphicsStages,
+/// BuildRuntimeInfo and GetProgram, and GetEffectiveDepthStencilState (vk_depth_stencil_state.h),
+/// as word indices, and the 16-word blocks that hold them. Each stage's program counts whether
+/// the stage is enabled or not; the user-data words do not (they reach the selection only through
+/// the sharps and the fetch shader, which a selection memo must check apart).
+struct SelectionWords {
+    std::vector<u32> words;
+    AmdGpu::RegDirty blocks;
+};
+
+SelectionWords MakeSelectionWords(const AmdGpu::Regs& regs) {
+    SelectionWords out;
+    const auto index = [&](const void* field) {
+        return static_cast<u32>(static_cast<const u32*>(field) - regs.reg_array.data());
+    };
+    const auto add = [&](u32 first, u32 count) {
+        for (u32 i = 0; i < count; ++i) {
+            out.words.push_back(first + i);
+        }
+        out.blocks.Mark(first, count);
+    };
+    // Address and settings (SPI_SHADER_PGM_LO/HI, RSRC1/2), not the 16 user-data words after them.
+    for (const auto* program : {&regs.ps_program, &regs.vs_program, &regs.gs_program,
+                                &regs.es_program, &regs.hs_program, &regs.ls_program}) {
+        add(index(program), 4);
+    }
+    add(index(&regs.depth_render_control), 1);
+    add(index(&regs.depth_render_override), 1);
+    add(index(&regs.depth_buffer.z_info), 4); // z_info, stencil_info, z/stencil read bases
+    add(index(&regs.color_target_mask), 2);   // and color_shader_mask
+    add(index(&regs.stencil_control), 3);     // and stencil_ref_front, stencil_ref_back
+    add(index(regs.ps_inputs.data()), 32);
+    add(index(&regs.ps_input_ena), 2);         // and ps_input_addr
+    add(index(&regs.ps_input_addr) + 2, 1);    // num_interp (a bit field: SPI_PS_IN_CONTROL)
+    add(index(&regs.barycentric_control), 1);
+    add(index(&regs.z_export_format), 2);      // and color_export_format
+    add(index(regs.blend_control.data()), AmdGpu::NUM_COLOR_BUFFERS);
+    // depth_control, eqaa, color_control, depth_shader_control, clipper_control, polygon_control
+    add(index(&regs.depth_control), 6);
+    add(index(&regs.vs_output_control), 1);
+    add(index(&regs.vgt_gs_mode), 1);
+    add(index(&regs.vgt_gs_out_prim_type), 1);
+    add(index(&regs.vgt_instance_step_rate_0), 2); // and _1
+    add(index(&regs.vgt_esgs_ring_itemsize), 1);
+    add(index(&regs.vgt_gsvs_ring_itemsize) + 34, 1); // vgt_gs_max_vert_out (a bit field)
+    // stage_enable, ls_hs_config, vgt_gs_vert_itemsize[4], tess_config
+    add(index(&regs.stage_enable), 7);
+    add(index(&regs.vgt_gs_instance_cnt), 2); // and vgt_strmout_config
+    add(index(&regs.aa_config), 1);
+    for (const auto& cb : regs.color_buffers) {
+        add(index(&cb.base_address), 1); // validity only (operator bool)
+        add(index(&cb.info), 2);         // info (format, number type, swap, blend bypass), attrib
+    }
+    add(index(&regs.primitive_type), 1);
+    return out;
+}
+} // namespace
+
+void Rasterizer::CountDrawPacket(u32 kind_value, const Pipeline* pipeline, bool is_indexed,
+                                 bool regs_reset, const u16* blocks, u32 num_blocks) {
+    namespace DC = DrawCensus;
+    auto& census = *draw_census;
+    auto& c = census.counters;
+    for (u32 i = 0; i < num_blocks; ++i) {
+        census.written[blocks[i] / 64] |= u64(1) << (blocks[i] % 64);
+    }
+    census.reset |= regs_reset;
+    // BeginRendering counts a memo hit or miss per call. GOW3_FRAME_STATS resets both now and
+    // then (the call count drops); a hit then leaves one hit.
+    const u64 memo_calls = begin_memo_hits + begin_memo_misses;
+    const bool memo_hit = memo_calls < census.memo_calls ? begin_memo_hits != 0
+                                                         : begin_memo_hits != census.memo_hits;
+    census.memo_calls = memo_calls;
+    census.memo_hits = begin_memo_hits;
+    const u64 passes = scheduler.RenderPasses();
+    const bool same_pass = census.has_previous && passes == census.passes;
+    census.passes = passes;
+    const auto end_run = [&] {
+        DC::EndRun(c, census.run);
+        census.run = 0;
+    };
+    switch (static_cast<PacketKind>(kind_value)) {
+    case PacketKind::Draw:
+        break;
+    case PacketKind::Special:
+        ++c[DC::Special];
+        return;
+    case PacketKind::Indirect:
+        // It binds its own state in the pass: the next direct draw has no previous draw.
+        ++c[DC::Indirect];
+        census.has_previous = false;
+        end_run();
+        return;
+    default:
+        return; // dispatches: their register blocks count towards the next draw
+    }
+    if (hud_draw && Gow3Settings::Get().hide_hud.load(std::memory_order_relaxed)) {
+        ++c[DC::Hidden]; // DrawRecord left it out
+        return;
+    }
+    ++c[DC::Draws];
+    const auto& graphics = *static_cast<const GraphicsPipeline*>(pipeline);
+    const vk::Pipeline handle = graphics.Handle();
+    // 2. What EmitVertexBuffers and EmitIndexBuffer recorded.
+    const auto& v = vertex_binds;
+    const auto& pv = census.vertex;
+    const bool vertex =
+        v.num_buffers == pv.num_buffers && v.bindings == pv.bindings &&
+        v.attributes == pv.attributes && v.host_buffers == pv.host_buffers &&
+        v.host_offsets == pv.host_offsets && v.host_sizes == pv.host_sizes &&
+        v.host_strides == pv.host_strides && is_indexed == census.indexed &&
+        (!is_indexed ||
+         (index_bind.handle == census.index.handle && index_bind.offset == census.index.offset &&
+          index_bind.type == census.index.type));
+    // 3. The texture-set memo keys, as BindTextures computes them without a prepared draw (a
+    // worker's hashes are the same function of the same T#s).
+    std::array<u64, Shader::MaxStageTypes> keys{};
+    u32 num_keys = 0;
+    bool keyed = true;
+    for (const auto* stage : graphics.GetStages()) {
+        if (!stage || stage->images.empty()) {
+            continue;
+        }
+        if (!TextureSetCandidate(*stage)) {
+            keyed = false;
+            continue;
+        }
+        std::array<u64, TextureSet::MaxImages> hashes;
+        for (u32 i = 0; i < stage->images.size(); ++i) {
+            hashes[i] = ImageDescHash(stage->images[i].GetSharp(*stage), stage->images[i]);
+        }
+        keys[num_keys++] = TextureSetKey(hashes.data(), static_cast<u32>(stage->images.size()),
+                                         stage);
+    }
+    c[DC::Unkeyed] += !keyed;
+    const bool textures = keyed && census.texture_keyed &&
+                          num_keys == census.num_texture_keys &&
+                          std::equal(keys.begin(), keys.begin() + num_keys,
+                                     census.texture_keys.begin());
+    // 5. The selection words now (this packet's registers) against the previous draw's; 5w and
+    // 6 from the blocks the packets since then carried.
+    static const SelectionWords selection = MakeSelectionWords(pipe_regs);
+    auto& words = census.scratch;
+    words.resize(selection.words.size());
+    for (size_t i = 0; i < words.size(); ++i) {
+        words[i] = pipe_regs.reg_array[selection.words[i]];
+    }
+    const bool selection_same = census.has_previous && words == census.selection;
+    bool selection_written = census.reset;
+    u64 blocks_written = 0;
+    for (u32 i = 0; i < census.written.size(); ++i) {
+        blocks_written += std::popcount(census.written[i]);
+        selection_written |= (census.written[i] & selection.blocks.blocks[i]) != 0;
+    }
+    const bool pipe = census.has_previous && handle == census.pipeline;
+    c[DC::PipeAny] += pipe;
+    c[DC::SelectionAny] += selection_same;
+    const bool same4 = same_pass && pipe && vertex && textures && memo_hit;
+    if (same_pass) {
+        c[DC::Pipe] += pipe;
+        c[DC::Vertex] += vertex;
+        c[DC::Textures] += textures;
+        c[DC::RenderState] += memo_hit;
+        c[DC::Selection] += selection_same;
+        c[DC::SelectionUnwritten] += !selection_written;
+        c[DC::Blocks] += blocks_written;
+        c[DC::Same1234] += same4;
+        c[DC::Same12345] += same4 && selection_same;
+        c[DC::Same1234W] += same4 && !selection_written;
+    } else {
+        ++c[DC::First];
+    }
+    if (!same4) {
+        end_run();
+    }
+    ++census.run;
+    // This draw is the next one's previous draw.
+    census.has_previous = true;
+    census.pipeline = handle;
+    census.vertex = vertex_binds;
+    census.indexed = is_indexed;
+    census.index = index_bind;
+    census.texture_keys = keys;
+    census.num_texture_keys = num_keys;
+    census.texture_keyed = keyed;
+    census.selection.swap(words);
+    census.written = {};
+    census.reset = false;
+}
+
+void Rasterizer::ReportDrawCensus() {
+    // Stage B's counters are complete, and stay put, only after this thread's drain.
+    if (draw_pipe && !OnStageA()) {
+        return;
+    }
+    namespace DC = DrawCensus;
+    const auto& census = *draw_census;
+    DC::Counters c = census.counters;
+    c[DC::NoPipeline] = census.no_pipeline;
+    c[DC::LogDraws] = Gow3Stats::draws.load(std::memory_order_relaxed);
+    const u32 ms = Gow3FrameLog::MsOfDay(std::chrono::system_clock::now());
+    static FILE* const census_log = [] {
+        const char* path = std::getenv("GOW3_FRAME_LOG");
+        FILE* file =
+            path && *path ? std::fopen((std::string(path) + ".census").c_str(), "w") : nullptr;
+        if (file) {
+            std::fprintf(file, "%s\n", DC::Header().c_str());
+        }
+        return file;
+    }();
+    if (census_log) {
+        std::fprintf(census_log, "%s\n", DC::Format(c, ms, false).c_str());
+        std::fflush(census_log); // the benchmark ends the game with a signal
+    }
+    const std::string line = DC::Format(c, ms, true);
+    {
+        std::scoped_lock lock{DC::last_mutex};
+        DC::last_line = line;
+    }
+    static const bool at_exit = std::atexit(DC::PrintAtExit) == 0;
+    (void)at_exit;
+    static auto window = std::chrono::steady_clock::now();
+    static DC::Counters at_window{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    DC::Counters d;
+    for (u32 i = 0; i < DC::CounterCount; ++i) {
+        d[i] = c[i] - at_window[i];
+    }
+    at_window = c;
+    const double draws = std::max<double>(1.0, double(d[DC::Draws]));
+    const auto pct = [&](DC::Counter k) { return 100.0 * double(d[k]) / draws; };
+    std::printf("Draw census [5s]: %s\n", line.c_str());
+    std::printf("Draw census: %llu draws recorded, %llu counted, %llu in the frame log; %% of "
+                "recorded: same pass %.1f, pipeline %.1f (any pass %.1f), vertex/index %.1f, "
+                "textures %.1f, render state %.1f, selection %.1f (any pass %.1f, unwritten "
+                "%.1f), 1-4 %.1f, 1-5 %.1f; %.1f register blocks a draw\n",
+                static_cast<unsigned long long>(d[DC::Draws]),
+                static_cast<unsigned long long>(DC::Counted(d)),
+                static_cast<unsigned long long>(d[DC::LogDraws]), 100.0 - pct(DC::First),
+                pct(DC::Pipe), pct(DC::PipeAny), pct(DC::Vertex), pct(DC::Textures),
+                pct(DC::RenderState), pct(DC::Selection), pct(DC::SelectionAny),
+                pct(DC::SelectionUnwritten), pct(DC::Same1234), pct(DC::Same12345),
+                double(d[DC::Blocks]) / std::max<double>(1.0, double(d[DC::Draws] - d[DC::First])));
 }
 
 void Rasterizer::PrintPipeStats() {
@@ -1021,6 +1280,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
     }
     if (!pipeline) {
+        if (DrawCensus::enabled) [[unlikely]] {
+            ++draw_census->no_pipeline;
+        }
         return;
     }
     if (pipelined && FilterDrawPasses()) {
@@ -1590,6 +1852,9 @@ void Rasterizer::Finish() {
 
 void Rasterizer::OnSubmit() {
     DrainDrawPipe();
+    if (DrawCensus::enabled) [[unlikely]] {
+        ReportDrawCensus();
+    }
     if (fault_process_pending) {
         fault_process_pending = false;
         buffer_cache.ProcessFaultBuffer();

@@ -839,6 +839,12 @@ public:
         return !(is_rendering && render_state == state);
     }
 
+    /// gow3: render pass instances begun so far (GOW3_DRAW_REPEAT_STATS: two draws are in the
+    /// same pass when it did not move between them). Recording thread only.
+    [[nodiscard]] u64 RenderPasses() const {
+        return render_passes;
+    }
+
     /// CommandBuffer() calls that waited for a recording thread (GOW3_FRAME_STATS).
     static inline std::atomic<u64> direct_recordings{0};
 
@@ -936,6 +942,7 @@ private:
     bool recording_threaded{false};
     std::jthread recorder_thread;
     tracy::VkCtxScope* profiler_scope{};
+    u64 render_passes = 0; // gow3: RenderPasses()
 };
 
 } // namespace Vulkan
