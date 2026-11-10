@@ -12,6 +12,7 @@
 #include <cstring>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include <vk_mem_alloc.h>
 
@@ -22,6 +23,7 @@
 #include "video_core/host_shaders/upscale_merge_r11_comp.h"
 #include "video_core/host_shaders/upscale_reactive_comp.h"
 #include "video_core/host_shaders/taa_comp.h"
+#include "video_core/host_shaders/taa_default_switches_comp.h"
 #include "video_core/host_shaders/taa_diag_fixedswitches_comp.h"
 #include "video_core/host_shaders/taa_diag_nodilate_comp.h"
 #include "video_core/host_shaders/taa_diag_nohistory_comp.h"
@@ -189,6 +191,40 @@ std::span<const u32> TaaShader() {
     return TAA_COMP;
 }
 
+/// gow3: TAA shortcuts that keep the image (RecordTaa). GOW3_TAA_FAST_OFF=resolve (or all), read
+/// once, switches one off for the run; toggle Gow3Toggle::TaaFastPaths all of them, live.
+enum TaaFast : u32 {
+    TaaFastResolve = 1, ///< the resolve without the A/B switches while they are at their default
+};
+u32 TaaFastOff() {
+    static const u32 off = [] {
+        const char* env = std::getenv("GOW3_TAA_FAST_OFF");
+        const std::string_view list = env ? env : "";
+        const auto named = [&](std::string_view name) {
+            return list.find(name) != list.npos || list.find("all") != list.npos;
+        };
+        return named("resolve") ? TaaFastResolve : 0u;
+    }();
+    return off;
+}
+bool TaaFastOn(u32 path) {
+    return !(TaaFastOff() & path) && !Gow3Toggle::Disabled(Gow3Toggle::TaaFastPaths);
+}
+
+vk::UniquePipeline ComputePipeline(vk::Device device, std::span<const u32> code,
+                                   vk::PipelineLayout layout) {
+    const auto module = CompileSPV(code, device);
+    auto pipeline = Check(device.createComputePipelineUnique(
+        {}, vk::ComputePipelineCreateInfo{
+                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                          .module = module,
+                          .pName = "main"},
+                .layout = layout,
+            }));
+    device.destroyShaderModule(module);
+    return pipeline;
+}
+
 } // namespace
 
 TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& scheduler_,
@@ -244,6 +280,8 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
                               .optimalTilingFeatures;
     depth_blit = (features & vk::FormatFeatureFlagBits::eBlitSrc) &&
                  (features & vk::FormatFeatureFlagBits::eBlitDst);
+    std::printf("TAA: fast paths: resolve without switches %s\n",
+                TaaFastOff() & TaaFastResolve ? "off" : "on");
     if (enabled && !instance.IsStorageImageWriteWithoutFormatEnabled()) {
         std::printf("Upscaler: shaderStorageImageWriteWithoutFormat unsupported, FSR 3 off\n");
         enabled = false;
@@ -614,17 +652,8 @@ void TemporalUpscaler::CreatePipelines() {
             .pPushConstantRanges = &push,
         }));
     };
-    const auto compute = [&](const auto& code, vk::PipelineLayout layout) {
-        const auto module = CompileSPV(code, device);
-        auto pipeline = Check(device.createComputePipelineUnique(
-            {}, vk::ComputePipelineCreateInfo{
-                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                              .module = module,
-                              .pName = "main"},
-                    .layout = layout,
-                }));
-        device.destroyShaderModule(module);
-        return pipeline;
+    const auto compute = [&](std::span<const u32> code, vk::PipelineLayout layout) {
+        return ComputePipeline(device, code, layout);
     };
     {
         // Merge: three storage images, then the motion and object motion images (debug).
@@ -679,8 +708,17 @@ void TemporalUpscaler::CreatePipelines() {
             .addressModeU = vk::SamplerAddressMode::eClampToEdge,
             .addressModeV = vk::SamplerAddressMode::eClampToEdge,
             .addressModeW = vk::SamplerAddressMode::eClampToEdge}));
-        taa_pipeline = compute(TaaShader(), *taa_pipeline_layout);
     }
+}
+
+vk::Pipeline TemporalUpscaler::TaaPipeline(bool default_switches) {
+    auto& pipeline = default_switches ? taa_default_pipeline : taa_pipeline;
+    if (!pipeline) {
+        const std::span<const u32> code =
+            default_switches ? std::span<const u32>{TAA_DEFAULT_SWITCHES_COMP} : TaaShader();
+        pipeline = ComputePipeline(instance.GetDevice(), code, *taa_pipeline_layout);
+    }
+    return *pipeline;
 }
 
 void TemporalUpscaler::ProfileStep(u32 index, const char* name) {
@@ -749,8 +787,20 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
                   (Gow3Toggle::Disabled(Gow3Toggle::TaaVariance) ? 4u << 8 : 0u) |
                   (Gow3Toggle::Disabled(Gow3Toggle::TaaFilter) ? 8u << 8 : 0u) |
                   (Gow3Toggle::Disabled(Gow3Toggle::TaaKeepNearerHistory) ? 16u << 8 : 0u);
-    ProfileStep(5, "5 TAA resolve (taa.comp)");
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *taa_pipeline);
+    // While every switch is at its default (and no GOW3_TAA_DIAG variant is chosen), the shader
+    // without them: the same maths, without the work the off-by-default ones cost every pixel.
+    // Otherwise the shader that reads them, so the toggles and diagnostics work while running.
+    static const bool diag_variant = [] {
+        const char* name = std::getenv("GOW3_TAA_DIAG");
+        return name && name[0];
+    }();
+    const bool default_switches = params.pad == 0 && !diag_variant && TaaFastOn(TaaFastResolve);
+    if (default_switches) {
+        ProfileStep(15, "5 TAA resolve (taa.comp, switches compiled out)");
+    } else {
+        ProfileStep(5, "5 TAA resolve (taa.comp)");
+    }
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, TaaPipeline(default_switches));
     if (params.pad & 0xffu) {
         static u32 diagnostic_frames = 0;
         if (diagnostic_frames++ < 16)

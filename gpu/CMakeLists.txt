@@ -120,6 +120,8 @@ add_host_shader(upscale_merge.comp upscale_merge_r11_comp SCENE_R11G11B10=1)
 add_host_shader(game_motion.comp game_motion_comp)
 add_host_shader(upscale_reactive.comp upscale_reactive_comp)
 add_host_shader(taa.comp taa_comp)
+# taa.comp while every A/B switch is off (vk_temporal_upscaler.cpp RecordTaa).
+add_host_shader(taa.comp taa_default_switches_comp TAA_DEFAULT_SWITCHES=1)
 # GOW3_TAA_DIAG timing variants (vk_temporal_upscaler.cpp TaaShader).
 add_host_shader(taa.comp taa_diag_passthrough_comp TAA_DIAG_PASSTHROUGH=1)
 add_host_shader(taa.comp taa_diag_nohistory_comp TAA_DIAG_NO_HISTORY=1)

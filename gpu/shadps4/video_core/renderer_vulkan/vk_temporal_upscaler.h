@@ -179,6 +179,9 @@ private:
     bool RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
                     u32 w, u32 h, u32 ow, u32 oh, float frame_ms);
     void RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
+    /// The TAA resolve pipeline, made on first use: taa.comp with the A/B switches compiled out
+    /// (`default_switches`), or the one that reads them (or the GOW3_TAA_DIAG variant).
+    vk::Pipeline TaaPipeline(bool default_switches);
     /// GOW3_GPU_PROFILE: step `index` of the running Run/RunScaled label (own line, same total).
     void ProfileStep(u32 index, const char* name);
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
@@ -282,6 +285,7 @@ private:
     vk::UniqueDescriptorSetLayout taa_desc_layout;
     vk::UniquePipelineLayout taa_pipeline_layout;
     vk::UniquePipeline taa_pipeline;
+    vk::UniquePipeline taa_default_pipeline; ///< taa.comp, TAA_DEFAULT_SWITCHES
     vk::UniqueDescriptorSetLayout taa_sharpen_desc_layout;
     vk::UniquePipelineLayout taa_sharpen_pipeline_layout;
     vk::UniquePipeline taa_sharpen_pipeline;

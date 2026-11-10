@@ -6,6 +6,9 @@
 // history taps), _NO_REJECT (the depth test of the history taps), _NO_NEIGHBOURHOOD (the 3x3
 // color loop; history unclamped), _NO_DILATE (3x3 depth dilation and slope), _FIXED_SWITCHES
 // (diagnostics and A/B switches compiled out: the default image).
+// TAA_DEFAULT_SWITCHES: the same compiled-out build for normal use, chosen while every switch
+// below is at its default (RecordTaa): read from push constants, the off-by-default switches
+// cost their work in every pixel even when they are off.
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D color_tex;
@@ -87,7 +90,7 @@ void main() {
     imageStore(next_history, p, vec4(copy, 1.0));
     return;
 #endif
-#ifdef TAA_DIAG_FIXED_SWITCHES
+#if defined(TAA_DEFAULT_SWITCHES) || defined(TAA_DIAG_FIXED_SWITCHES)
     const uint diag = 0u, variant = 0u;
 #else
     const uint diag = pad & 0xffu, variant = pad >> 8;
