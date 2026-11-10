@@ -61,8 +61,10 @@ enum : std::uint64_t {
     SceneHalfRes = 1ull << 50, ///< live scaling also reduces the 960x540 post targets
     UpdateImageFastPath = 1u << 30,
     /// TAA shortcuts that keep the image (vk_temporal_upscaler.cpp RecordTaa): the resolve built
-    /// without the A/B switches below while all of them are at their default. Bit set: off.
-    /// GOW3_TAA_FAST_OFF=resolve (or all), read once, switches it off for the whole run.
+    /// without the A/B switches below while all of them are at their default, and the sharpen pass
+    /// writing the scene color itself instead of an image a third pass copies into it. Bit set:
+    /// both off. GOW3_TAA_FAST_OFF=resolve, sharpen (or all), read once, switches one off for the
+    /// whole run.
     TaaFastPaths = 1ull << 31,
     // TAA A/B in one run: optional techniques, off by default (no measured gain, 2026-10-02).
     TaaTonemapBlend = 1ull << 51,

@@ -32,6 +32,7 @@
 #include "video_core/host_shaders/taa_diag_passthrough_comp.h"
 #include "video_core/host_shaders/taa_sharpen_comp.h"
 #include "video_core/host_shaders/taa_sharpen_ldr_comp.h"
+#include "video_core/host_shaders/taa_sharpen_scene_r11_comp.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -191,10 +192,11 @@ std::span<const u32> TaaShader() {
     return TAA_COMP;
 }
 
-/// gow3: TAA shortcuts that keep the image (RecordTaa). GOW3_TAA_FAST_OFF=resolve (or all), read
-/// once, switches one off for the run; toggle Gow3Toggle::TaaFastPaths all of them, live.
+/// gow3: TAA shortcuts that keep the image (RecordTaa). GOW3_TAA_FAST_OFF=resolve,sharpen (or
+/// all), read once, switches one off for the run; toggle Gow3Toggle::TaaFastPaths all, live.
 enum TaaFast : u32 {
     TaaFastResolve = 1, ///< the resolve without the A/B switches while they are at their default
+    TaaFastSharpen = 2, ///< the sharpen pass writes the scene color: no resolve output, no merge
 };
 u32 TaaFastOff() {
     static const u32 off = [] {
@@ -203,7 +205,7 @@ u32 TaaFastOff() {
         const auto named = [&](std::string_view name) {
             return list.find(name) != list.npos || list.find("all") != list.npos;
         };
-        return named("resolve") ? TaaFastResolve : 0u;
+        return (named("resolve") ? TaaFastResolve : 0u) | (named("sharpen") ? TaaFastSharpen : 0u);
     }();
     return off;
 }
@@ -280,8 +282,17 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
                               .optimalTilingFeatures;
     depth_blit = (features & vk::FormatFeatureFlagBits::eBlitSrc) &&
                  (features & vk::FormatFeatureFlagBits::eBlitDst);
-    std::printf("TAA: fast paths: resolve without switches %s\n",
-                TaaFastOff() & TaaFastResolve ? "off" : "on");
+    // The TAA sharpen pass can write a B10G11R11 scene color itself (storage, without format).
+    vk::FormatProperties3 r11{};
+    vk::FormatProperties2 r11_properties{.pNext = &r11};
+    instance.GetPhysicalDevice().getFormatProperties2(vk::Format::eB10G11R11UfloatPack32,
+                                                      &r11_properties);
+    const auto r11_needs = vk::FormatFeatureFlagBits2::eStorageImage |
+                           vk::FormatFeatureFlagBits2::eStorageWriteWithoutFormat;
+    sharpen_scene_r11 = (r11.optimalTilingFeatures & r11_needs) == r11_needs;
+    std::printf("TAA: fast paths: resolve without switches %s, sharpen into a B10G11R11 scene "
+                "%s\n", TaaFastOff() & TaaFastResolve ? "off" : "on",
+                TaaFastOff() & TaaFastSharpen ? "off" : sharpen_scene_r11 ? "on" : "unsupported");
     if (enabled && !instance.IsStorageImageWriteWithoutFormatEnabled()) {
         std::printf("Upscaler: shaderStorageImageWriteWithoutFormat unsupported, FSR 3 off\n");
         enabled = false;
@@ -687,6 +698,10 @@ void TemporalUpscaler::CreatePipelines() {
     storage_layout(2, taa_sharpen_desc_layout, taa_sharpen_pipeline_layout, sizeof(float));
     taa_sharpen_pipeline = compute(TAA_SHARPEN_COMP, *taa_sharpen_pipeline_layout);
     taa_sharpen_ldr_pipeline = compute(TAA_SHARPEN_LDR_COMP, *taa_sharpen_pipeline_layout);
+    if (sharpen_scene_r11) {
+        taa_sharpen_scene_pipeline =
+            compute(TAA_SHARPEN_SCENE_R11_COMP, *taa_sharpen_pipeline_layout);
+    }
     {
         std::array<vk::DescriptorSetLayoutBinding, 7> bindings{};
         for (u32 i = 0; i < bindings.size(); ++i) {
@@ -728,8 +743,9 @@ void TemporalUpscaler::ProfileStep(u32 index, const char* name) {
     }
 }
 
-void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
-                                vk::ImageView depth) {
+bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
+                                vk::ImageView depth, VideoCore::Image* scene,
+                                vk::ImageView scene_view) {
     ProfileStep(4, "4 TAA history barriers");
     // Make scene writes and the last storage-image history writes visible to sampled reads.
     const vk::MemoryBarrier2 inputs{
@@ -795,6 +811,16 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
         return name && name[0];
     }();
     const bool default_switches = params.pad == 0 && !diag_variant && TaaFastOn(TaaFastResolve);
+    const auto& settings = Gow3Settings::Get();
+    const float strength = std::clamp(settings.sharpness.load(), 0.0f, 2.0f);
+    const bool sharpen = settings.sharpen && strength > 0.0f && !(params.pad & 0xffu);
+    // Sharpening replaces the resolve's output with its own, made from the history: the resolve
+    // then stores none, and the sharpen pass writes the scene color, not an image for Run to copy.
+    const bool into_scene =
+        sharpen && scene && taa_sharpen_scene_pipeline && TaaFastOn(TaaFastSharpen);
+    if (into_scene) {
+        params.pad |= 1u << 31;
+    }
     if (default_switches) {
         ProfileStep(15, "5 TAA resolve (taa.comp, switches compiled out)");
     } else {
@@ -811,10 +837,12 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     cmdbuf.pushConstants(*taa_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
                          sizeof(params), &params);
     cmdbuf.dispatch((out_width + 7) / 8, (out_height + 7) / 8, 1);
-    const auto& settings = Gow3Settings::Get();
-    const float strength = std::clamp(settings.sharpness.load(), 0.0f, 2.0f);
-    if (settings.sharpen && strength > 0.0f && !(params.pad & 0xffu)) {
-        ProfileStep(6, "6 TAA sharpen (taa_sharpen.comp)");
+    if (sharpen) {
+        if (into_scene) {
+            ProfileStep(16, "6 TAA sharpen into the scene colour (taa_sharpen.comp; no 7, 8)");
+        } else {
+            ProfileStep(6, "6 TAA sharpen (taa_sharpen.comp)");
+        }
         const vk::MemoryBarrier2 resolved{
             .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
             .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
@@ -822,14 +850,24 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
             .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead |
                              vk::AccessFlagBits2::eShaderStorageWrite};
         cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &resolved});
+        if (into_scene) {
+            // The resolve's reads of the scene color are done (the barrier above). As for the
+            // write-back pass: passes after this one see the write through the tracked state.
+            runtime.Transit(scene, vk::ImageLayout::eGeneral,
+                            vk::PipelineStageFlagBits2::eComputeShader,
+                            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+            runtime.FlushBarriers();
+        }
         const std::array<vk::DescriptorImageInfo, 2> sharpen_infos{{
             {.imageView = *taa_history_views[taa_next], .imageLayout = vk::ImageLayout::eGeneral},
-            {.imageView = *output_view, .imageLayout = vk::ImageLayout::eGeneral}}};
+            {.imageView = into_scene ? scene_view : *output_view,
+             .imageLayout = vk::ImageLayout::eGeneral}}};
         std::array<vk::WriteDescriptorSet, 2> sharpen_writes{};
         for (u32 i = 0; i < sharpen_writes.size(); ++i)
             sharpen_writes[i] = {.dstBinding = i, .descriptorCount = 1,
                 .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &sharpen_infos[i]};
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *taa_sharpen_pipeline);
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
+                            into_scene ? *taa_sharpen_scene_pipeline : *taa_sharpen_pipeline);
         cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,
                                     *taa_sharpen_pipeline_layout, 0, sharpen_writes);
         cmdbuf.pushConstants(*taa_sharpen_pipeline_layout, vk::ShaderStageFlagBits::eCompute,
@@ -837,6 +875,7 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
         cmdbuf.dispatch((out_width + 7) / 8, (out_height + 7) / 8, 1);
     }
     taa_next = 1 - taa_next;
+    return into_scene;
 }
 
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
@@ -1227,6 +1266,14 @@ void TemporalUpscaler::Run() {
                 vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
 
     const bool has_reactive = mask_ready || RecordReactive(input_color_view);
+    // Debug (menu or toggle 1 << 28): the reactive mask in red over a darkened frame;
+    // or the motion vectors (menu).
+    const int debug_view = Gow3Settings::Get().debug_view;
+    const u32 mode = has_reactive && (debug_view == Gow3Settings::DebugReactive ||
+                                      Gow3Toggle::Disabled(1u << 28))
+                         ? 1
+                     : debug_view == Gow3Settings::DebugMotion ? 2
+                                                             : 0;
 
     const auto now = std::chrono::steady_clock::now();
     float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
@@ -1236,11 +1283,14 @@ void TemporalUpscaler::Run() {
     last_frame = now;
 
     bool dispatched = false;
+    bool written_back = false;
     if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
         ProfileStep(5, "5 FSR 3, FSR 4 or DLSS");
     }
     if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
-        RecordTaa(cmdbuf, input_color_view, input_depth_view);
+        // A debug view is drawn by the write-back pass, which then still runs.
+        written_back = RecordTaa(cmdbuf, input_color_view, input_depth_view,
+                                 r11 && !reduced && mode == 0 ? &color : nullptr, color_view);
         dispatched = true;
     } else if (UseFsr4()) {
         dispatched = RecordFsr4(cmdbuf, {input_color, input_color_view, w, h},
@@ -1326,6 +1376,10 @@ void TemporalUpscaler::Run() {
         if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
             ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
         }
+        if (written_back) {
+            ProfileStep(9, "9 after the write-back, until the next label");
+            return;
+        }
         // The result replaces the scene color's RGB (its alpha carries data for the post).
         ProfileStep(7, "7 write-back barriers: output image, scene colour");
         own_barrier(vk::Image(output_image), vk::ImageLayout::eGeneral, all, rw,
@@ -1369,14 +1423,6 @@ void TemporalUpscaler::Run() {
              .descriptorType = vk::DescriptorType::eSampledImage,
              .pImageInfo = &objects_info},
         }};
-        // Debug (menu or toggle 1 << 28): the reactive mask in red over a darkened frame;
-        // or the motion vectors (menu).
-        const int debug_view = Gow3Settings::Get().debug_view;
-        const u32 mode = has_reactive && (debug_view == Gow3Settings::DebugReactive ||
-                                          Gow3Toggle::Disabled(1u << 28))
-                             ? 1
-                         : debug_view == Gow3Settings::DebugMotion ? 2
-                                                                 : 0;
         ProfileStep(8, "8 write-back into the scene colour (upscale_merge.comp)");
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
                             r11 ? *merge_r11_pipeline : *merge_pipeline);

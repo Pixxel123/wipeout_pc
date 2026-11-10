@@ -43,6 +43,24 @@ model in one gameplay process, including output captures and camera movement.
 `out/taa-launcher-validation.log` checks actual GTK controls and saved settings.
 TAA has not yet been tested on the tester's GTX 1060.
 
+## TAA at a 1920x1080 output: two shortcuts with the same image (2026-11-10)
+
+- **Resolve without the A/B switches.** While every TAA switch is at its default (toggle bits
+  51-55 clear, no `GOW3_TAA_DIAGNOSTICS`, no `GOW3_TAA_DIAG`), `taa.comp` is the build with them as
+  constants (`TAA_DEFAULT_SWITCHES`). Measured as the diagnostic `fixedswitches` variant: the
+  resolve 0.57-0.60 ms a frame cheaper on the Steam Deck.
+- **Sharpen into the scene color.** With TAA sharpening on, the resolve's output image was
+  overwritten by the sharpen pass, and a third pass (`upscale_merge.comp`) copied that into the
+  game's B10G11R11 scene color. Now the resolve stores only the history and the sharpen pass
+  writes the scene color itself. It needs B10G11R11 storage writes without format (checked at
+  start: the log's `TAA: fast paths:` line says `unsupported` otherwise, and the old passes run).
+  The value is rounded to the scene format once instead of through half floats: the same bits
+  where those conversions truncate, at most the last bit where they round to nearest. With
+  sharpening off, or a debug view, the write-back pass still runs (the resolve reads the scene
+  color's neighbourhood, so it cannot write it).
+- **Switches:** `GOW3_TAA_FAST_OFF=resolve`, `sharpen` or `all` (read once) restores the old
+  passes; toggle bit 31 (`TaaFastPaths`, 2147483648) restores both while running.
+
 ## Startup patch is the default again for outputs other than 1080p (2026-10-02)
 
 The live path below made the Steam Deck and a GTX 1060 + 4-core Haswell drop to 7–8 FPS

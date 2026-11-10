@@ -178,7 +178,10 @@ private:
     /// Records FSR 4 into output_image; on a permanent failure FSR 3 takes over.
     bool RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
                     u32 w, u32 h, u32 ow, u32 oh, float frame_ms);
-    void RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
+    /// `scene` (Run): the B10G11R11 scene color the result is written back to. With sharpening on,
+    /// the sharpen pass then writes it itself; true when it did (no write-back pass needed).
+    bool RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth,
+                   VideoCore::Image* scene = nullptr, vk::ImageView scene_view = {});
     /// The TAA resolve pipeline, made on first use: taa.comp with the A/B switches compiled out
     /// (`default_switches`), or the one that reads them (or the GOW3_TAA_DIAG variant).
     vk::Pipeline TaaPipeline(bool default_switches);
@@ -233,6 +236,7 @@ private:
     vk::UniqueImageView ui_view;
     vk::UniqueImageView ui_depth_view;
     bool depth_blit = false;
+    bool sharpen_scene_r11 = false; ///< B10G11R11 storage writes without format (RecordTaa)
     bool scaled_session = false;
     u32 ui_width = 0, ui_height = 0;
     u32 render_width = 0, render_height = 0;
@@ -290,6 +294,7 @@ private:
     vk::UniquePipelineLayout taa_sharpen_pipeline_layout;
     vk::UniquePipeline taa_sharpen_pipeline;
     vk::UniquePipeline taa_sharpen_ldr_pipeline;
+    vk::UniquePipeline taa_sharpen_scene_pipeline; ///< into a B10G11R11 scene color
     // ExtraSharpen: a copy of the upscaled frame (RCAS reads neighbours) and the target views.
     VideoCore::UniqueImage extra_sharpen_image;
     vk::UniqueImageView extra_sharpen_view;
