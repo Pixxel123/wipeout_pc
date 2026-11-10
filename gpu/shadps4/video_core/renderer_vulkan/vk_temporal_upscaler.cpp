@@ -33,6 +33,7 @@
 #include "video_core/host_shaders/taa_sharpen_comp.h"
 #include "video_core/host_shaders/taa_sharpen_ldr_comp.h"
 #include "video_core/host_shaders/taa_sharpen_scene_r11_comp.h"
+#include "video_core/host_shaders/taa_sharpen_scene_r11_half_comp.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -211,6 +212,26 @@ u32 TaaFastOff() {
 }
 bool TaaFastOn(u32 path) {
     return !(TaaFastOff() & path) && !Gow3Toggle::Disabled(Gow3Toggle::TaaFastPaths);
+}
+
+/// gow3: GOW3_TAA_FAST_CHECK=<file> (diagnostic): creating the file makes the next 2 TAA frames run
+/// the old passes too, into images of their own, and dump both results to GOW3_DUMP_DIR (default
+/// out/dump): fNNN_{history,scene}_{new,old}_*.raw and fNNN_scene_half_*.raw. Returns the frame
+/// number to check, or -1.
+int TaaFastCheckFrame() {
+    static const char* trigger = std::getenv("GOW3_TAA_FAST_CHECK");
+    static int remaining = 0, index = 0, polls = 0;
+    if (!trigger) {
+        return -1;
+    }
+    if (remaining == 0) {
+        if (++polls % 30 != 0 || std::remove(trigger) != 0) {
+            return -1;
+        }
+        remaining = 2;
+    }
+    --remaining;
+    return index++;
 }
 
 vk::UniquePipeline ComputePipeline(vk::Device device, std::span<const u32> code,
@@ -810,7 +831,8 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
         const char* name = std::getenv("GOW3_TAA_DIAG");
         return name && name[0];
     }();
-    const bool default_switches = params.pad == 0 && !diag_variant && TaaFastOn(TaaFastResolve);
+    const bool default_switches =
+        params.pad == 0 && !diag_variant && !check_old && TaaFastOn(TaaFastResolve);
     const auto& settings = Gow3Settings::Get();
     const float strength = std::clamp(settings.sharpness.load(), 0.0f, 2.0f);
     const bool sharpen = settings.sharpen && strength > 0.0f && !(params.pad & 0xffu);
@@ -821,6 +843,8 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     if (into_scene) {
         params.pad |= 1u << 31;
     }
+    taa_default_switches = default_switches;
+    taa_into_scene = into_scene;
     if (default_switches) {
         ProfileStep(15, "5 TAA resolve (taa.comp, switches compiled out)");
     } else {
@@ -876,6 +900,120 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     }
     taa_next = 1 - taa_next;
     return into_scene;
+}
+
+void TemporalUpscaler::RecordTaaCheck(vk::CommandBuffer cmdbuf, vk::ImageView color,
+                                     vk::ImageView depth) {
+    const auto device = instance.GetDevice();
+    const auto make = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
+                          vk::Format format) {
+        image = VideoCore::UniqueImage(device, instance.GetAllocator());
+        image.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {out_width, out_height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                     vk::ImageUsageFlagBits::eTransferSrc,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        view = Check(device.createImageViewUnique({
+            .image = vk::Image(image),
+            .viewType = vk::ImageViewType::e2D,
+            .format = format,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        const vk::ImageMemoryBarrier2 barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = vk::Image(image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+    };
+    if (!check_history_view) {
+        make(check_history, check_history_view, vk::Format::eR32G32B32A32Sfloat);
+        make(check_scene, check_scene_view, vk::Format::eB10G11R11UfloatPack32);
+        make(check_scene_half, check_scene_half_view, vk::Format::eB10G11R11UfloatPack32);
+    }
+    const auto storage = [](vk::ImageView view) {
+        return vk::DescriptorImageInfo{.imageView = view, .imageLayout = vk::ImageLayout::eGeneral};
+    };
+    const auto dispatch = [&](vk::Pipeline pipeline, vk::PipelineLayout layout,
+                              std::span<const vk::DescriptorImageInfo> infos, u32 storage_count,
+                              const void* push, u32 push_size) {
+        std::array<vk::WriteDescriptorSet, 5> writes{};
+        for (u32 i = 0; i < infos.size(); ++i) {
+            writes[i] = {.dstBinding = i, .descriptorCount = 1,
+                         .descriptorType = i < storage_count ? vk::DescriptorType::eStorageImage
+                                                             : vk::DescriptorType::eSampledImage,
+                         .pImageInfo = &infos[i]};
+        }
+        const vk::MemoryBarrier2 before{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+        cmdbuf.pushDescriptorSetKHR(
+            vk::PipelineBindPoint::eCompute, layout, 0,
+            vk::ArrayProxy<const vk::WriteDescriptorSet>(u32(infos.size()), writes.data()));
+        cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, push_size, push);
+        cmdbuf.dispatch((out_width + 7) / 8, (out_height + 7) / 8, 1);
+    };
+    // The old passes, with the check images as this frame's history: the previous history is
+    // only read, so the real RecordTaa after this one gets the same inputs.
+    std::swap(taa_history[taa_next], check_history);
+    std::swap(taa_history_views[taa_next], check_history_view);
+    check_old = true;
+    RecordTaa(cmdbuf, color, depth);
+    check_old = false;
+    taa_next = 1 - taa_next;
+    std::swap(taa_history[taa_next], check_history);
+    std::swap(taa_history_views[taa_next], check_history_view);
+    const u32 mode = 0;
+    const std::array<vk::DescriptorImageInfo, 5> merge_infos{
+        storage(*output_view), storage(*check_scene_view), storage(*reactive_view),
+        storage(*motion_view), storage(*motion_view)};
+    dispatch(*merge_r11_pipeline, *merge_pipeline_layout, merge_infos, 3, &mode, sizeof(mode));
+    // The sharpen pass into the scene format through half floats, from the same history.
+    const auto& settings = Gow3Settings::Get();
+    const float strength = std::clamp(settings.sharpness.load(), 0.0f, 2.0f);
+    check_half = settings.sharpen && strength > 0.0f && sharpen_scene_r11;
+    if (check_half) {
+        if (!taa_sharpen_scene_half_pipeline) {
+            taa_sharpen_scene_half_pipeline = ComputePipeline(
+                device, TAA_SHARPEN_SCENE_R11_HALF_COMP, *taa_sharpen_pipeline_layout);
+        }
+        const std::array<vk::DescriptorImageInfo, 2> infos{storage(*check_history_view),
+                                                           storage(*check_scene_half_view)};
+        dispatch(*taa_sharpen_scene_half_pipeline, *taa_sharpen_pipeline_layout, infos, 2,
+                 &strength, sizeof(strength));
+    }
+}
+
+void TemporalUpscaler::DumpTaaCheck(vk::CommandBuffer cmdbuf, vk::Image scene, int frame) {
+    std::printf("TAA fast check: frame %d, resolve without switches %d, sharpen into the scene "
+                "%d, sharpen %d strength %.2f\n",
+                frame, taa_default_switches, taa_into_scene, Gow3Settings::Get().sharpen.load(),
+                Gow3Settings::Get().sharpness.load());
+    const u32 w = out_width, h = out_height;
+    DumpImages(instance, scheduler, cmdbuf, frame,
+               {{vk::Image(taa_history[1 - taa_next]), w, h, 16, "history_new", "rgba32f"},
+                {vk::Image(check_history), w, h, 16, "history_old", "rgba32f"},
+                {scene, w, h, 4, "scene_new", "b10g11r11"},
+                {vk::Image(check_scene), w, h, 4, "scene_old", "b10g11r11"}});
+    if (check_half) { // written only by a sharpen pass
+        DumpImages(instance, scheduler, cmdbuf, frame,
+                   {{vk::Image(check_scene_half), w, h, 4, "scene_half", "b10g11r11"}});
+    }
 }
 
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
@@ -1284,10 +1422,15 @@ void TemporalUpscaler::Run() {
 
     bool dispatched = false;
     bool written_back = false;
+    int check_frame = -1; // GOW3_TAA_FAST_CHECK
     if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
         ProfileStep(5, "5 FSR 3, FSR 4 or DLSS");
     }
     if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
+        check_frame = r11 && !reduced ? TaaFastCheckFrame() : -1;
+        if (check_frame >= 0) {
+            RecordTaaCheck(cmdbuf, input_color_view, input_depth_view);
+        }
         // A debug view is drawn by the write-back pass, which then still runs.
         written_back = RecordTaa(cmdbuf, input_color_view, input_depth_view,
                                  r11 && !reduced && mode == 0 ? &color : nullptr, color_view);
@@ -1377,6 +1520,9 @@ void TemporalUpscaler::Run() {
             ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
         }
         if (written_back) {
+            if (check_frame >= 0) {
+                DumpTaaCheck(cmdbuf, color.GetImage(), check_frame);
+            }
             ProfileStep(9, "9 after the write-back, until the next label");
             return;
         }
@@ -1431,6 +1577,9 @@ void TemporalUpscaler::Run() {
         cmdbuf.pushConstants(*merge_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
                              sizeof(mode), &mode);
         cmdbuf.dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
+        if (check_frame >= 0) {
+            DumpTaaCheck(cmdbuf, color.GetImage(), check_frame);
+        }
         // Until the next label: the barriers of the pass that reads the scene colour next.
         ProfileStep(9, "9 after the write-back, until the next label");
     }

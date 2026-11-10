@@ -185,6 +185,10 @@ private:
     /// The TAA resolve pipeline, made on first use: taa.comp with the A/B switches compiled out
     /// (`default_switches`), or the one that reads them (or the GOW3_TAA_DIAG variant).
     vk::Pipeline TaaPipeline(bool default_switches);
+    /// GOW3_TAA_FAST_CHECK: the old passes of this TAA frame into the check images (before
+    /// RecordTaa), and the dump of both results (after the write-back).
+    void RecordTaaCheck(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
+    void DumpTaaCheck(vk::CommandBuffer cmdbuf, vk::Image scene, int frame);
     /// GOW3_GPU_PROFILE: step `index` of the running Run/RunScaled label (own line, same total).
     void ProfileStep(u32 index, const char* name);
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
@@ -295,6 +299,14 @@ private:
     vk::UniquePipeline taa_sharpen_pipeline;
     vk::UniquePipeline taa_sharpen_ldr_pipeline;
     vk::UniquePipeline taa_sharpen_scene_pipeline; ///< into a B10G11R11 scene color
+    // GOW3_TAA_FAST_CHECK (diagnostic): the old passes' history and scene color, and the scene
+    // color from the sharpen pass rounding through half floats first.
+    bool check_old = false;  ///< RecordTaa records the old passes
+    bool check_half = false; ///< the half-float sharpen pass ran (RecordTaaCheck)
+    bool taa_default_switches = false, taa_into_scene = false; ///< the last RecordTaa's paths
+    VideoCore::UniqueImage check_history, check_scene, check_scene_half;
+    vk::UniqueImageView check_history_view, check_scene_view, check_scene_half_view;
+    vk::UniquePipeline taa_sharpen_scene_half_pipeline;
     // ExtraSharpen: a copy of the upscaled frame (RCAS reads neighbours) and the target views.
     VideoCore::UniqueImage extra_sharpen_image;
     vk::UniqueImageView extra_sharpen_view;

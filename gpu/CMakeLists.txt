@@ -132,6 +132,9 @@ add_host_shader(taa.comp taa_diag_fixedswitches_comp TAA_DIAG_FIXED_SWITCHES=1)
 add_host_shader(taa_sharpen.comp taa_sharpen_comp)
 add_host_shader(taa_sharpen.comp taa_sharpen_ldr_comp LDR_OUTPUT=1)
 add_host_shader(taa_sharpen.comp taa_sharpen_scene_r11_comp SCENE_R11G11B10=1)
+# GOW3_TAA_FAST_CHECK (diagnostic): the same through half floats.
+add_host_shader(taa_sharpen.comp taa_sharpen_scene_r11_half_comp SCENE_R11G11B10=1
+    SCENE_HALF_ROUNDING=1)
 add_host_shader(buffer_multi_copy.comp buffer_multi_copy_comp)
 add_host_shader(depth_resample.frag depth_resample_frag)
 add_host_shader(depth_resample.frag depth_stencil_resample_frag HAS_STENCIL=1)
