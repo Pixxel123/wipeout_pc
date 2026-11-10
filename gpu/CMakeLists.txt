@@ -535,6 +535,12 @@ set_source_files_properties(../tests/test_taa_shader.cpp PROPERTIES
     COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 target_link_libraries(taa-shader-test PRIVATE gow3gpu)
 add_dependencies(taa-shader-test host_shaders)
+# Plain Vulkan (no gow3gpu): ninja -C out/gpu taa-fast-paths-test, then run it (Lavapipe works).
+add_executable(taa-fast-paths-test EXCLUDE_FROM_ALL ../tests/test_taa_fast_paths.cpp)
+target_include_directories(taa-fast-paths-test PRIVATE ${SHADER_INCLUDE})
+target_compile_options(taa-fast-paths-test PRIVATE -UNDEBUG)
+target_link_libraries(taa-fast-paths-test PRIVATE Vulkan::Vulkan)
+add_dependencies(taa-fast-paths-test host_shaders)
 
 add_executable(camera-motion-test EXCLUDE_FROM_ALL ../tests/test_camera_motion.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(camera-motion-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)

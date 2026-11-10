@@ -60,6 +60,9 @@ TAA has not yet been tested on the tester's GTX 1060.
   color's neighbourhood, so it cannot write it).
 - **Switches:** `GOW3_TAA_FAST_OFF=resolve`, `sharpen` or `all` (read once) restores the old
   passes; toggle bit 31 (`TaaFastPaths`, 2147483648) restores both while running.
+- **Test:** `taa-fast-paths-test` (plain Vulkan, no `gow3gpu`) runs the old passes and each
+  shortcut on the same 12 frames with history, at four sharpen strengths, and requires the same
+  bits in the scene color and the history.
 
 ## Startup patch is the default again for outputs other than 1080p (2026-10-02)
 
