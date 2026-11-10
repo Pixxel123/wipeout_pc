@@ -2,7 +2,8 @@
 // gow3: GOW3_GPU_PROFILE=1 — GPU time per render pass, dispatch and upscaler run. A timestamp is
 // written where each of them starts (and at the frame end); the time to the next timestamp is
 // charged to its label, barriers and copies recorded in between included. Results are read four
-// frames later and printed every 5 s: GPU ms per frame by label.
+// frames later and printed every 5 s: GPU ms per frame by label. A label can be split into steps
+// (Step): they are listed after it, and its own line keeps the whole time.
 
 #pragma once
 
@@ -34,6 +35,17 @@ public:
     void Mark(u64 key, Describe&& describe) {
         if (!described.contains(key)) {
             described.emplace(key, describe());
+        }
+        WriteTimestamp(key);
+    }
+
+    /// Starts a segment labelled `key` inside the label `parent` (marked before): its time still
+    /// counts in the parent's line, and the steps are listed apart, after the 5 s list.
+    template <typename Describe>
+    void Step(u64 parent, u64 key, Describe&& describe) {
+        if (!described.contains(key)) {
+            described.emplace(key, describe());
+            parents.emplace(key, parent);
         }
         WriteTimestamp(key);
     }
@@ -84,6 +96,8 @@ private:
         u64 segments = 0;
     };
     std::unordered_map<u64, Total> totals;
+    std::unordered_map<u64, u64> parents; ///< step label -> the label it is part of (Step)
+    std::unordered_map<u64, Total> steps;
     u64 frames = 0;
     u64 skipped = 0; ///< frames in the window without timestamps (the GPU was behind)
     /// Wall time between frame starts in the window, to compare the GPU ms per frame against.

@@ -179,6 +179,8 @@ private:
     bool RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
                     u32 w, u32 h, u32 ow, u32 oh, float frame_ms);
     void RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
+    /// GOW3_GPU_PROFILE: step `index` of the running Run/RunScaled label (own line, same total).
+    void ProfileStep(u32 index, const char* name);
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
     /// (output_image, or the 8-bit UI image with ldr) in General layout after the upscaler.
     void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h);
@@ -210,6 +212,7 @@ private:
     u32 jitter_index = 0;
     bool reset = true;
     u64 frame_id = 0;
+    u64 profile_run = 0; ///< GOW3_GPU_PROFILE: the label of the running Run/RunScaled
     std::chrono::steady_clock::time_point last_frame{};
 
     u32 width = 0, height = 0;             ///< render size

@@ -99,7 +99,15 @@ void GpuProfiler::Collect(u32 which) {
     }
     for (u32 i = 0; i + 1 < count; ++i) {
         const double ms = double(stamps[i + 1] - stamps[i]) * period_ns / 1e6;
-        auto& total = totals[keys[which][i]];
+        const u64 key = keys[which][i];
+        if (const auto parent = parents.find(key); parent != parents.end()) {
+            auto& step = steps[key];
+            step.ms += ms;
+            ++step.segments;
+            totals[parent->second].ms += ms; // the parent's line keeps its total
+            continue;
+        }
+        auto& total = totals[key];
         total.ms += ms;
         ++total.segments;
     }
@@ -129,7 +137,32 @@ void GpuProfiler::Print() {
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,
                     double(total.segments) / frames, described[key].c_str());
     }
+    // Steps after the list, in another format: a reader of the list above stops before them.
+    std::vector<std::pair<u64, Total>> step_list(steps.begin(), steps.end());
+    std::ranges::sort(step_list, [&](const auto& a, const auto& b) {
+        return described[a.first] < described[b.first];
+    });
+    for (const auto& [key, total] : sorted) {
+        double in_steps = 0;
+        for (const auto& [step, step_total] : step_list) {
+            in_steps += parents[step] == key ? step_total.ms : 0.0;
+        }
+        if (in_steps == 0) {
+            continue;
+        }
+        std::printf("GPU profile steps of %s: %.3f ms a frame\n", described[key].c_str(),
+                    total.ms / frames);
+        std::printf("    step %6.3f ms %5.1f/f  0 (the label itself, until its first step)\n",
+                    (total.ms - in_steps) / frames, double(total.segments) / frames);
+        for (const auto& [step, step_total] : step_list) {
+            if (parents[step] == key) {
+                std::printf("    step %6.3f ms %5.1f/f  %s\n", step_total.ms / frames,
+                            double(step_total.segments) / frames, described[step].c_str());
+            }
+        }
+    }
     totals.clear();
+    steps.clear();
     frames = 0;
     skipped = 0;
     wall_ms = 0;

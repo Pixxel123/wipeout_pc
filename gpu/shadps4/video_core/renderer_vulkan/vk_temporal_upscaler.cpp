@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <string>
 
 #include <vk_mem_alloc.h>
@@ -21,6 +22,12 @@
 #include "video_core/host_shaders/upscale_merge_r11_comp.h"
 #include "video_core/host_shaders/upscale_reactive_comp.h"
 #include "video_core/host_shaders/taa_comp.h"
+#include "video_core/host_shaders/taa_diag_fixedswitches_comp.h"
+#include "video_core/host_shaders/taa_diag_nodilate_comp.h"
+#include "video_core/host_shaders/taa_diag_nohistory_comp.h"
+#include "video_core/host_shaders/taa_diag_noneighbourhood_comp.h"
+#include "video_core/host_shaders/taa_diag_noreject_comp.h"
+#include "video_core/host_shaders/taa_diag_passthrough_comp.h"
 #include "video_core/host_shaders/taa_sharpen_comp.h"
 #include "video_core/host_shaders/taa_sharpen_ldr_comp.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -153,6 +160,33 @@ void PrintIssues(const char* what, u64 issues) {
         }
     }
     std::printf("\n");
+}
+
+/// gow3: GOW3_TAA_DIAG=<variant>: taa.comp with one part left out, so that part's GPU time shows
+/// by subtraction (GOW3_GPU_PROFILE step "5 TAA resolve"). For measurements only: every variant
+/// but fixedswitches changes the image. Unset, the pipeline is built from the normal shader.
+std::span<const u32> TaaShader() {
+    const char* name = std::getenv("GOW3_TAA_DIAG");
+    if (!name || !name[0]) {
+        return TAA_COMP;
+    }
+    static const std::array<std::pair<const char*, std::span<const u32>>, 6> variants{{
+        {"passthrough", TAA_DIAG_PASSTHROUGH_COMP},
+        {"nohistory", TAA_DIAG_NOHISTORY_COMP},
+        {"noreject", TAA_DIAG_NOREJECT_COMP},
+        {"noneighbourhood", TAA_DIAG_NONEIGHBOURHOOD_COMP},
+        {"nodilate", TAA_DIAG_NODILATE_COMP},
+        {"fixedswitches", TAA_DIAG_FIXEDSWITCHES_COMP},
+    }};
+    for (const auto& [variant, code] : variants) {
+        if (std::strcmp(name, variant) == 0) {
+            std::printf("TAA diag: variant %s, for timing only\n", variant);
+            return code;
+        }
+    }
+    std::printf("TAA diag: unknown variant %s (passthrough, nohistory, noreject, noneighbourhood, "
+                "nodilate, fixedswitches), normal shader\n", name);
+    return TAA_COMP;
 }
 
 } // namespace
@@ -645,12 +679,20 @@ void TemporalUpscaler::CreatePipelines() {
             .addressModeU = vk::SamplerAddressMode::eClampToEdge,
             .addressModeV = vk::SamplerAddressMode::eClampToEdge,
             .addressModeW = vk::SamplerAddressMode::eClampToEdge}));
-        taa_pipeline = compute(TAA_COMP, *taa_pipeline_layout);
+        taa_pipeline = compute(TaaShader(), *taa_pipeline_layout);
+    }
+}
+
+void TemporalUpscaler::ProfileStep(u32 index, const char* name) {
+    if (auto* profiler = GpuProfiler::Get(); profiler && profile_run) {
+        profiler->Step(profile_run, profile_run ^ (0x57E9'0000'0000ull | index),
+                       [name] { return std::string{name}; });
     }
 }
 
 void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
                                 vk::ImageView depth) {
+    ProfileStep(4, "4 TAA history barriers");
     // Make scene writes and the last storage-image history writes visible to sampled reads.
     const vk::MemoryBarrier2 inputs{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -707,6 +749,7 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
                   (Gow3Toggle::Disabled(Gow3Toggle::TaaVariance) ? 4u << 8 : 0u) |
                   (Gow3Toggle::Disabled(Gow3Toggle::TaaFilter) ? 8u << 8 : 0u) |
                   (Gow3Toggle::Disabled(Gow3Toggle::TaaKeepNearerHistory) ? 16u << 8 : 0u);
+    ProfileStep(5, "5 TAA resolve (taa.comp)");
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *taa_pipeline);
     if (params.pad & 0xffu) {
         static u32 diagnostic_frames = 0;
@@ -721,6 +764,7 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     const auto& settings = Gow3Settings::Get();
     const float strength = std::clamp(settings.sharpness.load(), 0.0f, 2.0f);
     if (settings.sharpen && strength > 0.0f && !(params.pad & 0xffu)) {
+        ProfileStep(6, "6 TAA sharpen (taa_sharpen.comp)");
         const vk::MemoryBarrier2 resolved{
             .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
             .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
@@ -1015,8 +1059,8 @@ void TemporalUpscaler::Run() {
     if (auto* profiler = GpuProfiler::Get()) {
         const char* label = Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa
             ? "upscaler Run (TAA)" : "upscaler Run (FSR)";
-        profiler->Mark(0xF5A0'0000ull ^ std::hash<std::string_view>{}(label),
-                       [label] { return std::string{label}; });
+        profile_run = 0xF5A0'0000ull ^ std::hash<std::string_view>{}(label);
+        profiler->Mark(profile_run, [label] { return std::string{label}; });
     }
     auto& color = texture_cache.GetImage(scene_color);
     auto& depth = texture_cache.GetImage(camera_motion.Depth());
@@ -1069,6 +1113,7 @@ void TemporalUpscaler::Run() {
         : game_motion ? CachedView(*game_motion, vk::Format::eR16G16Sfloat, vk::ImageAspectFlagBits::eColor)
                       : vk::ImageView{};
 
+    ProfileStep(1, "1 inputs to General: scene colour, depth, game motion");
     scheduler.EndRendering();
     runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead);
@@ -1114,12 +1159,14 @@ void TemporalUpscaler::Run() {
     const auto all = vk::PipelineStageFlagBits2::eAllCommands;
     const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
     // Previous contents are not needed: the layouts start from undefined every frame.
+    ProfileStep(2, "2 motion and output images to General");
     own_barrier(vk::Image(motion_image), vk::ImageLayout::eUndefined, all,
                 vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral,
                 vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite);
     own_barrier(vk::Image(output_image), vk::ImageLayout::eUndefined, all,
                 vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral, all, rw);
 
+    ProfileStep(3, "3 motion vectors in pixels (game_motion.comp or camera_motion.comp)");
     if (game_motion) {
         camera_motion.RecordGameMotion(cmdbuf, game_motion_view, *motion_view, w, h);
     } else {
@@ -1139,6 +1186,9 @@ void TemporalUpscaler::Run() {
     last_frame = now;
 
     bool dispatched = false;
+    if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
+        ProfileStep(5, "5 FSR 3, FSR 4 or DLSS");
+    }
     if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
         RecordTaa(cmdbuf, input_color_view, input_depth_view);
         dispatched = true;
@@ -1227,6 +1277,7 @@ void TemporalUpscaler::Run() {
             ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
         }
         // The result replaces the scene color's RGB (its alpha carries data for the post).
+        ProfileStep(7, "7 write-back barriers: output image, scene colour");
         own_barrier(vk::Image(output_image), vk::ImageLayout::eGeneral, all, rw,
                     vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead);
@@ -1276,6 +1327,7 @@ void TemporalUpscaler::Run() {
                              ? 1
                          : debug_view == Gow3Settings::DebugMotion ? 2
                                                                  : 0;
+        ProfileStep(8, "8 write-back into the scene colour (upscale_merge.comp)");
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
                             r11 ? *merge_r11_pipeline : *merge_pipeline);
         cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *merge_pipeline_layout, 0,
@@ -1283,6 +1335,8 @@ void TemporalUpscaler::Run() {
         cmdbuf.pushConstants(*merge_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
                              sizeof(mode), &mode);
         cmdbuf.dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
+        // Until the next label: the barriers of the pass that reads the scene colour next.
+        ProfileStep(9, "9 after the write-back, until the next label");
     }
 }
 
@@ -1586,8 +1640,8 @@ void TemporalUpscaler::RunScaled() {
     if (auto* profiler = GpuProfiler::Get()) {
         const char* label = Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa
             ? "upscaler RunScaled (TAA)" : "upscaler RunScaled (FSR)";
-        profiler->Mark(0xF5A0'0000ull ^ std::hash<std::string_view>{}(label),
-                       [label] { return std::string{label}; });
+        profile_run = 0xF5A0'0000ull ^ std::hash<std::string_view>{}(label);
+        profiler->Mark(profile_run, [label] { return std::string{label}; });
     }
     auto& color = texture_cache.GetImage(ldr_target);
     auto& depth = texture_cache.GetImage(camera_motion.Depth());

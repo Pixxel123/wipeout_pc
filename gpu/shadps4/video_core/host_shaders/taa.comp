@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native-resolution TAA: unjitter, motion reprojection, depth rejection and neighborhood
 // clipping. History contains scene RGB and depth in alpha; HUD never enters the history.
+// GOW3_TAA_DIAG timing variants (vk_temporal_upscaler.cpp TaaShader) each leave out one part:
+// TAA_DIAG_PASSTHROUGH (all but one color fetch and the two stores), _NO_HISTORY (motion and
+// history taps), _NO_REJECT (the depth test of the history taps), _NO_NEIGHBOURHOOD (the 3x3
+// color loop; history unclamped), _NO_DILATE (3x3 depth dilation and slope), _FIXED_SWITCHES
+// (diagnostics and A/B switches compiled out: the default image).
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D color_tex;
@@ -76,7 +81,17 @@ void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(result_img);
     if (any(greaterThanEqual(p, size))) return;
+#ifdef TAA_DIAG_PASSTHROUGH
+    vec3 copy = texelFetch(color_tex, p, 0).rgb;
+    imageStore(result_img, p, vec4(copy, 1.0));
+    imageStore(next_history, p, vec4(copy, 1.0));
+    return;
+#endif
+#ifdef TAA_DIAG_FIXED_SWITCHES
+    const uint diag = 0u, variant = 0u;
+#else
     const uint diag = pad & 0xffu, variant = pad >> 8;
+#endif
     vec2 current_pos = vec2(p) + jitter;
     ivec2 color_source = clamp(ivec2(floor(current_pos + 0.5)), ivec2(0), size - 1);
     ivec2 source = color_source;
@@ -87,6 +102,10 @@ void main() {
     vec3 filtered = vec3(0.0), moment1 = vec3(0.0), moment2 = vec3(0.0);
     vec3 lo = vec3(1e9), hi = vec3(-1e9);
     float filter_weight = 0.0;
+#ifdef TAA_DIAG_NO_NEIGHBOURHOOD
+    rgb_lo = vec3(0.0);
+    rgb_hi = vec3(65504.0);
+#else
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
             ivec2 q = clamp(color_source + ivec2(x,y), ivec2(0), size - 1);
@@ -105,6 +124,7 @@ void main() {
             lo = min(lo, s);
             hi = max(hi, s);
         }
+#endif
     vec3 current = (variant & 8u) != 0u ? untonemap(filtered / filter_weight)
                                          : fetchLinear(color_tex, current_pos).rgb;
     rgb_lo = min(rgb_lo, current);
@@ -112,6 +132,7 @@ void main() {
     lo = min(lo, toYCoCg(tonemap(current)));
     hi = max(hi, toYCoCg(tonemap(current)));
     float depth = texelFetch(depth_tex, source, 0).r;
+#ifndef TAA_DIAG_NO_DILATE
     // Dilate foreground depth/motion, as temporal upscalers do. Thin geometry can
     // alternate with background under jitter; a 3x3 nearest surface remains trackable.
     for (int y = -1; y <= 1; ++y)
@@ -128,6 +149,7 @@ void main() {
                           depthSlope(depth,source,ivec2(0,1),size));
         depth = clamp(depth + dot(current_pos-vec2(source),slope),0.0,1.0-1e-7);
     }
+#endif
     vec3 result = current;
     float history_weight = 0.0;
     vec3 diagnostic_history = current;
@@ -135,7 +157,11 @@ void main() {
     vec3 diagnostic_direct = current;
     float diagnostic_displacement = 0.0;
     // Do not sample undefined history on reset, including the first dispatch after resizing.
+#ifdef TAA_DIAG_NO_HISTORY
+    if (false) {
+#else
     if (reset_history == 0) {
+#endif
         vec2 motion = texelFetch(motion_tex, source, 0).rg;
         vec2 previous_pos = vec2(p) + motion;
         if (diag != 0) {
@@ -145,7 +171,11 @@ void main() {
         if (!any(isnan(motion)) && !any(isinf(motion)) &&
             all(greaterThanEqual(previous_pos, vec2(0))) &&
             all(lessThanEqual(previous_pos, vec2(size - 1)))) {
+#ifdef TAA_DIAG_NO_REJECT
+            float expected_depth = 0.0;
+#else
             float expected_depth = expectedPreviousDepth(depth, current_pos, size);
+#endif
             // Validate each bilinear tap separately: interpolating foreground/background
             // depth invents a surface and causes history rejection along thin edges.
             // Separate the integer pixel from the subpixel motion before interpolation.
@@ -162,6 +192,9 @@ void main() {
                         clamp(base + ivec2(x,y), ivec2(0), size - 1), 0);
                     float w = (x == 0 ? 1.0 - fraction.x : fraction.x) *
                               (y == 0 ? 1.0 - fraction.y : fraction.y);
+#ifdef TAA_DIAG_NO_REJECT
+                    bool same_surface = true;
+#else
                     bool same_surface = depth >= 1.0 ? tap.a >= 1.0 :
                         tap.a < 1.0 && abs(tap.a - expected_depth) <= threshold;
                     // When nothing moves, history in front of the current surface stays:
@@ -172,6 +205,7 @@ void main() {
                     if (!same_surface && (variant & 16u) == 0u && length(motion) < 1.0 &&
                         tap.a < expected_depth && expected_depth < 1.0)
                         same_surface = true;
+#endif
                     if (same_surface && !any(isnan(tap)) && !any(isinf(tap))) {
                         history_rgb += tap.rgb * w;
                         coverage += w;
