@@ -44,6 +44,7 @@ typedef struct {
 static Texture textures[GLYPH_MAX_TEXTURES];
 static int texture_count;
 static int launch_style; /* GOW3_GLYPH_STYLE: the style the game's file patches load (run.py) */
+static char saved_at_start[64]; /* GOW3_GLYPH_SAVED: player 1's setting in the save at start, "" none */
 
 static uint64_t glyph_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000ull+(uint64_t)t.tv_nsec; }
 /* As toggle_watcher in src/runtime_memory.c (no sleep() on Windows). */
@@ -125,17 +126,18 @@ static int known_build(const unsigned char *image) {
     return ok;
 }
 /* Guest reads under fault recovery: 0 when a fault stopped them. Each is a glyph_choice (a style
- * or GLYPH_AUTO, -1 when absent); the live values are those of open Controller type rows (-1 when
- * not open), rows_open whether either row is open (registered with a count, whatever its value
- * pointers hold at that moment). */
-static int read_state(const unsigned char *image, int *saved_p1, int *live_p1, int *live_p2, int *rows_open) {
+ * or GLYPH_AUTO, -1 when absent); the live values are those of Controller type rows holding a
+ * value (-1 otherwise), rows_open whether either does (glyph_row_value). saved is the setting's
+ * text ("" when absent). */
+static int read_state(const unsigned char *image, int *saved_p1, int *live_p1, int *live_p2, int *rows_open,
+                      char saved[64]) {
     sigjmp_buf recover;
     volatile int ok=0;
+    saved[0]=0;
     if (!sigsetjmp(recover,0)) {
         runtime_fault_recover=&recover;
         const unsigned char *store=(const unsigned char *)(uintptr_t)glyph_load64(image+GLYPH_STORE_AT);
-        char value[64];
-        *saved_p1=store ? glyph_choice(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value))) : -1;
+        *saved_p1=store ? glyph_choice(glyph_setting(store,glyph_key("Pad Style P1"),saved,64)) : -1;
         const char *row1=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P1"));
         const char *row2=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P2"));
         *live_p1=glyph_choice(row1);
@@ -243,10 +245,20 @@ static void *glyph_thread(void *unused) {
     printf("Runtime: glyph switch on (%d textures, %s at start)\n",texture_count,glyph_style_names[launch_style]);
     int last_want=-2, was_open=0;
     pad_held[0]=pad_held[1]=launch_style;
+    /* Until the profile is read the setting holds the layout's default (AUTO), not the save's: the
+     * save's value (GOW3_GLYPH_SAVED, run.py) is taken as the start style until the setting shows
+     * it, so a pad unlike the saved style changes nothing at boot only to change back. */
+    int profile_read=!saved_at_start[0];
     for (;;) {
         glyph_pause_ns(250000000ull);
         int saved_p1=-1, live_p1=-1, live_p2=-1, rows_open=0;
-        if (!read_state(image,&saved_p1,&live_p1,&live_p2,&rows_open)) continue;
+        char saved[64];
+        if (!read_state(image,&saved_p1,&live_p1,&live_p2,&rows_open,saved)) continue;
+        if (!profile_read && !strcmp(saved,saved_at_start)) {
+            profile_read=1;
+            printf("Runtime: glyphs: the profile's Controller type is read (%s)\n",saved);
+        }
+        if (!profile_read) saved_p1=launch_style;
         follow_pads();
         /* AUTO: player 1's row and setting follow player 1's gamepad, player 2's row player 2's. */
         const int want=glyph_wanted_live(glyph_resolve(live_p1,pad_held[0]),glyph_resolve(live_p2,pad_held[1]),
@@ -303,9 +315,9 @@ static void *glyph_thread(void *unused) {
 /* The Controls screen's Accept (probe.c hook in its Update, game thread): its own code copies only
  * the settings it knows into the profile, and a List row writes its setting only when its screen
  * is left with previous="true", which Accept's redirect is not. So the open Controller type row's
- * value is written here into its existing "Pad Style P<n>" setting. Only the screen's own row is
- * open; nothing is written for a value that is not a known choice (a style or auto) or does not
- * fit the node. */
+ * value is written here into its existing "Pad Style P<n>" setting. The other player's row holds a
+ * value only when its screen was left saving it; nothing is written for a value that is not a
+ * known choice (a style or auto) or does not fit the node. */
 ABI void runtime_glyphs_accept(void) {
     unsigned char *image=runtime_image_base();
     if (!image || !known_build(image)) return;
@@ -346,6 +358,8 @@ void runtime_glyphs_start(void) {
     if (started++ || !path || !*path) return;
     launch_style=glyph_style_index(getenv("GOW3_GLYPH_STYLE"));
     if (launch_style<0) launch_style=0;
+    const char *saved=getenv("GOW3_GLYPH_SAVED");
+    if (saved && strlen(saved)<sizeof(saved_at_start)) strcpy(saved_at_start,saved);
     load_config(path);
     pthread_t thread;
     if (texture_count && !pthread_create(&thread,NULL,glyph_thread,NULL)) pthread_detach(thread);

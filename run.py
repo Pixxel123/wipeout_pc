@@ -346,7 +346,9 @@ def main():
                             '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
             env['GOW3_GLYPH_SWAP'] = str(out / 'glyph_swap.txt')
             env['GOW3_GLYPH_STYLE'] = style  # what the file patches above load (src/runtime_glyphs.c)
-            derived += ['GOW3_GLYPH_SWAP', 'GOW3_GLYPH_STYLE']
+            # The save's own value: until the game has read it, its setting holds the layout's default.
+            env['GOW3_GLYPH_SAVED'] = pad_style_save.saved_style(savedata, title, 'Pad Style P1') or ''
+            derived += ['GOW3_GLYPH_SWAP', 'GOW3_GLYPH_STYLE', 'GOW3_GLYPH_SAVED']
         env['GOW3_FILE_PATCHES'] = str(out / 'file_patches.txt')
 
         from patches import game_profile_for, patch_requirements, patch_status, selected_patches
