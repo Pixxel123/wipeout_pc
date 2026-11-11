@@ -6,11 +6,12 @@ second with InputPad="1") keep a switched-off Thrust Sensitivity slider (<aSlide
 Sensitivity. It becomes a list row the game saves as a setting of its own, "Pad Style P1" or
 "Pad Style P2" (scripts/pad_style_save.py gives the save those settings; src/runtime_glyphs.c
 follows them), and the row is the first of the screen's Adjust settings: the rows above the slider
-move down one. AUTO shows the buttons of the player's connected gamepad, DEFAULT the PlayStation
-ones, XBOX the Xbox ones. The rows keep their bytes, padded with spaces. Labels the game has no
-string for are shown as written, so CONTROLLER TYPE, AUTO and XBOX are upper case like the other
-rows; FE_DEFAULT reads DEFAULT. `default` is an entry's value: the game matches it against the values. The archives
-are not written: the layout is packed into the bytes the original takes (scripts/psarc.py)."""
+move down one. AUTO shows the buttons of the player's connected gamepad, XBOX the Xbox ones and
+PLAYSTATION the game's own, a new profile's choice. The rows keep their bytes, padded with spaces.
+Labels the game has no string for are shown as written, so CONTROLLER TYPE, AUTO, XBOX and
+PLAYSTATION are upper case like the other rows. `default` is an entry's value: the game matches it
+against the values. The archives are not written: the layout is packed into the bytes the original
+takes (scripts/psarc.py)."""
 import argparse
 import contextlib
 from pathlib import Path
@@ -18,12 +19,13 @@ import re
 
 import psarc
 
-VERSION = 2  # of the row: a change rebuilds the cached patches
+VERSION = 3  # of the row: a change rebuilds the cached patches
 LAYOUT = 'data/plugins/frontend/gui/controls_definition_ps4.xml'
 NAMES = ('Pad Style P1', 'Pad Style P2')
 # (label, saved value): AUTO follows the player's connected gamepad (src/runtime_glyphs.c, run.py).
-ENTRIES = (('AUTO', 'auto'), ('FE_DEFAULT', 'playstation'), ('XBOX', 'xbox'))
-DEFAULT = 'auto'  # a new profile's (one the save has no setting for yet gets the launcher's, pad_style_save.py)
+ENTRIES = (('AUTO', 'auto'), ('XBOX', 'xbox'), ('PLAYSTATION', 'playstation'))
+# A new profile's (a save without the setting yet gets the launcher's controller type, pad_style_save.py).
+DEFAULT = 'playstation'
 # A screen's Adjust settings rows, top to bottom: Motion Sensor, Motion Sensitivity, Airbrake
 # Sensitivity and the switched-off Thrust Sensitivity slider.
 BLOCK = re.compile(rb'<MotionList name="Motion Sensor".*?</MotionList>\s*<Slider name="Motion Sensitivity".*?</Slider>'

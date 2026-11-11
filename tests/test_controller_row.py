@@ -78,12 +78,13 @@ class RowTests(unittest.TestCase):
                                        ('Motion Sensitivity', '735', '0.45'), ('Airbrake Sensitivity', '780', '0.5')])
         self.assertEqual(rows(second), [('Pad Style P2', '645', '0.35'), ('Motion Sensor', '690', '0.4'),
                                         ('Motion Sensitivity', '735', '0.45'), ('Airbrake Sensitivity', '780', '0.5')])
-        self.assertIn(b'<List name="Pad Style P2" global="Pad Style P2" focus="true" save="true" default="auto" '
-                      b'delay="0.35" InputPad="1">', new)
+        self.assertIn(b'<List name="Pad Style P2" global="Pad Style P2" focus="true" save="true" '
+                      b'default="playstation" delay="0.35" InputPad="1">', new)
         self.assertEqual(second.count(b'InputPad="1"'), 4)
         self.assertEqual(new.count(b'<Entry idstring="AUTO" value="auto"></Entry>\r\n'
-                                   b'<Entry idstring="FE_DEFAULT" value="playstation"></Entry>\r\n'
-                                   b'<Entry idstring="XBOX" value="xbox"></Entry>'), 2)
+                                   b'<Entry idstring="XBOX" value="xbox"></Entry>\r\n'
+                                   b'<Entry idstring="PLAYSTATION" value="playstation"></Entry>'), 2)
+        self.assertNotIn(b'FE_DEFAULT" value="playstation', new)  # no DEFAULT entry, only the Default button
         self.assertEqual(new.count(b'idstring="CONTROLLER TYPE"'), 2)
         self.assertTrue(new.startswith(b'<Screen type="Controls" name="Controls">'))
 
