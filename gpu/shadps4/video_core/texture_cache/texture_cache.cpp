@@ -43,6 +43,16 @@ static const std::optional<TraceRange> trace_range = [] {
     return ParseTraceRange(std::getenv("GOW3_TC_TRACE"));
 }();
 
+// gow3 (diagnostic): GOW3_READBACK_LOG=1 logs every queued copy back to guest memory, every wait
+// for one (address range, source, time) and every image expansion.
+bool ReadbackLog() {
+    static const bool on = [] {
+        const char* value = std::getenv("GOW3_READBACK_LOG");
+        return value && value[0] == '1';
+    }();
+    return on;
+}
+
 bool IsTraced(u64 address, u64 size) {
     return trace_range && trace_range->Contains(address, size) &&
            Vulkan::FrameCapture::IsRecording();
@@ -202,10 +212,21 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
             waited = !scheduler.IsFree(tick);
             const auto start = diag ? std::chrono::steady_clock::now()
                                     : std::chrono::steady_clock::time_point{};
+            const auto log_start = std::chrono::steady_clock::now();
             scheduler.Wait(tick);
             if (diag) {
                 wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                               std::chrono::steady_clock::now() - start).count();
+            }
+            if (ReadbackLog()) {
+                std::printf("Readback wait: %#llx size %#llx source %d, tick %llu (current %llu), "
+                            "GPU busy %d, %.2f ms\n",
+                            static_cast<unsigned long long>(address),
+                            static_cast<unsigned long long>(size), static_cast<int>(source),
+                            static_cast<unsigned long long>(tick),
+                            static_cast<unsigned long long>(scheduler.CurrentTick()), int{waited},
+                            std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - log_start).count());
             }
             RetireReadbacks();
         }
@@ -355,6 +376,17 @@ void TextureCache::ProcessDownloadImages() {
                                      image.info.size.height, image.info.num_bits, slot->copies + 1,
                                      slot->cpu_accesses, image.info.pixel_format};
                         }
+                    }
+                    if (ReadbackLog()) {
+                        std::printf("Readback queued: %#llx size %#llx, image %#llx %ux%u %s levels "
+                                    "%u, tick %llu\n",
+                                    static_cast<unsigned long long>(copy->guest_address),
+                                    static_cast<unsigned long long>(copy->size),
+                                    static_cast<unsigned long long>(image.info.guest_address),
+                                    image.info.size.width, image.info.size.height,
+                                    vk::to_string(image.info.pixel_format).c_str(),
+                                    image.info.resources.levels,
+                                    static_cast<unsigned long long>(scheduler.CurrentTick()));
                     }
                     pending_readbacks.Push(copy->guest_address, copy->size,
                         scheduler.CurrentTick(), copy->staging);
@@ -1296,6 +1328,21 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
 
+    if (ReadbackLog()) {
+        std::printf("Expand image: %#llx size %#llx %ux%u %s levels %u (GPU modified %d, target %d) "
+                    "-> %#llx size %#llx %ux%u %s levels %u\n",
+                    static_cast<unsigned long long>(src_image.info.guest_address),
+                    static_cast<unsigned long long>(src_image.info.guest_size),
+                    src_image.info.size.width, src_image.info.size.height,
+                    vk::to_string(src_image.info.pixel_format).c_str(),
+                    src_image.info.resources.levels,
+                    int{True(src_image.flags & ImageFlagBits::GpuModified)},
+                    int{src_image.binding.is_target != 0},
+                    static_cast<unsigned long long>(info.guest_address),
+                    static_cast<unsigned long long>(info.guest_size), info.size.width,
+                    info.size.height, vk::to_string(info.pixel_format).c_str(),
+                    info.resources.levels);
+    }
     RefreshImage(new_image);
     runtime.CopyImage(&src_image, &new_image);
 
