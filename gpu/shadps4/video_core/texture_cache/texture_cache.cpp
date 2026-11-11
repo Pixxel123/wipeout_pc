@@ -53,6 +53,14 @@ bool ReadbackLog() {
     return on;
 }
 
+bool ExpandNoWait() {
+    static const bool on = [] {
+        const char* value = std::getenv("GOW3_EXPAND_NO_WAIT");
+        return value && value[0] == '1';
+    }();
+    return on;
+}
+
 bool IsTraced(u64 address, u64 size) {
     return trace_range && trace_range->Contains(address, size) &&
            Vulkan::FrameCapture::IsRecording();
@@ -185,6 +193,13 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
     // gow3 (GOW3_EXPAND_NO_WAIT): ExpandImage's refresh, including the buffer its upload obtains.
     if (skip_refresh_readbacks && (source == ReadbackSource::ImageRefresh ||
                                    source == ReadbackSource::BufferForImage)) {
+        return false;
+    }
+    // gow3 (GOW3_EXPAND_NO_WAIT): an image freed because its picture was just copied into another
+    // image on the GPU. The copy back to guest memory is dropped, not waited for: the image that
+    // took the picture now owns that memory's contents.
+    if (cancel_free_readbacks && source == ReadbackSource::ImageFree) {
+        CancelReadbacks(address, size);
         return false;
     }
     {
@@ -1313,7 +1328,10 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                     trace("left:copymip");
                     auto& merged_image = slot_images[merged_image_id];
                     runtime.CopyMip(&cache_image, &merged_image, mip, slice);
+                    cancel_free_readbacks =
+                        ExpandNoWait() && True(cache_image.flags & ImageFlagBits::GpuModified);
                     FreeImage(cache_image_id);
+                    cancel_free_readbacks = false;
                     return {merged_image_id, -1, -1};
                 }
                 trace("left:no-merged");
@@ -1354,10 +1372,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     // placeholder for those ranges, so it need not wait for the GPU to finish a pending copy
     // back to guest memory there (tiny render targets are copied back after every draw: the
     // last mips of a rendered chain made the first frame of a race wait 40-110 ms each).
-    static const bool expand_no_wait = [] {
-        const char* value = std::getenv("GOW3_EXPAND_NO_WAIT");
-        return value && value[0] == '1';
-    }();
+    const bool expand_no_wait = ExpandNoWait();
     skip_refresh_readbacks = expand_no_wait && True(src_image.flags & ImageFlagBits::GpuModified);
     RefreshImage(new_image);
     skip_refresh_readbacks = false;
@@ -1372,7 +1387,9 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
                  new_image_id.index, src_image.info.resources.levels, info.resources.levels);
     }
 
+    cancel_free_readbacks = expand_no_wait && True(src_image.flags & ImageFlagBits::GpuModified);
     FreeImage(image_id);
+    cancel_free_readbacks = false;
     TrackImage(new_image_id);
     return new_image_id;
 }

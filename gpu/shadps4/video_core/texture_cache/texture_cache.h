@@ -246,6 +246,7 @@ public:
     void RefreshImage(Image& image);
     /// gow3 (GOW3_EXPAND_NO_WAIT): set by ExpandImage around its refresh of the new image.
     bool skip_refresh_readbacks = false;
+    bool cancel_free_readbacks = false; ///< set around FreeImage after a GPU copy of its picture
 
     /// Retrieves the sampler that matches the provided S# descriptor.
     /// extra_lod_bias: gow3, added to the S#'s bias (reduced scene rendering).
