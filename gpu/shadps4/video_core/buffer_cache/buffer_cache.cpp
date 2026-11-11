@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include "gow3_copy.h"
@@ -483,18 +484,52 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
     Gow3Stats::Timer timer{Gow3Stats::t_resident};
 
-    const vk::MemoryAllocateInfo alloc_info = {
-        .allocationSize = resident_blocks << block_shift,
-        .memoryTypeIndex = arena_memory_type_index,
-    };
-    const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
-    Gow3Stats::resident_bytes += static_cast<s64>(alloc_info.allocationSize);
+    // gow3: GOW3_RESIDENT_SLAB_MB=<n> (experiment, default 0 = one allocation per call): the
+    // backing comes from slabs of n MiB, so a frame that makes many ranges resident (the first
+    // frame of a race, the grid) asks the driver for memory a few times, not once per range.
+    // Residency memory is never freed, so a slab needs no bookkeeping beyond its fill level.
+    static const u64 slab_bytes = [] {
+        const char* value = std::getenv("GOW3_RESIDENT_SLAB_MB");
+        const u64 mib = value ? std::strtoull(value, nullptr, 10) : 0;
+        std::printf("Buffer residency: %s\n",
+                    mib ? "backing from slabs (GOW3_RESIDENT_SLAB_MB)" : "one allocation per call");
+        return mib << 20;
+    }();
+    const u64 needed = u64{resident_blocks} << block_shift;
+    vk::DeviceMemory device_memory;
+    u64 memory_offset{};
+    if (slab_bytes == 0) {
+        device_memory = Vulkan::Check(instance.GetDevice().allocateMemory({
+            .allocationSize = needed,
+            .memoryTypeIndex = arena_memory_type_index,
+        }));
+        ++resident_allocations;
+    } else {
+        if (needed > resident_slab_size - resident_slab_used) {
+            resident_slab_size = Common::AlignUp(std::max(needed, slab_bytes), block_size);
+            resident_slab = Vulkan::Check(instance.GetDevice().allocateMemory({
+                .allocationSize = resident_slab_size,
+                .memoryTypeIndex = arena_memory_type_index,
+            }));
+            resident_slab_used = 0;
+            ++resident_allocations;
+        }
+        device_memory = resident_slab;
+        memory_offset = resident_slab_used;
+        resident_slab_used += needed;
+    }
+    ++resident_calls;
+    if ((resident_calls & 0x3ff) == 0) {
+        std::printf("Buffer residency: %llu calls, %llu driver allocations\n",
+                    static_cast<unsigned long long>(resident_calls),
+                    static_cast<unsigned long long>(resident_allocations));
+    }
+    Gow3Stats::resident_bytes += static_cast<s64>(needed);
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
         staging_pool.Request(resident_blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
 
-    u64 memory_offset{};
     ArenaBinds* binds = BindsForArena(arena);
     auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
     u64 offset = staging.offset;
