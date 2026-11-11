@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -50,7 +51,15 @@ StagingBufferPool::StagingBufferPool(const Instance& instance_, Scheduler& sched
     const char* env = std::getenv("GOW3_STAGING_KEEP_MB");
     keep_blocks = (env ? std::strtoull(env, nullptr, 10) : 512) * 1_MB / BLOCK_SIZE;
     Ring& ring = rings[u32(MemoryType::HostUncached)];
-    for (u64 i = 0; i < PREWARM_BLOCKS; ++i) {
+    // gow3 (experiment): GOW3_STAGING_PREWARM_MB=<n>, default 128 (PREWARM_BLOCKS). Upload blocks
+    // made and written once here, at start, are not first touched in the frame that uploads a
+    // track's textures (a first race needs ~600 MiB of them in its first frame).
+    const char* prewarm_env = std::getenv("GOW3_STAGING_PREWARM_MB");
+    const u64 prewarm_blocks =
+        prewarm_env ? std::strtoull(prewarm_env, nullptr, 10) * 1_MB / BLOCK_SIZE : PREWARM_BLOCKS;
+    std::printf("Staging: %llu MiB of upload blocks made at start\n",
+                static_cast<unsigned long long>(prewarm_blocks * BLOCK_SIZE >> 20));
+    for (u64 i = 0; i < prewarm_blocks; ++i) {
         auto& block = ring.blocks.emplace_back(Block{
             .buffer = std::make_unique<VideoCore::StreamBuffer>(
                 instance, scheduler, MemoryType::HostUncached, BLOCK_SIZE),
