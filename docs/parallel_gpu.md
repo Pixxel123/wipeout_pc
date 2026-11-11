@@ -244,6 +244,39 @@ Collecting a profile: `GOW3_PGO=generate bash run.sh` builds an instrumented lib
 of ordinary gameplay. The next plain build uses it. `GOW3_PGO=off` / `GOW3_LTO=OFF` disable them.
 Regenerate the profile after larger code changes.
 
+### The profile in the repository (2026-11-11)
+
+`pgo/` holds a profile for the Linux release build, so the AppImage is built with it and nobody
+has to collect one first. Measured against the same commit built without it, at the race start
+(about 4200-4500 draws a frame, 4+4 runs of `tools/deck/bench-run.sh`): 1920x1080 output +2.9 %
+(Vineta K) and +4.0 % (Ubermall) FPS; 1280x720 output +7.0 % and +6.0 % (2+2 runs). The command
+thread's CPU time per draw fell 3-6 % and the draw recording thread's 7-12 %.
+
+- **It only matches GitHub's builds.** GCC names each profile file after the object file's
+  absolute path and checks every function against its source path and line, so the profile is
+  used only by a build made in the same folder as the instrumented one:
+  `/home/runner/work/wipeout_pc/wipeout_pc`, the Actions checkout of this repository and of its
+  forks. A build anywhere else finds no matching file and compiles as it would without a
+  profile. No path-mapping option changes that (GCC 14: `-fprofile-prefix-path` renames the
+  files, the per-function check still fails).
+- **It goes stale by file.** A function whose line moved, or whose code changed, is compiled
+  without its counts; the others keep theirs. So an edit near the top of a hot file
+  (`vk_rasterizer.cpp`, `buffer_cache.cpp`, `liverpool.cpp`) drops that file's profile until
+  the next refresh. Nothing breaks: the build only loses that part of the gain.
+- **Refreshing it** (about 45 minutes, on a Linux machine with the game):
+  1. On a throwaway branch, set the default in `build.sh` to `pgo=${GOW3_PGO:-generate}` and
+     run the Linux AppImage workflow on it. The artifact is the instrumented build.
+  2. Extract it (`--appimage-extract`) and run it with
+     `GCOV_PREFIX=<folder> GCOV_PREFIX_STRIP=6`, so the counters land in `<folder>` and not in
+     the runner's path. Race on several tracks at the output sizes players use; with
+     `tools/deck/bench-run.sh`, add both variables to the build spec and replay each route.
+     The instrumented build runs slower, and each run's last 30 s are not written.
+  3. Replace `pgo/*.gcda` with the files from `<folder>` and commit them alone.
+- **Windows** builds with Clang and without a profile (`build.sh`). Clang has its own profile
+  format, so it needs its own instrumented build and training run on Windows.
+- `GOW3_PGO=generate` on a checkout writes into `pgo/` as before; do not commit those files
+  (they carry the local path and match no other build).
+
 Comparison, three runs in game (median of in-game 5 s windows, >800 draws/frame), with the new
 `Frame stats` field "GPU thread us/draw" (CPU time of the GPU command thread per draw, which
 tolerates small scene differences better than FPS):
