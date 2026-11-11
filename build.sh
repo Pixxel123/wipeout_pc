@@ -54,7 +54,7 @@ read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3 libavformat libavcodec
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libgow3gpu.so.
 # GOW3_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
 # Default: use the profile in pgo/ when there is one. GOW3_LTO=OFF disables link-time optimization.
-pgo=${GOW3_PGO:-}
+pgo=${GOW3_PGO:-generate}
 if [[ -z $pgo ]]; then
     if [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
 fi
