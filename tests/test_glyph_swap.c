@@ -69,6 +69,21 @@ int main(void) {
 
     assert(glyph_style_index("playstation")==0 && glyph_style_index("xbox")==1 && glyph_style_index("nintendo")==2);
     assert(glyph_style_index("motion off")==-1 && glyph_style_index(NULL)==-1);
+    assert(glyph_style_index("auto")==-1);                                 /* no textures of its own */
+    /* AUTO: a choice the rows and saves hold, shown as the player's gamepad's style. */
+    assert(glyph_choice("auto")==GLYPH_AUTO && glyph_choice("xbox")==1 && glyph_choice("motion off")==-1);
+    assert(glyph_choice(NULL)==-1);
+    assert(!strcmp(glyph_choice_name(GLYPH_AUTO),"auto") && !strcmp(glyph_choice_name(2),"nintendo"));
+    assert(!glyph_choice_name(-1) && !glyph_choice_name(GLYPH_AUTO+1));
+    assert(glyph_style_for_pad("ps4")==0 && glyph_style_for_pad("ps5")==0 && glyph_style_for_pad("ps3")==0);
+    assert(glyph_style_for_pad("xbox360")==1 && glyph_style_for_pad("xboxone")==1);
+    assert(glyph_style_for_pad("standard")==1 && glyph_style_for_pad("")==1); /* the Steam Deck, any other */
+    assert(glyph_style_for_pad("switchpro")==2 && glyph_style_for_pad("joyconpair")==2 &&
+           glyph_style_for_pad("gamecube")==2);
+    assert(glyph_style_for_pad(NULL)==-1);                                 /* no gamepad */
+    assert(glyph_resolve(GLYPH_AUTO,2)==2 && glyph_resolve(1,2)==1 && glyph_resolve(-1,2)==-1);
+    assert(glyph_commit(store,glyph_key("Pad Style P1"),glyph_choice_name(GLYPH_AUTO)));
+    assert(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value)) && glyph_choice(value)==GLYPH_AUTO);
     /* Live row values first (P2's row before P1's), else the saved P1. */
     assert(glyph_wanted_live(-1,0,1)==0);   /* P2's row open */
     assert(glyph_wanted_live(2,-1,1)==2);   /* P1's row open */

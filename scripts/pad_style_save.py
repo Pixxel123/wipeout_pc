@@ -20,6 +20,19 @@ import zlib
 MAGIC, HEAD, RECORD, CAPACITY = 0x2000, 0x3c4, 0x68, 0x40
 PLAYERS = ('Pad Style P1', 'Pad Style P2')
 STYLES = ('playstation', 'xbox', 'nintendo')
+AUTO = 'auto'  # the row's AUTO: the style of the player's connected gamepad (pad_style())
+
+
+def pad_style(output):
+    """The style of the gamepad on the line `gow3-probe --gamepad` prints, None without one. By
+    SDL's type: PlayStation pads theirs, Nintendo ones (Switch, Joy-Con, GameCube) theirs, any
+    other the Xbox buttons (src/glyph_swap.h glyph_style_for_pad(), the same rule)."""
+    for line in (output or '').splitlines():
+        if line.startswith('Gamepad: type='):
+            kind = line[len('Gamepad: type='):].split(' ', 1)[0]
+            return ('playstation' if kind.startswith('ps') else
+                    'nintendo' if kind.startswith(('switch', 'joycon', 'gamecube')) else 'xbox')
+    return None
 
 
 def key(name):

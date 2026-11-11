@@ -857,6 +857,20 @@ int runtime_pad_second_user(void) {
     pthread_mutex_unlock(&lock);
     return present;
 }
+/* SDL's name of the type of player 1's (0) or player 2's (1) open gamepad ("" when SDL names
+ * none), NULL while that player has none open. For the glyph thread (Controller type AUTO): it
+ * opens nothing, only looks at the pads the game's reads opened. */
+const char *runtime_pad_type(int player) {
+    const char *type=NULL;
+    pthread_mutex_lock(&lock);
+    SDL_Gamepad *g=player ? gamepad2 : gamepad;
+    if (g && SDL_GamepadConnected(g)) {
+        type=SDL_GetGamepadStringForType(SDL_GetGamepadType(g));
+        if (!type) type="";
+    }
+    pthread_mutex_unlock(&lock);
+    return type;
+}
 
 static int valid(int32_t handle) { return handle==PAD_HANDLE ? opened : handle==PAD2_HANDLE ? opened2 : 0; }
 static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }
@@ -970,7 +984,7 @@ int runtime_pad_describe(void) {
         SDL_PumpEvents();
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        if (ids && count>0) g=SDL_OpenGamepad(ids[0]);
+        if (ids && count>0) g=SDL_OpenGamepad(ids[preferred_gamepad(count)]); /* the pad the game opens */
         SDL_free(ids);
         if (!g) SDL_Delay(10);
     }

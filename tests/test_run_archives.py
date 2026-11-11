@@ -38,6 +38,25 @@ class RunArchiveTests(unittest.TestCase):
             with mock.patch('pad_style_save.saved_style', return_value='motion off'):
                 self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'xbox'}, folder, 'CUSA07671'), 'xbox')
 
+    def test_a_saved_auto_starts_with_the_connected_gamepads_style(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch('pad_style_save.saved_style', return_value='auto'):
+            pad = 'Gamepad: type=ps5 south=cross east=circle west=square north=triangle name=DualSense\n'
+            with mock.patch('run.subprocess.run', return_value=mock.Mock(stdout=pad)) as probe, \
+                    mock.patch('builtins.print'):
+                self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'xbox'}, folder, 'CUSA07671', 'probe'),
+                                 'playstation')
+            self.assertEqual(probe.call_args[0][0], ['probe', '--gamepad'])
+            # No gamepad, or the probe fails: the launcher's controller type, else PlayStation.
+            with mock.patch('run.subprocess.run', return_value=mock.Mock(stdout='Gamepad: none\n')):
+                self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'xbox'}, folder, 'CUSA07671', 'probe'), 'xbox')
+            with mock.patch('run.subprocess.run', side_effect=OSError('no probe')):
+                self.assertEqual(run.launch_style({}, folder, 'CUSA07671', 'probe'), 'playstation')
+            with mock.patch('run.subprocess.run', side_effect=AssertionError('asked')):
+                self.assertEqual(run.launch_style({'GOW3_PAD_STYLE': 'nintendo'}, folder, 'CUSA07671'), 'nintendo')
+        with tempfile.TemporaryDirectory() as folder, mock.patch('pad_style_save.saved_style', return_value='xbox'), \
+                mock.patch('run.subprocess.run', side_effect=AssertionError('asked')):
+            self.assertEqual(run.launch_style({}, folder, 'CUSA07671', 'probe'), 'xbox')  # only AUTO asks
+
     def test_the_rows_need_their_settings_in_the_save(self):
         self.assertEqual(run.row_scripts('playstation', True), [('controller_row.py', [])])
         self.assertEqual(run.row_scripts('nintendo', True), [('controller_row.py', [])])

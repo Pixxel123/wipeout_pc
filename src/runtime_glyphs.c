@@ -3,7 +3,8 @@
  * GOW3_GLYPH_SWAP=<file> names the button font's atlas and tab textures and a file of each style's
  * version (scripts/wipeout_glyphs.py --swap-config). A thread reads four times a second the live
  * value of an open Controller type row and the game's setting "Pad Style P1" (src/glyph_swap.h):
- * an open row's value is shown as it changes, else the saved P1. When the wanted style changes it
+ * an open row's value is shown as it changes, else the saved P1. AUTO is the style of that
+ * player's gamepad (runtime_pad_type), held while none is open. When the wanted style changes it
  * finds each texture's copies in guest memory by their bytes (runtime_memory_find_all, up to
  * GLYPH_MAX_COPIES) and writes the wanted style's texels over each. Plain writes, as the game's
  * own: the GPU's page tracking uploads the texture again. Smooth play first: nothing is searched
@@ -123,9 +124,10 @@ static int known_build(const unsigned char *image) {
     __atomic_store_n(&build_state,ok ? 1 : -1,__ATOMIC_RELEASE);
     return ok;
 }
-/* Guest reads under fault recovery: 0 when a fault stopped them. The live values are those of
- * open Controller type rows (-1 when not open), rows_open whether either row is open (registered
- * with a count, whatever its value pointers hold at that moment). */
+/* Guest reads under fault recovery: 0 when a fault stopped them. Each is a glyph_choice (a style
+ * or GLYPH_AUTO, -1 when absent); the live values are those of open Controller type rows (-1 when
+ * not open), rows_open whether either row is open (registered with a count, whatever its value
+ * pointers hold at that moment). */
 static int read_state(const unsigned char *image, int *saved_p1, int *live_p1, int *live_p2, int *rows_open) {
     sigjmp_buf recover;
     volatile int ok=0;
@@ -133,11 +135,11 @@ static int read_state(const unsigned char *image, int *saved_p1, int *live_p1, i
         runtime_fault_recover=&recover;
         const unsigned char *store=(const unsigned char *)(uintptr_t)glyph_load64(image+GLYPH_STORE_AT);
         char value[64];
-        *saved_p1=store ? glyph_style_index(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value))) : -1;
+        *saved_p1=store ? glyph_choice(glyph_setting(store,glyph_key("Pad Style P1"),value,sizeof(value))) : -1;
         const char *row1=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P1"));
         const char *row2=glyph_row_value(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P2"));
-        *live_p1=glyph_style_index(row1);
-        *live_p2=glyph_style_index(row2);
+        *live_p1=glyph_choice(row1);
+        *live_p2=glyph_choice(row2);
         *rows_open=glyph_row_open(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P1")) ||
                    glyph_row_open(image+GLYPH_TABLE_AT,glyph_key("FE_Pad Style P2"));
         ok=1;
@@ -214,7 +216,21 @@ static int write_copies(Texture *t, int want) {
                      (unsigned long long)t->spec.offset,glyph_style_names[want],kept,n);
     return kept;
 }
-static const char *style_or_dash(int style) { return style>=0 ? glyph_style_names[style] : "-"; }
+static const char *style_or_dash(int style) { return glyph_choice_name(style) ? glyph_choice_name(style) : "-"; }
+/* The style of each player's gamepad for AUTO: the last one seen, the start style until then (the
+ * one run.py found for an AUTO save). A gamepad that drops out (a wireless one mid-race) keeps it,
+ * so nothing is searched or written for that. */
+static int pad_held[2];
+static void follow_pads(void) {
+    for (int p=0;p<2;++p) {
+        const char *type=runtime_pad_type(p);
+        const int style=glyph_style_for_pad(type);
+        if (style<0 || style==pad_held[p]) continue;
+        printf("Runtime: glyphs: player %d's gamepad (%s) has %s buttons\n",p+1,*type ? type : "unnamed",
+               glyph_style_names[style]);
+        pad_held[p]=style;
+    }
+}
 static void *glyph_thread(void *unused) {
     (void)unused;
     unsigned char *image;
@@ -226,11 +242,15 @@ static void *glyph_thread(void *unused) {
     }
     printf("Runtime: glyph switch on (%d textures, %s at start)\n",texture_count,glyph_style_names[launch_style]);
     int last_want=-2, was_open=0;
+    pad_held[0]=pad_held[1]=launch_style;
     for (;;) {
         glyph_pause_ns(250000000ull);
         int saved_p1=-1, live_p1=-1, live_p2=-1, rows_open=0;
         if (!read_state(image,&saved_p1,&live_p1,&live_p2,&rows_open)) continue;
-        const int want=glyph_wanted_live(live_p1,live_p2,saved_p1);
+        follow_pads();
+        /* AUTO: player 1's row and setting follow player 1's gamepad, player 2's row player 2's. */
+        const int want=glyph_wanted_live(glyph_resolve(live_p1,pad_held[0]),glyph_resolve(live_p2,pad_held[1]),
+                                         glyph_resolve(saved_p1,pad_held[0]));
         if (want!=last_want)
             printf("Runtime: glyphs: wanted %s (live P1 %s, live P2 %s, saved P1 %s)\n",style_or_dash(want),
                    style_or_dash(live_p1),style_or_dash(live_p2),style_or_dash(saved_p1));
@@ -284,7 +304,8 @@ static void *glyph_thread(void *unused) {
  * the settings it knows into the profile, and a List row writes its setting only when its screen
  * is left with previous="true", which Accept's redirect is not. So the open Controller type row's
  * value is written here into its existing "Pad Style P<n>" setting. Only the screen's own row is
- * open; nothing is written for a value that is not a known style or does not fit the node. */
+ * open; nothing is written for a value that is not a known choice (a style or auto) or does not
+ * fit the node. */
 ABI void runtime_glyphs_accept(void) {
     unsigned char *image=runtime_image_base();
     if (!image || !known_build(image)) return;
@@ -297,15 +318,15 @@ ABI void runtime_glyphs_accept(void) {
         runtime_fault_recover=&recover;
         unsigned char *store=(unsigned char *)(uintptr_t)glyph_load64(image+GLYPH_STORE_AT);
         for (int p=0; store && p<2; ++p) {
-            style[p]=glyph_style_index(glyph_row_value(image+GLYPH_TABLE_AT,glyph_key(rows[p])));
-            if (style[p]>=0) committed[p]=glyph_commit(store,glyph_key(settings[p]),glyph_style_names[style[p]]);
+            style[p]=glyph_choice(glyph_row_value(image+GLYPH_TABLE_AT,glyph_key(rows[p])));
+            if (style[p]>=0) committed[p]=glyph_commit(store,glyph_key(settings[p]),glyph_choice_name(style[p]));
         }
     }
     runtime_fault_recover=outer;
     for (int p=0;p<2;++p) {
         if (style[p]<0) continue;
-        if (committed[p]) printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_style_names[style[p]]);
-        else printf("Runtime: Controller type P%d not kept (%s: no setting it fits in)\n",p+1,glyph_style_names[style[p]]);
+        if (committed[p]) printf("Runtime: Controller type P%d accepted: %s\n",p+1,glyph_choice_name(style[p]));
+        else printf("Runtime: Controller type P%d not kept (%s: no setting it fits in)\n",p+1,glyph_choice_name(style[p]));
     }
 }
 int runtime_glyphs_watches(const char *guest) {

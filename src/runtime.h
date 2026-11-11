@@ -97,9 +97,12 @@ int runtime_music_bgm(float *pcm, int frames, int channels);
 void runtime_music_scene(const char *guest_path);
 uintptr_t runtime_pad_resolve(const char *name);
 void runtime_pad_report(void);
-/* probe --gamepad: prints one "Gamepad:" line for the first pad found (returns 1) or none (0). */
+/* probe --gamepad: prints one "Gamepad:" line for player 1's pad (GOW3_GAMEPAD, else the first
+ * found; returns 1) or none (0). */
 int runtime_pad_describe(void);
 int runtime_pad_second_user(void);
+/* SDL's type name of player 1's (0) or 2's (1) open gamepad, "" unnamed, NULL none open. */
+const char *runtime_pad_type(int player);
 void runtime_user_events(void);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);

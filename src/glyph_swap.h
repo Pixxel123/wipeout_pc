@@ -16,6 +16,9 @@
 
 enum { GLYPH_STYLES=3, GLYPH_STORE_HEAD=0x580, GLYPH_ROWS=256, GLYPH_MAX_NODES=8192 };
 static const char *const glyph_style_names[GLYPH_STYLES]={"playstation","xbox","nintendo"};
+/* A Controller type row's choices: a style (its index), or AUTO, the style of the player's
+ * gamepad (glyph_style_for_pad). AUTO has no textures of its own. */
+enum { GLYPH_AUTO=GLYPH_STYLES };
 
 typedef struct { char guest[128]; uint64_t offset, length, skip; char files[GLYPH_STYLES][512]; } GlyphTexture;
 
@@ -62,7 +65,7 @@ static inline const char *glyph_row_value(const unsigned char *table, uint32_t k
 /* Writes value (with its NUL) into the existing setting with this key when it fits the node's
  * capacity, the rest of the capacity zeroed, as the game's own in-place write (0x696300) does; 1
  * when written. Never grows a node and never adds a missing one. The caller commits only values
- * glyph_style_index() knows (>= 0). */
+ * glyph_choice() knows (>= 0). */
 static inline int glyph_commit(unsigned char *store, uint32_t key, const char *value) {
     unsigned char *node=(unsigned char *)(uintptr_t)glyph_load64(store+GLYPH_STORE_HEAD);
     const size_t n=strlen(value)+1;
@@ -80,6 +83,28 @@ static inline int glyph_commit(unsigned char *store, uint32_t key, const char *v
 static inline int glyph_style_index(const char *value) {
     for (int i=0; value && i<GLYPH_STYLES; ++i) if (!strcmp(value,glyph_style_names[i])) return i;
     return -1;
+}
+/* A row's or setting's value as a choice: a style index, GLYPH_AUTO for "auto", -1 otherwise. */
+static inline int glyph_choice(const char *value) {
+    return value && !strcmp(value,"auto") ? GLYPH_AUTO : glyph_style_index(value);
+}
+static inline const char *glyph_choice_name(int choice) {
+    return choice==GLYPH_AUTO ? "auto" : choice>=0 && choice<GLYPH_STYLES ? glyph_style_names[choice] : NULL;
+}
+/* The style of a gamepad from SDL's name of its type (SDL_GetGamepadStringForType; "" when SDL
+ * has none): PlayStation pads theirs, Nintendo ones (Switch, Joy-Con, GameCube) theirs, any other
+ * the Xbox buttons (scripts/pad_style_save.py pad_style() has the same rule). -1 without a
+ * gamepad (NULL). */
+static inline int glyph_style_for_pad(const char *type) {
+    if (!type) return -1;
+    if (!strncmp(type,"ps",2)) return 0;
+    if (!strncmp(type,"switch",6) || !strncmp(type,"joycon",6) || !strncmp(type,"gamecube",8)) return 2;
+    return 1;
+}
+/* The style a choice shows: AUTO the style `held` of the player's gamepad (the last one seen, so
+ * a gamepad that drops out changes nothing), a style itself, -1 for no choice. */
+static inline int glyph_resolve(int choice, int held) {
+    return choice==GLYPH_AUTO ? held : choice;
 }
 /* The style the prompts should show: an open Controller type row's live value (player 2's before
  * player 1's; one Controls screen is open at a time), else player 1's saved setting. Each is a

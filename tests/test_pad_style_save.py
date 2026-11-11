@@ -27,6 +27,21 @@ class SaveTests(unittest.TestCase):
     def test_records_are_read_in_order(self):
         self.assertEqual([(n, v) for _o, n, v in save.records(SAVE)], [('Language', '1'), ('Motion Sensitivity', '50%')])
 
+    def test_the_gamepads_style_is_its_types(self):
+        line = 'Gamepad: type={} south=a east=b west=x north=y name=Some Pad\n'
+        self.assertEqual(save.pad_style(line.format('ps5')), 'playstation')
+        self.assertEqual(save.pad_style(line.format('ps4')), 'playstation')
+        self.assertEqual(save.pad_style(line.format('xboxone')), 'xbox')
+        self.assertEqual(save.pad_style(line.format('standard')), 'xbox')  # the Steam Deck, any other
+        self.assertEqual(save.pad_style(line.format('unknown')), 'xbox')
+        self.assertEqual(save.pad_style(line.format('switchpro')), 'nintendo')
+        self.assertEqual(save.pad_style(line.format('joyconpair')), 'nintendo')
+        self.assertEqual(save.pad_style(line.format('gamecube')), 'nintendo')
+        self.assertEqual(save.pad_style('Probe: starting\n' + line.format('ps5')), 'playstation')
+        self.assertIsNone(save.pad_style('Gamepad: none\n'))
+        self.assertIsNone(save.pad_style(''))
+        self.assertIsNone(save.pad_style(None))
+
     def test_key_is_the_games_hash(self):
         self.assertEqual(save.key('Motion Sensitivity'), 0x1b432e78)
         self.assertEqual(save.key('Pad Style'), 0xdde7131f)

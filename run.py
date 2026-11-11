@@ -151,11 +151,29 @@ def save_folder(env, data):
     return Path(env.get('GOW3_SAVEDATA_DIR') or Path(env.get('GOW3_USER_DIR', data / 'user')) / 'savedata')
 
 
-def launch_style(env, savedata, title):
+def connected_pad_style(probe):
+    """The style of player 1's connected gamepad (`gow3-probe --gamepad`), None without one or
+    when the probe cannot tell."""
+    import pad_style_save
+    if not probe:
+        return None
+    try:
+        out = subprocess.run([str(probe), '--gamepad'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, timeout=15, creationflags=no_console()).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return pad_style_save.pad_style(out)
+
+
+def launch_style(env, savedata, title, probe=None):
     """WipEout's prompts at start: player 1's Controller type row as the save holds it
-    (scripts/pad_style_save.py), else the launcher's controller type, else PlayStation."""
+    (scripts/pad_style_save.py), AUTO as the connected gamepad's, else the launcher's controller
+    type, else PlayStation. Never auto: the file patches load this style."""
     import pad_style_save
     saved = pad_style_save.saved_style(savedata, title, 'Pad Style P1')
+    if saved == pad_style_save.AUTO and (found := connected_pad_style(probe)):
+        print(f'Controller type: AUTO, a gamepad with {found} buttons', flush=True)
+        return found
     if saved in pad_style_save.STYLES:
         return saved
     style = env.get('GOW3_PAD_STYLE')
@@ -318,7 +336,7 @@ def main():
             if not ready:
                 print("Controller type: the save could not take the row's settings; the Controls screens "
                       'stay as they are', flush=True)
-            style = launch_style(env, savedata, title)
+            style = launch_style(env, savedata, title, probe)
             if style in ('xbox', 'nintendo'):
                 optional_script('wipeout_glyphs.py', game, '--out', out, '--style', style,
                                 '--pad-map', env.get('GOW3_PAD_MAP', ''), *psarcs)
