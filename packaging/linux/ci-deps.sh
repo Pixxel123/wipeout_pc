@@ -6,8 +6,13 @@
 set -euo pipefail
 sudo=$([[ $(id -u) == 0 ]] || echo sudo)
 export DEBIAN_FRONTEND=noninteractive
-$sudo apt-get update
-$sudo apt-get install -y --no-install-recommends \
+# Runner mirror (azure.archive.ubuntu.com) timed out on every package on 2026-11-11: use the main archive,
+# and fail in minutes rather than hang if a mirror stops answering.
+grep -rn azure /etc/apt/ || true
+$sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list /etc/apt/apt-mirrors.txt 2>/dev/null || true
+apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20)
+$sudo apt-get "${apt_opts[@]}" update
+$sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends \
     build-essential g++-14 gcc-14 cmake ninja-build pkg-config git curl ca-certificates file patchelf binutils \
     libvulkan-dev glslang-tools libboost-dev libfmt-dev libxxhash-dev libzydis-dev robin-map-dev \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
