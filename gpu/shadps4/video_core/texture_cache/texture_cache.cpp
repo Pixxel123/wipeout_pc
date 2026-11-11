@@ -182,6 +182,11 @@ void TextureCache::RetireReadbacks() {
 bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
                                     ReadbackSource source) {
     if (!deferred_readbacks || !has_pending_readbacks.load(std::memory_order_acquire)) return false;
+    // gow3 (GOW3_EXPAND_NO_WAIT): ExpandImage's refresh, including the buffer its upload obtains.
+    if (skip_refresh_readbacks && (source == ReadbackSource::ImageRefresh ||
+                                   source == ReadbackSource::BufferForImage)) {
+        return false;
+    }
     {
         std::scoped_lock lock{readback_mutex};
         // Stale mode, byte rule: God of War III writes every frame to the page that holds a
