@@ -189,6 +189,12 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    // gow3: GOW3_RESIDENT_SLAB_MB (EnsureResident): the slab being filled, and counters.
+    vk::DeviceMemory resident_slab;
+    u64 resident_slab_size{};
+    u64 resident_slab_used{};
+    u64 resident_calls{};
+    u64 resident_allocations{};
 
     u32 arena_memory_type_index{};
     u32 block_size{};
