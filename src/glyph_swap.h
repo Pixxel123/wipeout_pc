@@ -5,9 +5,12 @@
  * - the game's hash of setting and row names: CRC-32 (0xedb88320) from 0, inverted (0x401a08);
  * - its settings list: store at u64 [0x10ea398], head at store+0x580, node +0 u32 key, +0x48 u32
  *   value length with its NUL, +0x4c u32 capacity of the value, +0x50 next, +0x68 the value;
- * - its table of rows on open screens (0x11ac4c8): 256 value pointers, then 256 u64 keys at
- *   +0x800 (hash of "FE_" + the row's global) and 256 u32 counts at +0x1000; a value pointer
- *   points at the row's current-value field, a char * to the selected entry's value string;
+ * - its table of bound rows (0x11ac4c8, 0x11ad8c8 entries): 256 value pointers, then 256 u64 keys
+ *   at +0x800 (hash of "FE_" + the row's global) and 256 u32 counts at +0x1000. Item::OnEnter
+ *   (0x3f7bf0) binds a row with its count 0; a count is held only while the game reads a value
+ *   (0x3e4fd7: count up, read, count down), so it says nothing about the screen. A value pointer
+ *   points at the row's current-value field, a char * to the selected entry's value string. An
+ *   entry outlives its screen: leaving without saving empties the value (List::OnExit 0x475580);
  * - GOW3_GLYPH_SWAP lines (scripts/wipeout_glyphs.py variants()). */
 #include <stddef.h>
 #include <stdint.h>
@@ -46,21 +49,21 @@ static inline const char *glyph_setting(const unsigned char *store, uint32_t key
     }
     return NULL;
 }
-/* Whether a row registered under this key is on an open screen. */
-static inline int glyph_row_open(const unsigned char *table, uint32_t key) {
-    for (int i=0;i<GLYPH_ROWS;++i)
-        if ((uint32_t)glyph_load64(table+0x800+8*i)==key && glyph_load32(table+0x1000+4*i)) return 1;
-    return 0;
-}
-/* The selected value of the open row with this key (the guest's string, not a copy); NULL when no
- * open row has the key or its pointers are NULL. */
+/* The selected value of the row bound under this key (the guest's string, not a copy); NULL when
+ * no row has the key, its pointers are NULL, or its value is empty (its screen was left without
+ * saving). The counts are not looked at: see the table above. */
 static inline const char *glyph_row_value(const unsigned char *table, uint32_t key) {
     for (int i=0;i<GLYPH_ROWS;++i) {
-        if ((uint32_t)glyph_load64(table+0x800+8*i)!=key || !glyph_load32(table+0x1000+4*i)) continue;
+        if ((uint32_t)glyph_load64(table+0x800+8*i)!=key) continue;
         const unsigned char *field=(const unsigned char *)(uintptr_t)glyph_load64(table+8*i);
-        return field ? (const char *)(uintptr_t)glyph_load64(field) : NULL;
+        const char *value=field ? (const char *)(uintptr_t)glyph_load64(field) : NULL;
+        return value && *value ? value : NULL;
     }
     return NULL;
+}
+/* Whether the row bound under this key holds a value (its screen is open, or was left saving). */
+static inline int glyph_row_open(const unsigned char *table, uint32_t key) {
+    return glyph_row_value(table,key)!=NULL;
 }
 /* Writes value (with its NUL) into the existing setting with this key when it fits the node's
  * capacity, the rest of the capacity zeroed, as the game's own in-place write (0x696300) does; 1

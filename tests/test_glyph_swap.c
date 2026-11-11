@@ -23,20 +23,23 @@ int main(void) {
 
     static unsigned char table[0x1400];
     put64(table+0x800+8*7,glyph_key("FE_Pad Style P2"));
-    assert(!glyph_row_open(table,glyph_key("FE_Pad Style P2")));
-    put32(table+0x1000+4*7,1);
-    assert(glyph_row_open(table,glyph_key("FE_Pad Style P2")));
-    assert(!glyph_row_open(table,glyph_key("FE_Pad Style P1")));
+    assert(!glyph_row_open(table,glyph_key("FE_Pad Style P2")));         /* bound, no slot pointer */
 
-    /* The open row's selected value: slot pointer -> current-value field -> string. */
-    static const char selected[]="nintendo";
+    /* A bound row's selected value: slot pointer -> current-value field -> string. The game binds
+     * with a count of 0 and holds a count only while it reads, so the count is not looked at. */
+    static const char selected[]="nintendo", empty[]="";
     uint64_t field=(uint64_t)(uintptr_t)selected;
     put64(table+8*7,(uint64_t)(uintptr_t)&field);
     assert(glyph_row_value(table,glyph_key("FE_Pad Style P2"))==selected);
-    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P1")));        /* no such row */
-    put32(table+0x1000+4*7,0);
-    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* not open */
+    assert(glyph_row_open(table,glyph_key("FE_Pad Style P2")));          /* count 0: open */
     put32(table+0x1000+4*7,1);
+    assert(glyph_row_value(table,glyph_key("FE_Pad Style P2"))==selected); /* being read: the same */
+    put32(table+0x1000+4*7,0);
+    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P1")));        /* no such row */
+    assert(!glyph_row_open(table,glyph_key("FE_Pad Style P1")));
+    field=(uint64_t)(uintptr_t)empty;
+    assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* left without saving */
+    assert(!glyph_row_open(table,glyph_key("FE_Pad Style P2")));
     field=0;
     assert(!glyph_row_value(table,glyph_key("FE_Pad Style P2")));        /* NULL string */
     put64(table+8*7,0);
