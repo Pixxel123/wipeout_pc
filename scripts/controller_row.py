@@ -3,11 +3,13 @@
 
 Both screens of plugins/frontend/gui/controls_definition_ps4.xml (Controls and ControlsP2, the
 second with InputPad="1") keep a switched-off Thrust Sensitivity slider (<aSlider>) below Airbrake
-Sensitivity. Its place becomes a list row the game saves as a setting of its own, "Pad Style P1" or
+Sensitivity. It becomes a list row the game saves as a setting of its own, "Pad Style P1" or
 "Pad Style P2" (scripts/pad_style_save.py gives the save those settings; src/runtime_glyphs.c
-follows them). The row takes the slider's bytes, padded with spaces. Labels the game has no string
-for are shown as written, so CONTROLLER TYPE and XBOX are upper case like the other rows; FE_DEFAULT
-reads DEFAULT. `default` is an entry's value: the game matches it against the values. The archives
+follows them), and the row is the first of the screen's Adjust settings: the rows above the slider
+move down one. AUTO shows the buttons of the player's connected gamepad, DEFAULT the PlayStation
+ones, XBOX the Xbox ones. The rows keep their bytes, padded with spaces. Labels the game has no
+string for are shown as written, so CONTROLLER TYPE, AUTO and XBOX are upper case like the other
+rows; FE_DEFAULT reads DEFAULT. `default` is an entry's value: the game matches it against the values. The archives
 are not written: the layout is packed into the bytes the original takes (scripts/psarc.py)."""
 import argparse
 import contextlib
@@ -16,41 +18,76 @@ import re
 
 import psarc
 
-VERSION = 1  # of the row: a change rebuilds the cached patches
+VERSION = 2  # of the row: a change rebuilds the cached patches
 LAYOUT = 'data/plugins/frontend/gui/controls_definition_ps4.xml'
 NAMES = ('Pad Style P1', 'Pad Style P2')
-ENTRIES = (('FE_DEFAULT', 'playstation'), ('XBOX', 'xbox'))  # (label, saved value)
-SLIDER = re.compile(rb'<aSlider name="Thrust Sensitivity".*?</aSlider>', re.S)
+# (label, saved value): AUTO follows the player's connected gamepad (src/runtime_glyphs.c, run.py).
+ENTRIES = (('AUTO', 'auto'), ('FE_DEFAULT', 'playstation'), ('XBOX', 'xbox'))
+DEFAULT = 'auto'  # a new profile's (one the save has no setting for yet gets the launcher's, pad_style_save.py)
+# A screen's Adjust settings rows, top to bottom: Motion Sensor, Motion Sensitivity, Airbrake
+# Sensitivity and the switched-off Thrust Sensitivity slider.
+BLOCK = re.compile(rb'<MotionList name="Motion Sensor".*?</MotionList>\s*<Slider name="Motion Sensitivity".*?</Slider>'
+                   rb'\s*<Slider name="Airbrake Sensitivity".*?</Slider>\s*<aSlider name="Thrust Sensitivity".*?</aSlider>',
+                   re.S)
+SETTING = re.compile(rb'<(MotionList|Slider|aSlider) .*?</\1>', re.S)
+SLIDER = re.compile(rb'<aSlider name="Thrust Sensitivity"')
+Y = re.compile(rb'(\sy=")([^"]*)(")')
+DELAY = re.compile(rb'(\sdelay=")([^"]*)(")')
+INDENT = re.compile(rb'\r\n[ \t]+')
 
 
-def row(player):
+def row(player, y=b'780', delay=b'0.5'):
     """The row of player 0 or 1, as the layout writes its other rows' tags."""
     name = NAMES[player]
     pad = ' InputPad="1"' if player else ''
     entries = ''.join(f'<Entry idstring="{label}" value="{value}"></Entry>\r\n' for label, value in ENTRIES)
-    return (f'<List name="{name}" global="{name}" focus="true" save="true" default="{ENTRIES[0][1]}" '
-            f'delay="0.5"{pad}>\r\n'
-            f'<Values idstring="CONTROLLER TYPE" x="0" y="780" color="FEGlobals->TextColor" '
+    return (f'<List name="{name}" global="{name}" focus="true" save="true" default="{DEFAULT}" '
+            f'delay="{delay.decode()}"{pad}>\r\n'
+            f'<Values idstring="CONTROLLER TYPE" x="0" y="{y.decode()}" color="FEGlobals->TextColor" '
             f'arrowcolor="FEGlobals->TextColor" gap="0" sideWidth="790" rightmin="700" rightmax="805"></Values>\r\n'
             f'{entries}</List>').encode('latin1')
 
 
+def _first(pattern, element, value):
+    """element with the first match of pattern given value."""
+    return pattern.sub(lambda m: m.group(1) + value + m.group(3), element, count=1)
+
+
+def _rows_first(block, player, indent):
+    """A screen's Adjust settings rows with the Controller type row first: it takes the Motion
+    Sensor row's place (its height and its turn in the rows' entrance) and each row below moves
+    down one, the last into the switched-off slider's; the same length, padded with spaces."""
+    settings = [m.group() for m in SETTING.finditer(block)]
+    ys = [Y.search(s).group(2) for s in settings]
+    delays = [DELAY.search(s).group(2) for s in settings]
+    # Their inner lines lose their indentation (whitespace between tags) to make room for the row.
+    moved = [INDENT.sub(b'\r\n', _first(DELAY, _first(Y, s, ys[i + 1]), delays[i + 1]))
+             for i, s in enumerate(settings[:-1])]
+    new = (b'\r\n' + indent).join([row(player, ys[0], delays[0]), *moved])
+    if len(new) > len(block):
+        raise ValueError(f'the Controller type row of player {player + 1} does not fit ({len(new)} > {len(block)} bytes)')
+    return new + b' ' * (len(block) - len(new))
+
+
 def add_row(xml):
-    """The layout with each screen's slider replaced by its player's row, the same length; the
-    layout as it is when it has no such slider. ValueError when the sliders are not one per screen
-    or a row does not fit in its slider's bytes."""
-    sliders = list(SLIDER.finditer(xml))
-    if not sliders:
+    """The layout with each Controls screen's Controller type row first in its Adjust settings, in
+    place of the switched-off Thrust Sensitivity slider (the rows below it move down one); the same
+    length. The layout as it is when it has no such slider. ValueError when the sliders are not
+    one per screen, a slider is not below the other three rows, or a row does not fit."""
+    if not SLIDER.search(xml):
         return xml
-    players = [1 if b'InputPad="1"' in m.group() else 0 for m in sliders]
-    if sorted(players) != [0, 1]:
-        raise ValueError(f'expected one Thrust Sensitivity slider per Controls screen, found players {players}')
+    blocks = list(BLOCK.finditer(xml))
+    players = [1 if b'InputPad="1"' in m.group() else 0 for m in blocks]
+    if sorted(players) != [0, 1] or len(SLIDER.findall(xml)) != 2:
+        raise ValueError(f'expected one Adjust settings block with a Thrust Sensitivity slider per Controls screen, '
+                         f'found players {players}')
     out, at = bytearray(), 0
-    for match, player in zip(sliders, players):
-        new = row(player)
-        if len(new) > len(match.group()):
-            raise ValueError(f'the Controller type row of player {player + 1} does not fit ({len(new)} bytes)')
-        out += xml[at:match.start()] + new + b' ' * (len(match.group()) - len(new))
+    for match, player in zip(blocks, players):
+        line = xml[:match.start()].rsplit(b'\n', 1)[-1]
+        indent = line if not line.strip() else b''
+        if len(SETTING.findall(match.group())) != 4:
+            raise ValueError(f'the Adjust settings of player {player + 1} are not the four rows expected')
+        out += xml[at:match.start()] + _rows_first(match.group(), player, indent)
         at = match.end()
     return bytes(out + xml[at:])
 
