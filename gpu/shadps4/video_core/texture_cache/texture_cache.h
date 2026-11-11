@@ -244,6 +244,8 @@ public:
 
     /// Reuploads image contents.
     void RefreshImage(Image& image);
+    /// gow3 (GOW3_EXPAND_NO_WAIT): set by ExpandImage around its refresh of the new image.
+    bool skip_refresh_readbacks = false;
 
     /// Retrieves the sampler that matches the provided S# descriptor.
     /// extra_lod_bias: gow3, added to the S#'s bias (reduced scene rendering).

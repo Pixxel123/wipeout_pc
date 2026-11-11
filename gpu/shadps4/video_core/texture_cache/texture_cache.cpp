@@ -1343,7 +1343,19 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
                     info.size.height, vk::to_string(info.pixel_format).c_str(),
                     info.resources.levels);
     }
+    // gow3 (experiment, GOW3_EXPAND_NO_WAIT=1): a source the GPU drew is copied into the new image
+    // below, and a cached image that is one of the new image's added mips is copied into it by
+    // ResolveOverlap (left:copymip) right after. The refresh from guest memory is then only a
+    // placeholder for those ranges, so it need not wait for the GPU to finish a pending copy
+    // back to guest memory there (tiny render targets are copied back after every draw: the
+    // last mips of a rendered chain made the first frame of a race wait 40-110 ms each).
+    static const bool expand_no_wait = [] {
+        const char* value = std::getenv("GOW3_EXPAND_NO_WAIT");
+        return value && value[0] == '1';
+    }();
+    skip_refresh_readbacks = expand_no_wait && True(src_image.flags & ImageFlagBits::GpuModified);
     RefreshImage(new_image);
+    skip_refresh_readbacks = false;
     runtime.CopyImage(&src_image, &new_image);
 
     if (src_image.binding.is_bound || src_image.binding.is_target) {
@@ -1792,8 +1804,10 @@ void TextureCache::RefreshImage(Image& image) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.guest_samples > 1) {
         return;
     }
-    ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
-                     ReadbackSource::ImageRefresh);
+    if (!skip_refresh_readbacks) {
+        ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
+                         ReadbackSource::ImageRefresh);
+    }
     Gow3Stats::Timer timer{Gow3Stats::t_refresh};
 
     RENDERER_TRACE;
