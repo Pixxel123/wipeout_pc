@@ -71,8 +71,8 @@ gpu_toolchain=()
 if [[ $gpu_compiler == clang ]]; then
     command -v clang++ >/dev/null && command -v ld.lld >/dev/null ||
         { echo 'GOW3_GPU_COMPILER=clang needs clang, lld and llvm (llvm-ar).' >&2; exit 1; }
-    gpu_toolchain=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-                   -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld)
+    gpu_toolchain=(-DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20
+                   -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld-20 -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld-20)
 fi
 mkdir -p pgo
 # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
