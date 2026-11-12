@@ -90,6 +90,7 @@ cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGOW3_PGO="$
 echo "GPU library: compiler $gpu_compiler, PGO $pgo, LTO ${GOW3_LTO:-ON}"
 # A failed GPU build must stop here: an older libgow3gpu.so would otherwise be used silently.
 if ! ninja -C out/gpu gow3gpu > out/gpu-build.log 2>&1; then
+    grep -i -m8 -B2 -A6 'assert\|Stack dump\|Running pass' out/gpu-build.log >&2 || true
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi
