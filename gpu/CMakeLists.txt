@@ -190,7 +190,7 @@ file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
 # built without the profile.
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND GOW3_PGO STREQUAL "use")
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/shadps4/video_core/amdgpu/liverpool.cpp
-                                PROPERTIES COMPILE_OPTIONS "-fno-profile-instr-use")
+                                PROPERTIES COMPILE_OPTIONS "-Wno-unused-command-line-argument")
 endif()
 # Windows: a DLL cannot leave the runtime_* symbols for gow3-probe.exe to resolve, so the
 # library is static there and linked into the executable.
