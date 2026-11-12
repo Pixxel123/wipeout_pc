@@ -54,9 +54,25 @@ read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3 libavformat libavcodec
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libgow3gpu.so.
 # GOW3_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
 # Default: use the profile in pgo/ when there is one. GOW3_LTO=OFF disables link-time optimization.
+# GOW3_GPU_COMPILER: gcc (the default C++ compiler) or clang, for the GPU library only. With Clang the
+# profile is one file, pgo/gow3gpu.profdata (llvm-profdata merge), which also fits later sources; when it is
+# there, Clang and the profile are the default.
 pgo=${GOW3_PGO:-}
+gpu_compiler=${GOW3_GPU_COMPILER:-}
+if [[ -z $gpu_compiler ]]; then
+    if [[ -f pgo/gow3gpu.profdata ]]; then gpu_compiler=clang; else gpu_compiler=gcc; fi
+fi
 if [[ -z $pgo ]]; then
-    if [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
+    if [[ $gpu_compiler == clang && -f pgo/gow3gpu.profdata ]]; then pgo=use
+    elif [[ $gpu_compiler != clang && -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use
+    else pgo=off; fi
+fi
+gpu_toolchain=()
+if [[ $gpu_compiler == clang ]]; then
+    command -v clang++ >/dev/null && command -v ld.lld >/dev/null ||
+        { echo 'GOW3_GPU_COMPILER=clang needs clang, lld and llvm (llvm-ar).' >&2; exit 1; }
+    gpu_toolchain=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+                   -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld)
 fi
 mkdir -p pgo
 # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
@@ -70,8 +86,8 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
     fi
 done
 cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGOW3_PGO="$pgo" \
-    -DGOW3_LTO="${GOW3_LTO:-ON}" -DGOW3_PGO_DIR="$PWD/pgo" >/dev/null
-echo "GPU library: PGO $pgo, LTO ${GOW3_LTO:-ON}"
+    -DGOW3_LTO="${GOW3_LTO:-ON}" -DGOW3_PGO_DIR="$PWD/pgo" "${gpu_toolchain[@]}" >/dev/null
+echo "GPU library: compiler $gpu_compiler, PGO $pgo, LTO ${GOW3_LTO:-ON}"
 # A failed GPU build must stop here: an older libgow3gpu.so would otherwise be used silently.
 if ! ninja -C out/gpu gow3gpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2

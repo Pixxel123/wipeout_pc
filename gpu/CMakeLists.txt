@@ -27,7 +27,25 @@ if (GOW3_LTO)
         message(WARNING "LTO unavailable: ${gow3_ipo_error}")
     endif()
 endif()
-if (GOW3_PGO STREQUAL "generate")
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT GOW3_PGO STREQUAL "off")
+    # Clang: the IR profile, one file (GOW3_PGO_DIR/gow3gpu.profdata, merged from the .profraw files
+    # the instrumented library writes, llvm-profdata merge). Unlike GCC's, it fits a build made in another
+    # folder (static functions are named by their file's base name, not its path) and a function
+    # whose lines moved; one whose code changed is compiled without its counts, the rest keep theirs.
+    add_compile_options(-mllvm -static-func-full-module-prefix=false)
+    if (GOW3_PGO STREQUAL "generate")
+        add_compile_options(-fprofile-generate -fprofile-update=atomic)
+        add_link_options(-fprofile-generate)
+        add_compile_definitions(GOW3_PGO_GENERATE)
+    else()
+        if (NOT EXISTS "${GOW3_PGO_DIR}/gow3gpu.profdata")
+            message(FATAL_ERROR "GOW3_PGO=use: ${GOW3_PGO_DIR}/gow3gpu.profdata is missing")
+        endif()
+        add_compile_options(-fprofile-use=${GOW3_PGO_DIR}/gow3gpu.profdata
+                            -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+        add_link_options(-fprofile-use=${GOW3_PGO_DIR}/gow3gpu.profdata)
+    endif()
+elseif (GOW3_PGO STREQUAL "generate")
     # Atomic counters: the GPU, recording, preparation and copy threads run the same code.
     add_compile_options(-fprofile-generate=${GOW3_PGO_DIR} -fprofile-update=atomic)
     add_link_options(-fprofile-generate=${GOW3_PGO_DIR})
