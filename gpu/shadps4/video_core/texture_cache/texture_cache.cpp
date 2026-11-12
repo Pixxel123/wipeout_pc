@@ -53,6 +53,8 @@ bool ReadbackLog() {
     return on;
 }
 
+extern "C" long long runtime_memory_unwritten_bytes(unsigned long address, unsigned long size);
+
 bool ExpandNoWait() {
     static const bool on = [] {
         const char* value = std::getenv("GOW3_EXPAND_NO_WAIT");
@@ -1909,6 +1911,19 @@ void TextureCache::RefreshImage(Image& image) {
     // the buffers of the first part are done (and freed or reused) while the rest uploads.
     // 0: off. (Tried once before and no help then: idle buffers of other sizes were kept;
     // the staging pool frees those now.)
+    // gow3 (diagnostic, GOW3_READBACK_LOG=1): each upload of 8 MiB or more, and how much of its
+    // guest memory was never written (reads as zeros).
+    if (ReadbackLog() && image.info.guest_size >= (8u << 20)) {
+        const long long unwritten =
+            runtime_memory_unwritten_bytes(image.info.guest_address, image.info.guest_size);
+        std::printf("Large upload: %#llx size %.1f MiB, %ux%u %s levels %u layers %u, never written "
+                    "%.1f MiB (GPU modified %d)\n",
+                    static_cast<unsigned long long>(image.info.guest_address),
+                    image.info.guest_size / 1048576.0, image.info.size.width,
+                    image.info.size.height, vk::to_string(image.info.pixel_format).c_str(),
+                    image.info.resources.levels, image.info.resources.layers,
+                    unwritten / 1048576.0, int{True(image.flags & ImageFlagBits::GpuModified)});
+    }
     static const u64 submit_bytes = [] {
         const char* env = std::getenv("GOW3_UPLOAD_SUBMIT_MB");
         return (env ? std::strtoull(env, nullptr, 10) : 512) << 20;
