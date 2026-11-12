@@ -35,7 +35,13 @@ constexpr u64 LARGE_IDLE_FRAMES = 3000;
 constexpr u64 LOW_MEMORY_IDLE_FRAMES = 120;
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
-constexpr u64 BLOCK_SIZE = 16_MB;
+// gow3 (experiment): GOW3_STAGING_BLOCK_MB=<n>, default 16. A request larger than a block gets a
+// buffer of its own, made (and first touched) in the frame that asks for it.
+const u64 BLOCK_SIZE = [] {
+    const char* env = std::getenv("GOW3_STAGING_BLOCK_MB");
+    const u64 mib = env ? std::strtoull(env, nullptr, 10) : 0;
+    return (mib ? mib : 16) * 1_MB;
+}();
 // gow3: no large upload for this long and a load is over: idle large buffers all go.
 constexpr auto QUIET_TIME = std::chrono::seconds(5);
 
@@ -57,8 +63,9 @@ StagingBufferPool::StagingBufferPool(const Instance& instance_, Scheduler& sched
     const char* prewarm_env = std::getenv("GOW3_STAGING_PREWARM_MB");
     const u64 prewarm_blocks =
         prewarm_env ? std::strtoull(prewarm_env, nullptr, 10) * 1_MB / BLOCK_SIZE : PREWARM_BLOCKS;
-    std::printf("Staging: %llu MiB of upload blocks made at start\n",
-                static_cast<unsigned long long>(prewarm_blocks * BLOCK_SIZE >> 20));
+    std::printf("Staging: %llu MiB of upload blocks made at start, blocks of %llu MiB\n",
+                static_cast<unsigned long long>(prewarm_blocks * BLOCK_SIZE >> 20),
+                static_cast<unsigned long long>(BLOCK_SIZE >> 20));
     for (u64 i = 0; i < prewarm_blocks; ++i) {
         auto& block = ring.blocks.emplace_back(Block{
             .buffer = std::make_unique<VideoCore::StreamBuffer>(
@@ -158,6 +165,10 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
         // gow3: only a request that needs a new buffer counts as loading (TrimLarge). A race
         // reuses one now and then, which kept a finished load's 4.6 GB for a whole race.
         last_large_request[u32(type)] = std::chrono::steady_clock::now();
+        if (size >= 4_MB) {
+            std::printf("Staging: new dedicated buffer, %.1f MiB (type %u, frame %llu)\n",
+                        size / 1048576.0, u32(type), static_cast<unsigned long long>(frame));
+        }
         best = &cache.emplace_back(LargeBuffer{
             .buffer = std::make_unique<VideoCore::Buffer>(instance, 0, RoundAllocationSize(size),
                                                           type, "StagingBufferPool:Dedicated"),
