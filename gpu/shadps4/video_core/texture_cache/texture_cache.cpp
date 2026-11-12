@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include <bit>
 #include <cmath>
 #include <filesystem>
@@ -1923,6 +1927,49 @@ void TextureCache::RefreshImage(Image& image) {
                     image.info.size.height, vk::to_string(image.info.pixel_format).c_str(),
                     image.info.resources.levels, image.info.resources.layers,
                     unwritten / 1048576.0, int{True(image.flags & ImageFlagBits::GpuModified)});
+    }
+    // gow3 (diagnostic, GOW3_READBACK_LOG=1): for a layered image of 8 MiB or more, which
+    // (mip, layer) slices of its guest memory changed since the previous upload, by hashing each
+    // slice. Shows what an upload of only the changed slices would have to send.
+    if (ReadbackLog() && image.info.guest_size >= (8u << 20) && num_layers > 1 &&
+        !image.info.props.is_volume) {
+        struct SliceHashes { std::vector<u64> hashes; u32 refreshes = 0; };
+        static std::unordered_map<u64, SliceHashes> seen;
+        auto& entry = seen[image.info.guest_address ^ (u64{image.info.guest_size} << 40)];
+        const auto started = std::chrono::steady_clock::now();
+        entry.hashes.resize(size_t{num_mips} * num_layers);
+        const u8* base = std::bit_cast<u8*>(image.info.guest_address);
+        u32 changed = 0;
+        u64 changed_bytes = 0;
+        std::string detail;
+        for (u32 m = 0; m < num_mips; m++) {
+            const auto [mip_size, mip_pitch, mip_height, mip_offset] = image.info.mips_layout[m];
+            const u64 slice = mip_size / num_layers;
+            u32 first = ~0u, last = 0, count = 0;
+            for (u32 l = 0; l < num_layers; l++) {
+                const u64 hash = XXH3_64bits(base + mip_offset + l * slice, slice);
+                u64& old = entry.hashes[size_t{m} * num_layers + l];
+                if (old != hash) {
+                    old = hash;
+                    ++count;
+                    changed_bytes += slice;
+                    first = std::min(first, l);
+                    last = std::max(last, l);
+                }
+            }
+            changed += count;
+            if (count && m < 3) {
+                detail += fmt::format(" mip{}: {} layers ({}-{})", m, count, first, last);
+            }
+        }
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - started).count();
+        std::printf("Slice changes: %#llx upload %u, %u of %u slices changed, %.1f of %.1f MiB;%s; "
+                    "tiled %d, tile mode %u, hashing %.2f ms\n",
+                    static_cast<unsigned long long>(image.info.guest_address), ++entry.refreshes,
+                    changed, num_mips * num_layers, changed_bytes / 1048576.0,
+                    image.info.guest_size / 1048576.0, detail.c_str(),
+                    int{image.info.props.is_tiled}, static_cast<u32>(image.info.tile_mode), ms);
     }
     static const u64 submit_bytes = [] {
         const char* env = std::getenv("GOW3_UPLOAD_SUBMIT_MB");
