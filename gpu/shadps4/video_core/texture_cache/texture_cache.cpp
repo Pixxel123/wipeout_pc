@@ -2049,10 +2049,20 @@ void TextureCache::TrackImageUnlessDeferred(ImageId image_id) {
         // Deferral starts only on images no GPU work writes, so GpuModified here means a GPU
         // write bind (render target, depth or storage target, which set it before UpdateImage)
         // or a GPU copy into the image: that ends the deferral at once.
-        if (image.cpu_dirty_flip == Vulkan::FrameCapture::Flips() &&
+        // gow3 (experiment): GOW3_STREAM_DEFER_FLIPS=<n>, default 1. An image the guest streams
+        // into stays unprotected for n flips after the last write that faulted, so it is read
+        // again (in full) once every n flips while the streaming lasts, not at every flip.
+        static const u64 defer_flips = [] {
+            const char* value = std::getenv("GOW3_STREAM_DEFER_FLIPS");
+            const u64 n = value ? std::strtoull(value, nullptr, 10) : 1;
+            std::printf("Streamed images: read again every %llu flips while written\n",
+                        static_cast<unsigned long long>(n ? n : 1));
+            return n ? n : 1;
+        }();
+        if (Vulkan::FrameCapture::Flips() - image.cpu_dirty_flip < defer_flips &&
             False(image.flags & ImageFlagBits::GpuModified) &&
             !Gow3Toggle::Disabled(Gow3Toggle::DeferStreamedImageTracking)) {
-            return; // Still the flip of the last write: the guest may still be writing.
+            return; // Still within the flips of the last write: the guest may still be writing.
         }
         image.track_deferred = false;
         // Writes made while unprotected took no fault: read the image again, before any GPU
