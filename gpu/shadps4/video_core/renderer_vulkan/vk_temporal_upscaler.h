@@ -284,6 +284,7 @@ private:
     vk::UniquePipelineLayout taa_pipeline_layout;
     vk::UniquePipeline taa_pipeline;
     vk::UniquePipeline taa_default_pipeline; ///< taa.comp, TAA_DEFAULT_SWITCHES
+    vk::UniquePipeline taa_one_pass_pipeline; ///< taa.comp, TAA_SHARPEN_IN_RESOLVE (GOW3_TAA_ONE_PASS)
     vk::UniqueDescriptorSetLayout taa_sharpen_desc_layout;
     vk::UniquePipelineLayout taa_sharpen_pipeline_layout;
     vk::UniquePipeline taa_sharpen_pipeline;

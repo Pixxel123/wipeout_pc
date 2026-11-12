@@ -4,7 +4,15 @@
 // TAA_DEFAULT_SWITCHES: the build for normal use, chosen while every switch below is at its
 // default (RecordTaa): read from push constants, the off-by-default switches cost their work in
 // every pixel even when they are off.
+// TAA_SHARPEN_IN_RESOLVE (with TAA_DEFAULT_SWITCHES; GOW3_TAA_ONE_PASS, an experiment): the result
+// is sharpened here, RCAS as taa_sharpen.comp does it, with the four neighbours taken from the
+// previous frame's history where this pixel was then. No separate sharpen pass reads the new
+// history; where the scene holds still the neighbours are the ones that pass would read, one
+// frame older. Strength: pad bits 16-27, in thousandths.
 #version 450
+#ifdef TAA_SHARPEN_IN_RESOLVE
+#extension GL_GOOGLE_include_directive : require
+#endif
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D color_tex;
 layout(binding = 1) uniform sampler2D depth_tex;
@@ -22,6 +30,23 @@ layout(push_constant) uniform Params {
     vec4 prev_proj;
     vec4 previous_z;
 };
+
+#ifdef TAA_SHARPEN_IN_RESOLVE
+#define A_GPU 1
+#define A_GLSL 1
+#include "fsr/ffx_a.h"
+#define FSR_RCAS_F 1
+#define FSR_RCAS_DENOISE 1
+float color_scale;
+ivec2 rcas_centre;
+vec3 rcas_taps[5]; // top, left, centre, right, bottom
+AF4 FsrRcasLoadF(ASU2 q) {
+    ivec2 d = ivec2(q) - rcas_centre;
+    return vec4(rcas_taps[d.y < 0 ? 0 : d.y > 0 ? 4 : d.x < 0 ? 1 : d.x > 0 ? 3 : 2] / color_scale, 1);
+}
+void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
+#include "fsr/ffx_fsr1.h"
+#endif
 
 vec4 fetchLinear(sampler2D tex, vec2 position) {
     ivec2 p = ivec2(floor(position));
@@ -138,6 +163,9 @@ void main() {
     }
     vec3 result = current;
     float history_weight = 0.0;
+#ifdef TAA_SHARPEN_IN_RESOLVE
+    ivec2 history_centre = p; // where this pixel was in the previous frame, to the nearest pixel
+#endif
     vec3 diagnostic_history = current;
     vec3 diagnostic_sample = current;
     vec3 diagnostic_direct = current;
@@ -160,6 +188,9 @@ void main() {
             // Adding tiny motion to a large coordinate first loses fractional precision.
             vec2 integer_motion = floor(motion);
             ivec2 base = p + ivec2(integer_motion);
+#ifdef TAA_SHARPEN_IN_RESOLVE
+            history_centre = p + ivec2(floor(motion + 0.5));
+#endif
             vec2 fraction = motion - integer_motion;
             vec3 history_rgb = vec3(0.0);
             float coverage = 0.0;
@@ -220,6 +251,32 @@ void main() {
     }
     // Optional diagnostic alpha; normal output remains opaque.
     vec3 output_color = diag == 2 ? current : diag == 3 ? diagnostic_history : result;
+#ifdef TAA_SHARPEN_IN_RESOLVE
+    float amount = clamp(float((pad >> 16) & 0xfffu) / 1000.0, 0.0, 2.0);
+    vec3 center = max(result, vec3(0.0));
+    output_color = center;
+    // Without usable history (a reset, a newly revealed surface) the pixel stays unsharpened
+    // for this frame.
+    if (amount > 0.0 && history_weight > 0.0) {
+        ivec2 bound = size - 1;
+        vec3 top = max(texelFetch(history_tex, clamp(history_centre + ivec2(0,-1), ivec2(0), bound), 0).rgb, vec3(0.0));
+        vec3 left = max(texelFetch(history_tex, clamp(history_centre + ivec2(-1,0), ivec2(0), bound), 0).rgb, vec3(0.0));
+        vec3 right = max(texelFetch(history_tex, clamp(history_centre + ivec2(1,0), ivec2(0), bound), 0).rgb, vec3(0.0));
+        vec3 bottom = max(texelFetch(history_tex, clamp(history_centre + ivec2(0,1), ivec2(0), bound), 0).rgb, vec3(0.0));
+        vec3 peak = max(center, max(max(left, right), max(top, bottom)));
+        color_scale = max(1.0, max(peak.r, max(peak.g, peak.b)));
+        vec3 low = min(center, min(min(left, right), min(top, bottom)));
+        if (!all(lessThanEqual(peak - low, vec3(1e-6 * color_scale)))) {
+            rcas_centre = p;
+            rcas_taps[0] = top; rcas_taps[1] = left; rcas_taps[2] = center;
+            rcas_taps[3] = right; rcas_taps[4] = bottom;
+            uvec4 constants = uvec4(floatBitsToUint(exp2(-2.0 * (1.0 - min(amount, 1.0)))), 0, 0, 0);
+            vec3 sharpened;
+            FsrRcasF(sharpened.r, sharpened.g, sharpened.b, uvec2(p), constants);
+            output_color = clamp(mix(center, sharpened * color_scale, amount), vec3(0.0), vec3(color_scale));
+        }
+    }
+#endif
     if ((pad & 0x80000000u) == 0u)
         imageStore(result_img, p, vec4(output_color, diag != 0 ? history_weight : 1.0));
     imageStore(next_history, p, vec4(result, depth));

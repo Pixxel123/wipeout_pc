@@ -140,6 +140,8 @@ add_host_shader(upscale_reactive.comp upscale_reactive_comp)
 add_host_shader(taa.comp taa_comp)
 # taa.comp while every A/B switch is off (vk_temporal_upscaler.cpp RecordTaa).
 add_host_shader(taa.comp taa_default_switches_comp TAA_DEFAULT_SWITCHES=1)
+# The experiment GOW3_TAA_ONE_PASS: the resolve sharpens its own result, no sharpen pass.
+add_host_shader(taa.comp taa_one_pass_comp TAA_DEFAULT_SWITCHES=1 TAA_SHARPEN_IN_RESOLVE=1)
 add_host_shader(taa_sharpen.comp taa_sharpen_comp)
 add_host_shader(taa_sharpen.comp taa_sharpen_ldr_comp LDR_OUTPUT=1)
 add_host_shader(taa_sharpen.comp taa_sharpen_scene_r11_comp SCENE_R11G11B10=1)

@@ -22,6 +22,7 @@
 #include "video_core/host_shaders/upscale_reactive_comp.h"
 #include "video_core/host_shaders/taa_comp.h"
 #include "video_core/host_shaders/taa_default_switches_comp.h"
+#include "video_core/host_shaders/taa_one_pass_comp.h"
 #include "video_core/host_shaders/taa_sharpen_comp.h"
 #include "video_core/host_shaders/taa_sharpen_ldr_comp.h"
 #include "video_core/host_shaders/taa_sharpen_scene_r11_comp.h"
@@ -663,6 +664,10 @@ void TemporalUpscaler::CreatePipelines() {
             .addressModeW = vk::SamplerAddressMode::eClampToEdge}));
         taa_pipeline = compute(TAA_COMP, *taa_pipeline_layout);
         taa_default_pipeline = compute(TAA_DEFAULT_SWITCHES_COMP, *taa_pipeline_layout);
+        if (std::getenv("GOW3_TAA_ONE_PASS")) {
+            taa_one_pass_pipeline = compute(TAA_ONE_PASS_COMP, *taa_pipeline_layout);
+            std::printf("TAA: one pass (the resolve sharpens its own result), an experiment\n");
+        }
     }
 }
 
@@ -736,12 +741,20 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     const bool sharpen = settings.sharpen && strength > 0.0f && !(params.pad & 0xffu);
     // Sharpening replaces the resolve's output with its own, made from the history: the resolve
     // then stores none, and the sharpen pass writes the scene color, not an image for Run to copy.
-    const bool into_scene = sharpen && scene && taa_sharpen_scene_pipeline && fast;
+    // The experiment GOW3_TAA_ONE_PASS: the resolve sharpens its own result into the output image
+    // (neighbours from the previous history) and no sharpen pass runs; Run copies the output into
+    // the scene color as it does without sharpening.
+    const bool one_pass = sharpen && default_switches && taa_one_pass_pipeline;
+    const bool into_scene = sharpen && scene && taa_sharpen_scene_pipeline && fast && !one_pass;
     if (into_scene) {
         params.pad |= 1u << 31;
     }
+    if (one_pass) {
+        params.pad |= (u32(strength * 1000.0f) & 0xfffu) << 16;
+    }
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
-                        default_switches ? *taa_default_pipeline : *taa_pipeline);
+                        one_pass ? *taa_one_pass_pipeline
+                                 : default_switches ? *taa_default_pipeline : *taa_pipeline);
     if (params.pad & 0xffu) {
         static u32 diagnostic_frames = 0;
         if (diagnostic_frames++ < 16)
@@ -752,7 +765,7 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     cmdbuf.pushConstants(*taa_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
                          sizeof(params), &params);
     cmdbuf.dispatch((out_width + 7) / 8, (out_height + 7) / 8, 1);
-    if (sharpen) {
+    if (sharpen && !one_pass) {
         const vk::MemoryBarrier2 resolved{
             .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
             .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
