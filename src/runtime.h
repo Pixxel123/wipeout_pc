@@ -105,6 +105,7 @@ extern volatile int runtime_pad_opened; /* the game opened a pad (start watch, #
 int runtime_pad_describe(void);
 int runtime_pad_second_user(void);
 void runtime_user_events(void);
+void runtime_cube_budget_poll(void); /* WipEout: reflection cube faces follow the frame rate */
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
 void runtime_savedata_configure(const char *title);
