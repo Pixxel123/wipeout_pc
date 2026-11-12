@@ -89,6 +89,9 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     EndRendering();
     is_rendering = true;
     render_state = new_state;
+    if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
+        profiler->Step(1);
+    }
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
     for (u32 i = 0; i < render_state.num_color_attachments; ++i) {
@@ -169,6 +172,9 @@ void Scheduler::EndRendering() {
             RecordFullBarrier(cmdbuf);
         }
     });
+    if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
+        profiler->Step(2);
+    }
 }
 
 void Scheduler::TraceDirectRecording(void* caller) {

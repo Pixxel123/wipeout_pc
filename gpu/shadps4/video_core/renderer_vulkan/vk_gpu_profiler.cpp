@@ -11,10 +11,11 @@ namespace Vulkan {
 
 void GpuProfiler::Init(const Instance& instance, Scheduler& scheduler) {
     const char* env = std::getenv("GOW3_GPU_PROFILE");
-    if (!env || env[0] != '1' || instance_ptr) {
+    if (!env || (env[0] != '1' && env[0] != '2') || instance_ptr) {
         return;
     }
     instance_ptr = new GpuProfiler(instance, scheduler);
+    instance_ptr->steps = env[0] == '2';
 }
 
 GpuProfiler::GpuProfiler(const Instance& instance, Scheduler& scheduler_)
@@ -39,6 +40,23 @@ void GpuProfiler::WriteTimestamp(u64 key) {
     // Outside render passes: radv_CmdWriteTimestamp2 crashed inside some. Marks sit where a
     // pass, dispatch or submission ends anyway.
     scheduler.EndRendering();
+    const u32 query = slice * SliceQueries + used[slice]++;
+    keys[slice].push_back(key);
+    current = key;
+    base = key;
+    scheduler.Record([pool = *pool, query](vk::CommandBuffer cmdbuf) {
+        cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, pool, query);
+    });
+}
+
+void GpuProfiler::Step(u32 kind) {
+    if (!steps || paused || base == 0 || used[slice] + 2 >= SliceQueries) {
+        return;
+    }
+    const u64 key = base ^ (0x9E3779B97F4A7C15ull * kind);
+    if (!described.contains(key)) {
+        described.emplace(key, described[base] + (kind == 1 ? " | draws" : " | after"));
+    }
     const u32 query = slice * SliceQueries + used[slice]++;
     keys[slice].push_back(key);
     current = key;
@@ -124,7 +142,7 @@ void GpuProfiler::Print() {
                 sum / frames, static_cast<unsigned long long>(frames),
                 static_cast<unsigned long long>(skipped),
                 wall_frames ? wall_ms / double(wall_frames) : 0.0, sorted.size());
-    for (size_t i = 0; i < std::min<size_t>(sorted.size(), 40); ++i) {
+    for (size_t i = 0; i < std::min<size_t>(sorted.size(), steps ? 1500 : 40); ++i) {
         const auto& [key, total] = sorted[i];
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,
                     double(total.segments) / frames, described[key].c_str());

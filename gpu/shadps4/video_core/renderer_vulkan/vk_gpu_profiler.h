@@ -52,6 +52,12 @@ public:
         return other == &scheduler;
     }
 
+    /// GOW3_GPU_PROFILE=2: splits a pass's segment in three. `kind` 1, just before the pass
+    /// begins: what follows is its draws (" | draws"); before it, from the label, the barriers
+    /// and transfers recorded ahead of the pass. `kind` 2, just after it ends: what follows, up
+    /// to the next label, is recorded between passes (" | after").
+    void Step(u32 kind);
+
     /// At the display pass: closes the frame's last segment, reads an old frame's results.
     void BeginFrame();
 
@@ -91,6 +97,8 @@ private:
     u64 wall_frames = 0;
     std::chrono::steady_clock::time_point last_frame{};
     u64 current = 0;
+    u64 base = 0;       ///< the last label written by WriteTimestamp (Step derives from it)
+    bool steps = false; ///< GOW3_GPU_PROFILE=2
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
 
