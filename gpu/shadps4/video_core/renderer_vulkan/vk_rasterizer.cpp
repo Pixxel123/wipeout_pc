@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <type_traits>
 #include <utility>
 #include <xxhash.h>
@@ -2116,7 +2117,29 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
                 const auto [image_id, clear_value] = texture_cache.MetaTarget(address);
                 if (image_id) {
                     auto& image = texture_cache.GetImage(image_id);
-                    runtime.ClearImage(&image, {.extent = image.info.resources}, clear_value);
+                    // gow3: the entry is keyed by the CMask of the target's first slice. A write
+                    // too small for every slice's CMask (4 bits per 8x8 tile, before padding) is
+                    // the game clearing that slice alone: WipEout clears a reflection cube face
+                    // by face, each face's CMask on its own, right before it draws the face. The
+                    // other slices keep their picture: clearing all of them here blanked the
+                    // faces a frame does not redraw (the game's 3 faces a frame in split screen)
+                    // until a later frame drew them again, a flicker on the ships.
+                    VideoCore::SubresourceRange range{.extent = image.info.resources};
+                    const u64 slice_cmask = u64{(image.info.size.width + 7) / 8} *
+                                            ((image.info.size.height + 7) / 8) / 2;
+                    const u32 written = desc.GetSharp(info).GetSize();
+                    if (range.extent.layers > 1 && written < slice_cmask * range.extent.layers) {
+                        range.extent.layers = 1;
+                        static std::atomic<u32> said{0};
+                        if (said.fetch_add(1) < 4) {
+                            std::printf("Fast clear: a %u-byte CMask write clears the first of %u "
+                                        "slices of the %ux%u target at %#llx\n",
+                                        written, image.info.resources.layers,
+                                        image.info.size.width, image.info.size.height,
+                                        static_cast<unsigned long long>(image.info.guest_address));
+                        }
+                    }
+                    runtime.ClearImage(&image, range, clear_value);
                 }
                 // Assume all slices were updates
                 LOG_TRACE(Render_Vulkan, "Metadata update skipped");
