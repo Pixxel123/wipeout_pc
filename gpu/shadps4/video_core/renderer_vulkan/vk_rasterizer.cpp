@@ -1093,10 +1093,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         // gow3: once per display buffer, as without an upscaler below: the HUD draws into it after
         // the copy and each of its draws comes through here. Counting every draw as a frame made
         // GOW3_GPU_PROFILE start ~25 frames a frame and skip nearly all of them.
-        if (regs.color_buffers[0].Address() != last_display_buffer) {
-            last_display_buffer = regs.color_buffers[0].Address();
-            NoteFrameStart();
-        }
+        // (v0.2.73 already comes here once per display buffer: new_display_frame above.)
+        NoteFrameStart();
         static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
