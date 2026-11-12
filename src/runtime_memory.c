@@ -798,6 +798,33 @@ void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalid
     write_unlock();
     flush_hooks();
 }
+/* Diagnostic: bytes of [address, address+size) whose backing was never written (holes of the pool
+ * file, which read as zeros). -1 where the host cannot tell (Windows). */
+int64_t runtime_memory_unwritten_bytes(uintptr_t address, uint64_t size) {
+#ifdef _WIN32
+    (void)address; (void)size; return -1;
+#else
+    int64_t holes=0;
+    read_lock();
+    for (uintptr_t at=address, end=address+size; at<end;) {
+        size_t i=vma_index(at);
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { holes=-1; break; }
+        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
+        off_t pos=(off_t)(vmas[i].phys+(at-vmas[i].start)), stop=pos+(off_t)n;
+        while (pos<stop) {
+            off_t data=lseek(pool_fd,pos,SEEK_DATA);
+            if (data<0 || data>=stop) { holes+=stop-pos; break; }
+            holes+=data-pos;
+            off_t hole=lseek(pool_fd,data,SEEK_HOLE);
+            if (hole<0 || hole>=stop) break;
+            pos=hole;
+        }
+        at+=n;
+    }
+    read_unlock();
+    return holes;
+#endif
+}
 /* Writes through the backing view; 0 when part of the range has no backing. */
 int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size) {
     read_lock();
