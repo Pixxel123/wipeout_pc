@@ -475,7 +475,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     EndRendering();
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
-        profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
+        profiler->Mark(GpuProfiler::IdleKey,
+                       [] { return std::string{"(between submissions: GPU idle)"}; });
+        profiler->NoteIdleMark();
     }
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).
@@ -515,8 +517,18 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
+    if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
+        profiler->NoteSubmitted();
+    }
     work_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
+    if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
+        // The gap ends where the new command buffer starts; what it records before its first
+        // label (uploads, barriers) gets a label of its own.
+        profiler->Mark(0x5B318ull, [] {
+            return std::string{"(start of a submission, before its first label)"};
+        });
+    }
 
     // Apply pending operations
     PopPendingOperations();

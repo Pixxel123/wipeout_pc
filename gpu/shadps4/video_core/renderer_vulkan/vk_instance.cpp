@@ -502,6 +502,10 @@ bool Instance::CreateDevice(bool needs_swapchain) {
     }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
+    // gow3: GOW3_GPU_PROFILE compares GPU timestamps with the CPU time of each submission.
+    if (!calibrated_timestamps && std::getenv("GOW3_GPU_PROFILE")) {
+        gpu_profile_calibrated = add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    }
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {

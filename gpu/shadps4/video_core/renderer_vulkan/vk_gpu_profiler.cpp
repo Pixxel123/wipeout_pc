@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <ctime>
 
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -16,6 +17,12 @@ void GpuProfiler::Init(const Instance& instance, Scheduler& scheduler) {
     }
     instance_ptr = new GpuProfiler(instance, scheduler);
     instance_ptr->steps = env[0] == '2';
+#ifdef __linux__
+    instance_ptr->calibrated = instance.GpuProfileCalibrated();
+#endif
+    std::printf("GPU profile: idle gaps %s\n",
+                instance_ptr->calibrated ? "are split by the time of the next submission"
+                                         : "are not split (no calibrated timestamps)");
 }
 
 GpuProfiler::GpuProfiler(const Instance& instance, Scheduler& scheduler_)
@@ -47,6 +54,39 @@ void GpuProfiler::WriteTimestamp(u64 key) {
     scheduler.Record([pool = *pool, query](vk::CommandBuffer cmdbuf) {
         cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, pool, query);
     });
+}
+
+namespace {
+s64 MonotonicNs() {
+#ifdef __linux__
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return s64{ts.tv_sec} * 1'000'000'000 + ts.tv_nsec;
+#else
+    return 0;
+#endif
+}
+} // namespace
+
+void GpuProfiler::NoteIdleMark() {
+    idle_cur.valid = false;
+    if (!calibrated || paused || keys[slice].empty() || keys[slice].back() != IdleKey) {
+        return;
+    }
+    idle_events[slice].push_back({used[slice] - 1, submit_ordinal++});
+    idle_cur = {slice, u32(idle_events[slice].size() - 1), true};
+}
+
+void GpuProfiler::NoteSubmitted() {
+    if (!calibrated) {
+        return;
+    }
+    // This submission ends the gap that the previous one's idle label opened.
+    if (idle_prev.valid && idle_prev.pos < idle_events[idle_prev.slice].size()) {
+        idle_events[idle_prev.slice][idle_prev.pos].next_submit_ns = MonotonicNs();
+    }
+    idle_prev = idle_cur;
+    idle_cur.valid = false;
 }
 
 void GpuProfiler::Step(u32 kind) {
@@ -101,6 +141,11 @@ void GpuProfiler::BeginFrame() {
     }
     used[slice] = 0;
     keys[slice].clear();
+    idle_events[slice].clear();
+    if (idle_prev.valid && idle_prev.slice == slice) {
+        idle_prev.valid = false;
+    }
+    submit_ordinal = 0;
     pending[slice] = false;
     Print();
 }
@@ -121,6 +166,35 @@ void GpuProfiler::Collect(u32 which) {
         total.ms += ms;
         ++total.segments;
     }
+#ifdef __linux__
+    if (calibrated && !idle_events[which].empty()) {
+        // Device time and CLOCK_MONOTONIC read together: the offset between the two clocks.
+        const VkCalibratedTimestampInfoEXT infos[2] = {
+            {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_DEVICE_EXT},
+            {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr,
+             VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT},
+        };
+        u64 now[2]{}, deviation{};
+        if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetCalibratedTimestampsEXT &&
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetCalibratedTimestampsEXT(
+                static_cast<VkDevice>(device), 2, infos, now, &deviation) == VK_SUCCESS) {
+            const double offset_ns = double(now[1]) - double(now[0]) * period_ns;
+            for (const IdleEvent& event : idle_events[which]) {
+                if (event.next_submit_ns == 0 || event.index + 1 >= count) {
+                    continue;
+                }
+                const double start = double(stamps[event.index]) * period_ns + offset_ns;
+                const double gap = double(stamps[event.index + 1] - stamps[event.index]) * period_ns;
+                const double wait = std::clamp(double(event.next_submit_ns) - start, 0.0, gap);
+                auto& total = idle_totals[std::min<u32>(event.ordinal, 3)];
+                total.gap_ms += gap / 1e6;
+                total.wait_ms += wait / 1e6;
+                ++total.gaps;
+                total.queued += double(event.next_submit_ns) <= start;
+            }
+        }
+    }
+#endif
     ++frames;
 }
 
@@ -147,6 +221,19 @@ void GpuProfiler::Print() {
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,
                     double(total.segments) / frames, described[key].c_str());
     }
+    for (u32 i = 0; i < idle_totals.size(); ++i) {
+        const IdleTotal& t = idle_totals[i];
+        if (t.gaps == 0) {
+            continue;
+        }
+        std::printf("  idle gap after submission %u%s of a frame: %.3f ms/frame in %.2f gaps/frame; "
+                    "%.3f ms/frame before the next submission reached the driver, %.3f after; "
+                    "next one already there in %.0f %% of gaps\n",
+                    i + 1, i == 3 ? "+" : "", t.gap_ms / frames, double(t.gaps) / frames,
+                    t.wait_ms / frames, (t.gap_ms - t.wait_ms) / frames,
+                    100.0 * double(t.queued) / double(t.gaps));
+    }
+    idle_totals = {};
     totals.clear();
     frames = 0;
     skipped = 0;

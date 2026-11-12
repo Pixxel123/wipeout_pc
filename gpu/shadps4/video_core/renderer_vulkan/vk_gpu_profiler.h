@@ -58,6 +58,14 @@ public:
     /// to the next label, is recorded between passes (" | after").
     void Step(u32 kind);
 
+    /// The idle gap: NoteIdleMark right after the "between submissions" label is written (the
+    /// end of a submission's commands), NoteSubmitted once that submission is with the driver.
+    /// With calibrated timestamps, each gap is then split into the GPU waiting for the next
+    /// submission to be handed over and the time after that until its first timestamp.
+    static constexpr u64 IdleKey = 0x5B317ull;
+    void NoteIdleMark();
+    void NoteSubmitted();
+
     /// At the display pass: closes the frame's last segment, reads an old frame's results.
     void BeginFrame();
 
@@ -97,6 +105,25 @@ private:
     u64 wall_frames = 0;
     std::chrono::steady_clock::time_point last_frame{};
     u64 current = 0;
+    struct IdleEvent {
+        u32 index;            ///< the idle label's timestamp in its slice
+        u32 ordinal;          ///< which submission of the frame it ends (0 = first)
+        s64 next_submit_ns{}; ///< CLOCK_MONOTONIC when the next submission reached the driver
+    };
+    std::array<std::vector<IdleEvent>, NumSlices> idle_events;
+    struct IdleRef {
+        u32 slice;
+        u32 pos;
+        bool valid = false;
+    };
+    IdleRef idle_prev, idle_cur;
+    u32 submit_ordinal = 0;
+    bool calibrated = false;
+    struct IdleTotal {
+        double gap_ms = 0, wait_ms = 0;
+        u64 gaps = 0, queued = 0;
+    };
+    std::array<IdleTotal, 4> idle_totals{};
     u64 base = 0;       ///< the last label written by WriteTimestamp (Step derives from it)
     bool steps = false; ///< GOW3_GPU_PROFILE=2
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();

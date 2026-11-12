@@ -58,6 +58,11 @@ public:
         return vk13_props.maxBufferSize;
     }
 
+    /// gow3: VK_EXT_calibrated_timestamps was enabled for GOW3_GPU_PROFILE.
+    bool GpuProfileCalibrated() const {
+        return gpu_profile_calibrated;
+    }
+
     vk::PhysicalDevice GetPhysicalDevice() const {
         return physical_device;
     }
@@ -602,6 +607,7 @@ private:
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
+    bool gpu_profile_calibrated{}; // gow3
 };
 
 } // namespace Vulkan
