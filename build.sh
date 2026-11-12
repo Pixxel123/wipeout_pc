@@ -58,7 +58,7 @@ read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3 libavformat libavcodec
 # profile is one file, pgo/gow3gpu.profdata (llvm-profdata merge), which also fits later sources; when it is
 # there, Clang and the profile are the default.
 pgo=${GOW3_PGO:-}
-gpu_compiler=${GOW3_GPU_COMPILER:-}
+gpu_compiler=${GOW3_GPU_COMPILER:-clang}
 if [[ -z $gpu_compiler ]]; then
     if [[ -f pgo/gow3gpu.profdata ]]; then gpu_compiler=clang; else gpu_compiler=gcc; fi
 fi
