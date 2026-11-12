@@ -40,6 +40,7 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
+long long runtime_memory_unwritten_bytes(unsigned long address, unsigned long size);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
 typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
 // runtime_kernel.c: one clock for guest and GPU timestamps
@@ -129,9 +130,31 @@ void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
     if (size < 4 * Chunk || !Gow3Copy::Enabled()) {
         return CopySparseSerial(source, dest, size);
     }
+    // gow3 (experiment): GOW3_SKIP_UNWRITTEN=1. A chunk of guest memory nobody has written yet
+    // (a hole of the pool file) reads as zeros, but reading it makes the kernel create every page:
+    // a texture the game allocates and streams into later cost a fault a page at its first
+    // upload. Such a chunk is filled with zeros here without touching the guest pages.
+    static const bool skip_unwritten = [] {
+        const char* value = std::getenv("GOW3_SKIP_UNWRITTEN");
+        const bool on = value && value[0] == '1';
+        std::printf("Guest copies: unwritten chunks %s\n", on ? "zero-filled, not read" : "read");
+        return on;
+    }();
     Gow3Copy::ParallelFor((size + Chunk - 1) / Chunk, [&](std::size_t i) {
         const u64 offset = i * Chunk;
-        CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
+        const u64 n = std::min(Chunk, size - offset);
+        if (skip_unwritten &&
+            runtime_memory_unwritten_bytes(source + offset, n) == static_cast<long long>(n)) {
+            std::memset(dest + offset, 0, n);
+            static std::atomic<unsigned long long> skipped{0};
+            const auto count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+            if ((count & (count - 1)) == 0) {
+                std::printf("Guest copies: %llu unwritten chunks zero-filled so far (%.0f MiB)\n", count,
+                            count * 0.5);
+            }
+            return;
+        }
+        CopySparseSerial(source + offset, dest + offset, n);
     });
 }
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
