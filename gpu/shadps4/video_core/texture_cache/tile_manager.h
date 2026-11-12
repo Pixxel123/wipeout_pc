@@ -53,8 +53,11 @@ public:
     void TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
                    const VideoCore::Buffer* out_buffer, u64 out_offset);
 
+    /// gow3: with part_size, in_buffer holds only part_size bytes of the image from base_bytes
+    /// on (a run of whole slices of one mip) and so does the result.
     std::pair<const Buffer*, u64> DetileImage(const VideoCore::Buffer* in_buffer, u64 in_offset,
-                                              const ImageInfo& info);
+                                              const ImageInfo& info, u32 base_bytes = 0,
+                                              u32 part_size = 0);
 
 private:
     void RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,

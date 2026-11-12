@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdio>
+#include <span>
+#include <vector>
 #include <bit>
 #include <cmath>
 #include <filesystem>
@@ -1777,6 +1781,23 @@ void TextureCache::RefreshImage(Image& image) {
     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
 
+    // gow3 (experiment, GOW3_STREAM_PARTIAL=1): the game streams into a 32-layer array a layer
+    // or a few at a time over ~30 frames, and every one of them uploaded all 42.8 MiB again.
+    static const bool stream_partial = [] {
+        const char* env = std::getenv("GOW3_STREAM_PARTIAL");
+        return env && env[0] == '1';
+    }();
+    constexpr u32 PartialMinSize = 8u << 20;
+    if (stream_partial && num_layers > 1 && !image.info.props.is_volume && !is_gpu_modified &&
+        image.info.guest_size >= PartialMinSize) {
+        if (RefreshChangedSlices(image)) {
+            return;
+        }
+    } else {
+        // A whole upload that was not hashed: the hashes no longer describe what the GPU has.
+        image.slice_hashes.clear();
+    }
+
     Gow3Stats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
     boost::container::small_vector<vk::BufferImageCopy, 14> image_copies;
     for (u32 m = 0; m < num_mips; m++) {
@@ -1861,6 +1882,101 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+}
+
+bool TextureCache::RefreshChangedSlices(Image& image) {
+    const auto& info = image.info;
+    if (!image.uploaded_before) {
+        // The first upload is whole and is not hashed: it comes in a track's first frame.
+        image.uploaded_before = true;
+        return false;
+    }
+    // Slices lie one after the other in the tiled memory of thin modes; not checked for others.
+    if (info.props.is_tiled &&
+        AmdGpu::GetMicroTileMode(info.tile_mode) != AmdGpu::MicroTileMode::Thin) {
+        return false;
+    }
+    struct Run {
+        u32 mip, first, count;
+    };
+    boost::container::small_vector<Run, 16> runs;
+    const u32 num_layers = info.resources.layers;
+    const u32 num_mips = info.resources.levels;
+    const u32 dispatch_bytes = 64 * (info.num_bits / 8); // tiling.comp works 64 elements at a time
+    const bool had_hashes = !image.slice_hashes.empty();
+    image.slice_hashes.resize(size_t{num_mips} * num_layers);
+    const u8* base = std::bit_cast<u8*>(info.guest_address);
+    const auto started = std::chrono::steady_clock::now();
+    u64 changed_bytes = 0;
+    bool whole = !had_hashes;
+    for (u32 m = 0; m < num_mips; m++) {
+        const auto& mip = info.mips_layout[m];
+        const u32 slice = mip.size / num_layers;
+        const bool separable = slice != 0 && mip.size % num_layers == 0 &&
+                               slice % dispatch_bytes == 0;
+        for (u32 l = 0; l < num_layers; l++) {
+            const u64 hash = slice ? XXH3_64bits(base + mip.offset + u64{l} * slice, slice) : 0;
+            u64& old = image.slice_hashes[size_t{m} * num_layers + l];
+            if (old == hash) {
+                continue;
+            }
+            old = hash;
+            changed_bytes += slice;
+            whole |= !separable;
+            if (!runs.empty() && runs.back().mip == m && runs.back().first + runs.back().count == l) {
+                ++runs.back().count;
+            } else {
+                runs.push_back({m, l, 1});
+            }
+        }
+    }
+    const double hash_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
+    whole |= changed_bytes * 2 > info.guest_size;
+    if (Gow3Stats::enabled) {
+        std::printf("Partial upload: %#llx %s, %zu runs, %.2f of %.1f MiB changed, hashing %.2f ms\n",
+                    static_cast<unsigned long long>(info.guest_address),
+                    whole ? "whole" : "slices", runs.size(), changed_bytes / 1048576.0,
+                    info.guest_size / 1048576.0, hash_ms);
+    }
+    if (whole) {
+        return false;
+    }
+    if (runs.empty()) {
+        image.flags &= ~ImageFlagBits::Dirty;
+        return true;
+    }
+    Gow3Stats::image_upload_bytes.fetch_add(changed_bytes, std::memory_order_relaxed);
+    scheduler.EndRendering();
+    for (const Run& run : runs) {
+        const auto [mip_size, mip_pitch, mip_height, mip_offset] = info.mips_layout[run.mip];
+        const u32 slice = mip_size / num_layers;
+        const u32 part_base = mip_offset + run.first * slice;
+        const u32 part_size = run.count * slice;
+        const u32 width = std::max(info.size.width >> run.mip, 1u);
+        const u32 height = std::max(info.size.height >> run.mip, 1u);
+        const auto [in_buffer, in_offset] =
+            buffer_cache.ObtainBufferForImage(info.guest_address + part_base, part_size);
+        const auto [buffer, offset] =
+            tile_manager.DetileImage(in_buffer, in_offset, info, part_base, part_size);
+        const vk::BufferImageCopy copy{
+            .bufferOffset = offset,
+            .bufferRowLength = mip_pitch,
+            .bufferImageHeight = mip_height,
+            .imageSubresource{
+                .aspectMask = image.aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+                .mipLevel = run.mip,
+                .baseArrayLayer = run.first,
+                .layerCount = run.count,
+            },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {mip_pitch ? std::min(mip_pitch, width) : width,
+                            mip_height ? std::min(mip_height, height) : height, 1},
+        };
+        runtime.UploadImage(&image, buffer, std::span{&copy, 1});
+    }
+    return true;
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,

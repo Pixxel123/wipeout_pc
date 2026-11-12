@@ -104,6 +104,9 @@ layout (set = 0, binding = 2, scalar) uniform TilingInfo {
     uint bank_swizzle;
     uint num_slices;
     uint num_mips;
+    // gow3: the dispatch covers the image from this byte on (0: the whole image). The buffers
+    // then hold only that part: a run of whole slices of one mip (DetileImage).
+    uint base_bytes;
     MipInfo mips[16];
 } info;
 
@@ -434,7 +437,7 @@ uint GetMipLevel(inout uint texel) {
 }
 
 void main() {
-    uint texel = gl_GlobalInvocationID.x;
+    uint texel = gl_GlobalInvocationID.x + info.base_bytes / BYTES_PER_PIXEL;
     uint mip = GetMipLevel(texel);
     uint pitch = info.mips[mip].pitch;
     uint height = info.mips[mip].height;
@@ -450,8 +453,8 @@ void main() {
 #endif
 
     if (IS_TILER != 0) {
-        tiled_data[tiled_offset / BYTES_PER_PIXEL] = linear_data[gl_GlobalInvocationID.x];
+        tiled_data[(tiled_offset - info.base_bytes) / BYTES_PER_PIXEL] = linear_data[gl_GlobalInvocationID.x];
     } else {
-        linear_data[gl_GlobalInvocationID.x] = tiled_data[tiled_offset / BYTES_PER_PIXEL];
+        linear_data[gl_GlobalInvocationID.x] = tiled_data[(tiled_offset - info.base_bytes) / BYTES_PER_PIXEL];
     }
 }

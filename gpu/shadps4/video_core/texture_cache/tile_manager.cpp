@@ -35,6 +35,7 @@ struct TilingInfo {
     u32 bank_swizzle;
     u32 num_slices;
     u32 num_mips;
+    u32 base_bytes; ///< gow3: first byte of the image the dispatch covers (tiling.comp)
     std::array<ImageInfo::MipInfo, 16> mips;
 };
 
@@ -451,12 +452,16 @@ void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::Descript
 }
 
 std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* in_buffer,
-                                                       u64 in_offset, const ImageInfo& info) {
+                                                       u64 in_offset, const ImageInfo& info,
+                                                       u32 base_bytes, u32 part_size) {
     if (!info.props.is_tiled) {
         return {in_buffer, in_offset};
     }
 
+    // gow3: part_size bytes from base_bytes on (a run of whole slices of one mip), or all of it.
+    const u32 size = part_size ? part_size : info.guest_size;
     TilingInfo params{};
+    params.base_bytes = base_bytes;
     params.bank_swizzle = info.bank_swizzle;
     params.num_slices = info.props.is_volume ? info.size.depth : info.resources.layers;
     params.num_mips = info.resources.levels;
@@ -484,20 +489,20 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
     // so after the previous submission's copies.
     constexpr u64 DetileScratchMin = 64_MB, DetileScratchMax = 512_MB;
     Vulkan::StagingBufferRef staging;
-    const bool scratch = info.guest_size <= DetileScratchMax;
+    const bool scratch = size <= DetileScratchMax;
     if (scratch) {
         std::erase_if(retired_scratch, [this](const auto& retired) { return scheduler.IsFree(retired.second); });
-        if (!detile_scratch || detile_scratch->SizeBytes() < info.guest_size) {
+        if (!detile_scratch || detile_scratch->SizeBytes() < size) {
             if (detile_scratch) {
                 retired_scratch.emplace_back(std::move(detile_scratch), scheduler.CurrentTick());
             }
             detile_scratch = std::make_unique<VideoCore::Buffer>(
-                instance, 0, std::max<u64>(DetileScratchMin, std::bit_ceil(u64{info.guest_size})),
+                instance, 0, std::max<u64>(DetileScratchMin, std::bit_ceil(u64{size})),
                 MemoryType::DeviceLocal, "TileManager:DetileScratch");
         }
-        staging = {.buffer = detile_scratch.get(), .size = info.guest_size, .type = MemoryType::DeviceLocal};
+        staging = {.buffer = detile_scratch.get(), .size = size, .type = MemoryType::DeviceLocal};
     } else {
-        staging = runtime.GetStagingPool().Request(info.guest_size, MemoryType::DeviceLocal);
+        staging = runtime.GetStagingPool().Request(size, MemoryType::DeviceLocal);
     }
 
     scheduler.EndRendering();
@@ -515,19 +520,19 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
     const vk::DescriptorBufferInfo tiled_buffer_info{
         .buffer = in_buffer->Handle(),
         .offset = in_offset,
-        .range = info.guest_size,
+        .range = size,
     };
     const vk::DescriptorBufferInfo linear_buffer_info{
         .buffer = staging.buffer->Handle(),
         .offset = staging.offset,
-        .range = info.guest_size,
+        .range = size,
     };
-    const auto dim_x = static_cast<u32>((info.guest_size / (info.num_bits / 8)) / 64);
+    const auto dim_x = static_cast<u32>((size / (info.num_bits / 8)) / 64);
     // gow3: recorded with copies of the descriptor infos (threaded recording).
     RecordTilingDispatch(GetTilingPipeline(info, false), tiled_buffer_info, linear_buffer_info,
                          params_buffer_info, dim_x);
 
-    runtime.AccessBuffer(staging.buffer, staging.offset, info.guest_size,
+    runtime.AccessBuffer(staging.buffer, staging.offset, size,
                          vk::PipelineStageFlagBits2::eComputeShader,
                          vk::AccessFlagBits2::eShaderWrite);
 

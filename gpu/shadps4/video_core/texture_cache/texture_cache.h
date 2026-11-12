@@ -244,6 +244,9 @@ public:
 
     /// Reuploads image contents.
     void RefreshImage(Image& image);
+    /// gow3: for a layered image uploaded before, uploads only the (mip, layer) slices whose
+    /// guest memory changed since. False: the caller uploads the whole image.
+    bool RefreshChangedSlices(Image& image);
 
     /// Retrieves the sampler that matches the provided S# descriptor.
     /// extra_lod_bias: gow3, added to the S#'s bias (reduced scene rendering).

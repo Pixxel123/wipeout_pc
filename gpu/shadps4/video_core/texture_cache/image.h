@@ -10,6 +10,7 @@
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
 
+#include <vector>
 #include <deque>
 #include <optional>
 #include <boost/container/small_vector.hpp>
@@ -161,6 +162,10 @@ public:
     u64 cpu_dirty_flip = ~0ULL;
     /// gow3: left unprotected until a flip after cpu_dirty_flip (DeferStreamedImageTracking).
     bool track_deferred = false;
+    /// gow3: hash of each (mip, layer) slice of the guest memory at the last upload, and whether
+    /// the image was uploaded before (TextureCache::RefreshChangedSlices).
+    std::vector<u64> slice_hashes;
+    bool uploaded_before = false;
     BackingImage* backing{};
     /// gow3: gc tick of the last LRU touch; skips the LRU list (a cache miss) when current.
     mutable u64 lru_touched_tick = ~0ULL;
