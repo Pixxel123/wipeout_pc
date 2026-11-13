@@ -439,7 +439,10 @@ class HalfResolutionTests(unittest.TestCase):
                                  'Bug Fix - Zone crash above 60 FPS', 'Bug Fix - Model slots',
                                  'Cheat - Unlock all HD and Fury events',
                                  'Cheat - Top rank in 2048', 'Cheat - Unlock all ships',
-                                 'Cheat - Van Uber team (owned DLC)', 'Cheat - VR ships outside VR'])
+                                 'Cheat - Van Uber team (owned DLC)', 'Cheat - VR ships outside VR',
+                                 'Performance - Rival ship reflections, 1 face a frame',
+                                 'Performance - Own ship reflections, 3 faces a frame',
+                                 'Performance - Trackside screens, 1 frame in 3'])
         # The resolution patches stay off until a resolution is chosen; native 4K rendering is on.
         self.assertEqual(selected_patches(WIPEOUT, '01.00', ''),
                          ['Native 4K rendering (no checkerboard)', 'Bug Fix - Startup Hang',

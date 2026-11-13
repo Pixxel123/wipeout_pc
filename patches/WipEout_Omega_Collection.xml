@@ -1091,4 +1091,33 @@
             <Line Type="bytes" Address="0x009aa1e7" Value="eb" Pattern="41 80 bd 4d 07 00 00 00 0f 94 c0 0a 85 ?? ?? ?? ?? a8 01 75 1d 4a 63 84 bb b0 01 00 00 4a 8d 0c 33 8a 94 08 a0 16 00 00 80 f2 01 88 94 08 00 19 00 00" At="19"/>
         </PatchList>
     </Metadata>
+    <!-- Ship reflections. Every ship has a reflection cube (8 of 0x720 bytes from 0x10dfae0, 256x256 faces:
+         colour, distance, depth); a face is a render of the scene (0x606410(cube, faces, ...)). Each frame
+         the frame function draws faces of the camera ship's cube (call at 0x5fde5a) and of one other
+         cube, the one not finished for the longest time (0x5fe053). How many: min(byte 0xeb4845,
+         record+0x28) and min(byte 0xeb4844, record+0x29); the record's defaults are set at 0x62d460:
+         6 faces of the camera ship's cube (3 in split screen and in VR on a base console) and 3 of the
+         other one, so 9 scene renders a frame. A cube keeps its start face (+0x702) between frames and
+         takes its position when that is face 0. -->
+    <Metadata Title="WipEout Omega Collection" Name="Performance - Rival ship reflections, 1 face a frame" Note="The reflections on the other ships update one cube face a frame instead of three: two fewer renders of the scene each frame. Your own ship's reflections are unchanged." Author="Pixxel123" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
+        <PatchList>
+            <Line Type="bytes" Address="0x00a2d48e" Pattern="88 05 ?? ?? ?? ?? c6 05 ?? ?? ?? ?? 03 75 ?? 0f b6 05" At="12" Value="01"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="WipEout Omega Collection" Name="Performance - Own ship reflections, 3 faces a frame" Note="The reflections on your own ship update three cube faces a frame instead of six, as the game does in split screen: three fewer renders of the scene each frame, and the reflections follow the ship every second frame." Author="Pixxel123" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
+        <PatchList>
+            <Line Type="bytes" Address="0x00a2d47a" Pattern="80 3d ?? ?? ?? ?? 01 b0 03 77 02 b0 06 83 3d" At="12" Value="03"/>
+            <Line Type="bytes" Address="0x00a2d4ce" Pattern="c5 fa 11 0d ?? ?? ?? ?? c6 05 ?? ?? ?? ?? 06 48 8b 05" At="14" Value="03"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="WipEout Omega Collection" Name="Performance - Trackside screens, 1 frame in 3" Note="The animated trackside screens update every third frame, as the game does in split screen, instead of every frame: fewer render passes each frame." Author="Pixxel123" PatchVer="1.0" AppVer="01.00" AppElf="eboot.bin" isEnabled="false">
+        <!-- The frame function (0x5f2d30) draws the 12 billboard slots (0xaa0 bytes each from 0xeaa350,
+             Billboard.cpp, pass id 4, each into its own 1024x512 target) in a loop at 0x5fc0b0. With more
+             than one player (byte 0x1012811 > 1, tested at 0x5fb549) a slot is drawn only when its
+             number plus the frame counter 0xea99b8 is a multiple of 3 (slot 7 every second frame); the
+             first frame draws them all. The test's result is set to true. -->
+        <PatchList>
+            <Line Type="bytes" Address="0x009fb556" Pattern="80 3d ?? ?? ?? ?? 01 8b 0d ?? ?? ?? ?? 0f 97 c0 83 3d ?? ?? ?? ?? 00 89 8d" At="13" Value="b0 01 90"/>
+        </PatchList>
+    </Metadata>
 </Patch>

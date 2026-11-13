@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 #include <vk_mem_alloc.h>
@@ -744,7 +745,19 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     // The experiment GOW3_TAA_ONE_PASS: the resolve sharpens its own result into the output image
     // (neighbours from the previous history) and no sharpen pass runs; Run copies the output into
     // the scene color as it does without sharpening.
-    const bool one_pass = sharpen && default_switches && taa_one_pass_pipeline;
+    // GOW3_TAA_ONE_PASS=<absolute path>: on while that file exists (looked at every 8 frames), to
+    // compare both in one run; any other value: always on.
+    static const char* const one_pass_switch = std::getenv("GOW3_TAA_ONE_PASS");
+    static bool one_pass_on = true;
+    static u32 one_pass_frame = 0;
+    if (one_pass_switch && one_pass_switch[0] == '/' && (one_pass_frame++ & 7u) == 0) {
+        const bool on = std::filesystem::exists(one_pass_switch);
+        if (on != one_pass_on) {
+            one_pass_on = on;
+            std::printf("TAA: one pass %s\n", on ? "on" : "off");
+        }
+    }
+    const bool one_pass = sharpen && default_switches && taa_one_pass_pipeline && one_pass_on;
     const bool into_scene = sharpen && scene && taa_sharpen_scene_pipeline && fast && !one_pass;
     if (into_scene) {
         params.pad |= 1u << 31;
