@@ -65,7 +65,7 @@ Thanks to everyone who has played, tested and reported so far!
 | Game speed | Done: the game runs on real time at any frame rate |
 | Frame rate above 60 FPS | Done: up to 240 FPS, set by the frame rate limit (110–150 FPS in 2048 races on an RTX 4070 Laptop) |
 | Graphics: Metro Park terrain | Fixed (shader recompiler, #5) |
-| Render resolutions: the monitor's display modes from 1920x1080 up to 7680x4320 and a Render scale of 100-200 % (generated at start; above 3840x2160 untested) or a tested size: native 1080p, 2560x1440, 3840x2160 (4K), 2560x1080, 3440x1440, 5120x2160 | Done: pick one in the launcher's **Render resolution** list or the in-game menu (Insert key), which shows a generated size only while it is the current setting (`patches/WipEout_Omega_Collection.xml`, #2, #48). The HUD stays 16:9 in the middle of wider screens. 4K and 5120x2160 need a lot of video memory: HD races at 4K can run out on 8 GB |
+| Render resolutions: native 1080p, 2560x1440, 3840x2160 (4K), 2560x1080, 3440x1440, 5120x2160 | Done: pick one in the in-game **Render resolution** menu (Insert key) (`patches/WipEout_Omega_Collection.xml`, #2, #48). The HUD stays 16:9 in the middle of wider screens. 4K and 5120x2160 need a lot of video memory: HD races at 4K can run out on 8 GB |
 | HDR | Done; the darker picture when RCAS runs is fixed, waiting for a test (#4) |
 | Sound: music and effects (Audio3d) | Done; the effects are new, please report anything that sounds wrong |
 | Your own music (custom soundtrack) | Done: see [Your own music](#your-own-music) (#47) |

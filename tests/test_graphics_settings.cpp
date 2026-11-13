@@ -32,6 +32,18 @@ int main() {
     assert(G::ResolutionSize("native") == std::make_pair(1920, 1080));
     assert(G::ResolutionSize("8K") == std::make_pair(1920, 1080));
     for (const auto name : G::Resolutions) assert(G::ResolutionSize(name).first > 0);
+    // "display" and a render scale: run.py says the size the session renders at.
+    _putenv_s("GOW3_RENDER_SIZE", "");
+    assert(G::SessionRenderSize("1440p") == std::make_pair(2560, 1440));
+    assert(G::SessionRenderSize("display") == std::make_pair(1920, 1080));
+    _putenv_s("GOW3_RENDER_SIZE", "3440x1440");
+    assert(G::SessionRenderSize("display") == std::make_pair(3440, 1440));
+    assert(G::SessionRenderSize("1440p") == std::make_pair(3440, 1440));
+    _putenv_s("GOW3_RENDER_SIZE", "bogus");
+    assert(G::SessionRenderSize("1440p") == std::make_pair(2560, 1440));
+    _putenv_s("GOW3_RENDER_SIZE", "");
+    assert(std::string(G::ResolutionLabel("display")).rfind("Display", 0) == 0);
+    assert(G::ParseRenderScale(150) == 150 && G::ParseRenderScale(200) == 200 && G::ParseRenderScale(125) == 100);
     assert(G::ParseEngineFps(240) == 240 && G::ParseEngineFps(100) == 100 && G::ParseEngineFps(90) == 120);
     assert(G::ParseFramesQueued(2) == 2 && G::ParseFramesQueued(0) == 0 && G::ParseFramesQueued(5) == 1);
     assert(G::ParseRcasStrength(100) == 100 && G::ParseRcasStrength(101) == 75 && G::ParseRcasStrength(-1) == 75);

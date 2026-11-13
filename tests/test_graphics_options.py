@@ -28,6 +28,7 @@ class GraphicsOptionsTest(unittest.TestCase):
             options,
             {
                 'render_resolution': 'native',
+                'render_scale': '100',
                 'engine_fps': '120',
                 'deferred_readback': '1',
                 'stale_readback': '1',
@@ -164,15 +165,6 @@ class GraphicsOptionsTest(unittest.TestCase):
             ],
         )
 
-    def test_generated_sizes_are_labelled_beta(self):
-        self.assertEqual(g.resolution_label('2256x1504'), '2256 × 1504 · 3:2 (beta)')
-        self.assertEqual(g.resolution_label('1366x768'), '1366 × 768 · 16:9 (beta)')
-        self.assertEqual(g.resolution_label('1440p'), '1440p · 2560 × 1440 · 16:9')
-
-    def test_only_a_generated_size_reads_beta(self):
-        self.assertEqual(g.resolution_label('2880x1800', generated=False), '2880 × 1800 · 16:10')
-        self.assertEqual(g.resolution_label('3440x1440', generated=False), '3440 × 1440 · 21:9 (beta)')  # built in: unchanged
-
     def test_resolution_labels_show_the_size_and_aspect_ratio(self):
         self.assertEqual(g.resolution_label('native'), 'Native · 1920 × 1080 · 16:9')
         self.assertEqual(g.resolution_label('480p'), '480p · 854 × 480 · 16:9')
@@ -183,8 +175,8 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertEqual(g.resolution_label('1280x800'), '1280 × 800 · 16:10')  # the Steam Deck's screen, tested
         self.assertEqual(g.resolution_label('1280x960'), '1280 × 960 · 4:3')
         self.assertEqual(g.resolution_label('1920x1440'), '1920 × 1440 · 4:3 (beta)')
-        self.assertEqual(g.resolution_label('3840x1080', generated=False), '3840 × 1080 · 32:9')  # a mod's size, not beta
-        self.assertEqual(g.resolution_label('1600x1200', generated=False), '1600 × 1200 · 4:3')
+        self.assertEqual(g.resolution_label('3840x1080'), '3840 × 1080 · 32:9')  # a mod's size, not beta
+        self.assertEqual(g.resolution_label('1600x1200'), '1600 × 1200 · 4:3')
         self.assertEqual(g.resolution_label('custom'), 'custom')
         # Every ultrawide and 16:10 size is beta; the 16:9 ones are not.
         self.assertEqual([r for r in g.RESOLUTIONS if g.resolution_label(r).endswith('(beta)')],
@@ -327,35 +319,61 @@ class GraphicsOptionsTest(unittest.TestCase):
     def test_scaled_size_is_even(self):
         self.assertEqual(g.scaled_size((2560, 1440), 100), (2560, 1440))
         self.assertEqual(g.scaled_size((2560, 1440), 150), (3840, 2160))
-        self.assertEqual(g.scaled_size((2256, 1504), 125), (2820, 1880))
         self.assertEqual(g.scaled_size((2256, 1504), 150), (3384, 2256))
-        self.assertEqual(g.scaled_size((1366, 768), 125), (1708, 960))
         for size in ((2560, 1440), (2256, 1504), (1366, 768), (3440, 1440)):
             for percent in g.RENDER_SCALES:
                 width, height = g.scaled_size(size, percent)
                 self.assertEqual((width % 2, height % 2), (0, 0), (size, percent))
 
-    def test_render_scales_use_the_hand_made_size_when_there_is_one(self):
-        self.assertEqual(g.render_scales_for((2560, 1440)),
-                         [(100, '1440p'), (125, '1800p'), (150, '4K'), (200, '5120x2880')])
-        self.assertEqual(g.render_scales_for((2561, 1441)), g.render_scales_for((2560, 1440)))
+    def options(self, resolution, scale='100'):
+        return g.startup_options({'render_resolution': resolution, 'render_scale': scale}, ['display'])
 
-    def test_render_scales_stay_between_the_floor_and_the_cap(self):
-        self.assertEqual(g.render_scales_for((1280, 800)), [(150, '1920x1200'), (200, '2560x1600')])
-        self.assertEqual(g.render_scales_for((3840, 2160)),
-                         [(100, '4K'), (125, '4800x2700'), (150, '5760x3240'), (200, '7680x4320')])
-        self.assertEqual([p for p, _n in g.render_scales_for((5120, 2880))], [100, 125, 150])
-        self.assertEqual(g.render_scales_for((0, 0)), [])
-        self.assertEqual(g.MAX_GENERATED, (7680, 4320))
+    def test_display_renders_at_the_monitors_size(self):
+        self.assertEqual(g.render_size(self.options('display'), (3440, 1440)), (3440, 1440))
+        self.assertEqual(g.render_size(self.options('display'), (2561, 1441)), (2562, 1442))  # even
+        self.assertEqual(g.render_size(self.options('display'), (5160, 2160)), (5160, 2160))  # a DLDSR desktop
 
-    def test_render_scale_of_compares_by_size(self):
-        self.assertEqual(g.render_scale_of((2560, 1440), '4K'), 150)
-        self.assertEqual(g.render_scale_of((2560, 1440), '1440p'), 100)
-        self.assertEqual(g.render_scale_of((2560, 1440), '2560x1440'), 100)
-        self.assertEqual(g.render_scale_of((2560, 1440), '1800p'), 125)
-        self.assertIsNone(g.render_scale_of((2560, 1440), 'native'))
-        self.assertIsNone(g.render_scale_of((2560, 1440), None))
-        self.assertIsNone(g.render_scale_of((0, 0), '1440p'))
+    def test_display_never_goes_below_the_games_own_size(self):
+        self.assertEqual(g.render_size(self.options('display'), (1280, 800)), (1920, 1080))  # Steam Deck
+        self.assertEqual(g.render_size(self.options('display'), (1920, 1000)), (1920, 1080))
+        self.assertEqual(g.render_size(self.options('display'), None), (1920, 1080))  # unknown monitor
+
+    def test_a_named_size_at_100_percent_is_left_alone(self):
+        self.assertIsNone(g.render_size(self.options('1440p'), (3440, 1440)))
+        self.assertIsNone(g.render_size(self.options('native'), None))
+
+    def test_render_scale_multiplies_any_resolution(self):
+        self.assertEqual(g.render_size(self.options('display', '150'), (3440, 1440)), (5160, 2160))
+        self.assertEqual(g.render_size(self.options('display', '200'), (1920, 1080)), (3840, 2160))
+        self.assertEqual(g.render_size(self.options('1440p', '150'), None), (3840, 2160))
+        self.assertEqual(g.render_size(self.options('native', '200'), None), (3840, 2160))
+
+    def test_a_scale_past_the_cap_is_left_out(self):
+        self.assertEqual(g.render_size(self.options('display', '200'), (5120, 2880)), (5120, 2880))
+        self.assertEqual(g.render_size(self.options('display', '150'), (5120, 2880)), (7680, 4320))
+        self.assertEqual(g.render_size(self.options('display'), (10240, 4320)), (1920, 1080))
+
+    def test_render_scale_is_one_of_the_listed(self):
+        self.assertEqual(self.options('display', '125')['render_scale'], '100')
+        self.assertEqual(self.options('display', '')['render_scale'], '100')
+        self.assertEqual(g.startup_options({})['render_scale'], '100')
+
+    def test_display_needs_a_game_that_lists_it(self):
+        self.assertEqual(g.startup_options({'render_resolution': 'display'})['render_resolution'], 'native')
+        self.assertEqual(self.options('display')['render_resolution'], 'display')
+
+    def test_display_size_is_said_or_asked(self):
+        self.assertEqual(g.display_size({'GOW3_DISPLAY_SIZE': '3440x1440'}), (3440, 1440))
+        xrandr = ('Screen 0: minimum 320 x 200, current 6000 x 1440, maximum 16384 x 16384\n'
+                  'DP-1 connected 2560x1440+3440+0 (normal left inverted right x axis y axis) 597mm x 336mm\n'
+                  'DP-2 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 800mm x 335mm\n'
+                  'HDMI-1 disconnected (normal left inverted right x axis y axis)\n')
+        self.assertEqual(g.xrandr_primary_size(xrandr), (3440, 1440))
+        self.assertEqual(g.xrandr_primary_size(xrandr.replace(' primary', '')), (2560, 1440))
+        self.assertIsNone(g.xrandr_primary_size(''))
+
+    def test_display_has_a_label(self):
+        self.assertTrue(g.resolution_label('display').startswith('Display'))
 
 
 class WindowSizeTest(unittest.TestCase):

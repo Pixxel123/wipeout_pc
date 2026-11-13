@@ -117,6 +117,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.frames_queued = Gow3Graphics::ParseFramesQueued(value.empty() ? -1 : i);
     } else if (key == "render_resolution") {
         v.render_resolution = Gow3Graphics::ParseResolution(value);
+    } else if (key == "render_scale") {
+        v.render_scale = Gow3Graphics::ParseRenderScale(i);
     } else if (key == "engine_fps") {
         v.engine_fps = Gow3Graphics::ParseEngineFps(i);
     } else if (key == "deferred_readback") {
@@ -236,7 +238,7 @@ void Load() {
     v.startup_live_resolution = v.live_resolution;
     v.startup_render_resolution = v.render_resolution;
     const auto names = Gow3Graphics::ResolutionNames();
-    const auto [render_width, render_height] = Gow3Graphics::ResolutionSize(
+    const auto [render_width, render_height] = Gow3Graphics::SessionRenderSize(
         names[std::clamp(v.render_resolution.load(), 0, int(names.size()) - 1)]);
     // A title's own render size (WipEout: its profile sets 1920x1080): below it the game keeps that buffer.
     Vulkan::SceneResolution::Size floor{0, 0};
@@ -364,13 +366,13 @@ void Save() {
     std::fprintf(file,
                  "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
                  "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
-                 "render_resolution=%s\nengine_fps=%d\ndeferred_readback=%d\nstale_readback=%d\n"
+                 "render_resolution=%s\nrender_scale=%d\nengine_fps=%d\ndeferred_readback=%d\nstale_readback=%d\n"
                  "restart_unconfirmed=%d\n",
                  Gow3Graphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)].data(),
                  int(v.vsync.load()), v.fps_limit.load(), int(v.async_shaders.load()),
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
                  resolution_names[std::clamp(v.render_resolution.load(), 0, int(resolution_names.size()) - 1)].c_str(),
-                 v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
+                 v.render_scale.load(), v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
     std::fprintf(file, "anisotropy=%d\nvibration=%d\nmouse_prompt_distance=%d\nmouse_lock=%d\nmouse_aim_style=%d\n"
                        "mouse_aim_sensitivity=%d\nmusic=%d\nmusic_shuffle=%d\nmusic_volume=%d\n"

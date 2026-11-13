@@ -107,6 +107,9 @@ struct Values {
     std::atomic<bool> hide_hud{false};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
+    /// Percent of the render resolution the game renders at (run.py applies it at start); kept here so
+    /// saving the settings does not drop it.
+    std::atomic<int> render_scale{100};
     std::atomic<int> engine_fps{120};
     std::atomic<bool> deferred_readback{true};
     std::atomic<bool> stale_readback{true};

@@ -9,8 +9,11 @@ never did, the next start goes back to the last confirmed values.
 """
 import json
 import math
+import os
 import re
 import struct
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -27,13 +30,13 @@ SIZES = {'native': (1920, 1080), '480p': (854, 480), '720p': (1280, 720), '900p'
          '1440p': (2560, 1440), '1800p': (3200, 1800), '4K': (3840, 2160)}
 ASPECTS = (('16:9', 16 / 9), ('16:10', 16 / 10), ('21:9', 2.37), ('32:9', 32 / 9), ('4:3', 4 / 3))
 ENGINE_FPS = (60, 100, 120, 240)
-DEFAULTS = {'render_resolution': 'native', 'engine_fps': '120', 'deferred_readback': '1',
+DEFAULTS = {'render_resolution': 'native', 'render_scale': '100', 'engine_fps': '120', 'deferred_readback': '1',
             'stale_readback': '1', 'async_shaders': '1'}
 RESOLUTION_PREFIX = 'Resolution Patch'
 # The games the generated resolution patches apply to (WipEout Omega Collection).
 GENERATED_TITLES = ('CUSA07671', 'CUSA05670')
 MIN_GENERATED = (1920, 1080)  # measured: below the game's own size the buffer stays 1920x1080 while the camera changes
-MAX_GENERATED = (7680, 4320)  # 8K: sizes above 3840x2160 are untested, and the memory line adds a fixed 1 GB
+MAX_GENERATED = (7680, 4320)  # 8K, the largest hand-made size; generated sizes above 3840x2160 are untested
 FPS_PREFIX = 'Frame Rate Patch'
 TEXTURE_FIX = 'Bug Fix - Texture Corruption Fix'
 
@@ -129,19 +132,19 @@ def closest_resolution(aspect, current, names):
     return min(chosen, key=lambda n: abs(resolution_size(n)[0] * resolution_size(n)[1] - size[0] * size[1]))
 
 
-def resolution_label(name, aspect=True, generated=True):
+def resolution_label(name, aspect=True):
     """What the lists show for a render resolution: '1440p · 2560 × 1440 · 16:9', '3440 × 1440 · 21:9 (beta)'.
     `name` is a built-in name or a mod's "<width>x<height>"; anything else is shown as it is. Without
-    `aspect` the ratio is left out (the launcher's list beside the Aspect ratio filter). `generated=False`:
-    a patch provides the size (a mod's, a game's own), so being outside the built-in list is not beta."""
+    `aspect` the ratio is left out (the launcher's list beside the Aspect ratio filter)."""
+    if name == DISPLAY:
+        return "Display · this monitor's size"
     size = resolution_size(name)
     if not size:
         return name
     width, height = size
     title = 'Native' if name == 'native' else name if name in SIZES else None
     label = ' · '.join(p for p in (title, f'{width} × {height}', aspect and aspect_name(width, height)) if p)
-    beta = name in BETA_RESOLUTIONS or (generated and name not in RESOLUTIONS and name not in TESTED_RESOLUTIONS)
-    return label + (' (beta)' if beta else '')
+    return label + (' (beta)' if name in BETA_RESOLUTIONS else '')
 
 
 def startup_options(ini, extra=()):
@@ -150,6 +153,8 @@ def startup_options(ini, extra=()):
     options = {key: ini.get(key, value) for key, value in DEFAULTS.items()}
     if options['render_resolution'] not in resolutions(extra):
         options['render_resolution'] = 'native'
+    if options['render_scale'] not in tuple(str(p) for p in RENDER_SCALES):
+        options['render_scale'] = '100'
     if options['engine_fps'] not in {str(f) for f in ENGINE_FPS}:
         options['engine_fps'] = '120'
     for key in ('deferred_readback', 'stale_readback', 'async_shaders'):
@@ -366,7 +371,9 @@ def generated_resolution(value, known):
     return size
 
 
-RENDER_SCALES = (100, 125, 150, 200)  # of the monitor's size; above 100 % the game renders more pixels than it shows
+DISPLAY = 'display'  # render_resolution: the monitor's size, read again at every start
+RENDER_SCALES = (100, 150, 200)  # render_scale, percent of the render resolution: above 100 % is supersampling
+DISPLAY_SIZE_ENV = 'GOW3_DISPLAY_SIZE'  # "<width>x<height>": says what the monitor's size is, instead of asking
 
 
 def size_name(width, height):
@@ -380,25 +387,45 @@ def scaled_size(size, percent):
     return tuple(int(side * percent / 100 / 2 + 0.5) * 2 for side in size)
 
 
-def render_scales_for(size):
-    """[(percent, name)] of RENDER_SCALES whose result is between MIN_GENERATED and MAX_GENERATED, for a
-    monitor of `size` (rounded down to even); [] when the monitor is unknown (0, 0)."""
-    if not all(size):
-        return []
-    size = (int(size[0]) & ~1, int(size[1]) & ~1)
-    scales = []
-    for percent in RENDER_SCALES:
-        width, height = scaled_size(size, percent)
-        if MIN_GENERATED[0] <= width <= MAX_GENERATED[0] and MIN_GENERATED[1] <= height <= MAX_GENERATED[1]:
-            scales.append((percent, size_name(width, height)))
-    return scales
+def display_size(env=None):
+    """(width, height) in pixels of the primary monitor's desktop, the one the game window opens on, or
+    None when it cannot be told. GOW3_DISPLAY_SIZE says it instead. A DSR or DLDSR desktop is its larger size."""
+    env = os.environ if env is None else env
+    said = _SIZE_NAME.fullmatch(env.get(DISPLAY_SIZE_ENV, ''))
+    if said:
+        return int(said.group(1)), int(said.group(2))
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()  # pixels, not the scaled size
+            size = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
+            return size if all(size) else None
+        host = {k: v for k, v in env.items() if k not in ('LD_LIBRARY_PATH', 'PYTHONHOME', 'PYTHONPATH')}
+        text = subprocess.run(['xrandr', '--current'], capture_output=True, text=True, timeout=3, env=host).stdout
+    except (OSError, AttributeError, subprocess.SubprocessError):
+        return None
+    return xrandr_primary_size(text)
 
 
-def render_scale_of(size, value):
-    """The percent of the monitor `size` that the render resolution `value` is, or None when it is none of
-    RENDER_SCALES. Compared by size, so '4K' is 150 % of 2560x1440 and '2560x1440' is 100 % like '1440p'."""
-    target = resolution_size(value) if value else None
-    return next((p for p, name in render_scales_for(size) if target and resolution_size(name) == target), None)
+def xrandr_primary_size(text):
+    """The primary monitor's size in `xrandr --current` output (the first connected one when none is
+    primary), or None."""
+    found = (re.search(r' connected primary (\d+)x(\d+)\+', text)
+             or re.search(r' connected (\d+)x(\d+)\+', text))
+    return (int(found.group(1)), int(found.group(2))) if found else None
+
+
+def render_size(options, display):
+    """(width, height) the game renders at when the options ask for the monitor's size or a render scale,
+    else None (the render resolution as it is named). An unknown monitor, or one smaller than the game's
+    own size, renders at the game's own size; a scale that passes MAX_GENERATED is left out."""
+    name, scale = options['render_resolution'], int(options['render_scale'])
+    if name != DISPLAY and scale == 100:
+        return None
+    base = (display if name == DISPLAY else resolution_size(name)) or SIZES['native']
+    fits = lambda size: size[0] <= MAX_GENERATED[0] and size[1] <= MAX_GENERATED[1]
+    size = next((s for s in (scaled_size(base, scale), scaled_size(base, 100)) if fits(s)), SIZES['native'])
+    return SIZES['native'] if size[0] < MIN_GENERATED[0] or size[1] < MIN_GENERATED[1] else size
 
 
 def resolution_patch_xml(width, height, out, name=None):

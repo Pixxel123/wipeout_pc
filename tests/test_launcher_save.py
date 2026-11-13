@@ -35,13 +35,6 @@ class LauncherOverTemporaryFiles(unittest.TestCase):
         os.environ['GOW3_CONFIG'] = str(self.tmp / 'gow3.ini')
         if self.INI:
             (self.tmp / 'gow3.ini').write_text(self.INI, encoding='utf-8')
-        # A new gow3.ini starts at the monitor's size: unknown here, so tests see native on any desktop.
-        screen = mock.patch.object(launcher, 'monitor_size', return_value=(0, 0))
-        screen.start()
-        self.addCleanup(screen.stop)
-        modes = mock.patch.object(launcher, 'display_modes', return_value=[])
-        modes.start()
-        self.addCleanup(modes.stop)
         self.root = tk.Tk()
         self.app = launcher.Launcher(self.root, tk, ttk, filedialog, messagebox)
         self.root.update()

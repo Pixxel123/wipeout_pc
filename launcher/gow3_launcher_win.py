@@ -233,19 +233,13 @@ FONT_LOADED = False  # set by main() for the window; the command-line roles neve
 WARN = '  ⚠'  # marks a risky choice; the text before it is translated as usual
 
 
-def xrandr_query():
-    """The text of `xrandr --query`, '' when xrandr is missing or hangs (then no monitor is known)."""
+def monitor_under_pointer(root):
+    """(x, y, width, height) of the monitor holding the mouse pointer, from xrandr; zeros if unknown."""
     try:
-        return subprocess.run(['xrandr', '--query'], capture_output=True, text=True, timeout=3,
+        text = subprocess.run(['xrandr', '--query'], capture_output=True, text=True, timeout=3,
                               env=host_environment()).stdout
     except (OSError, subprocess.SubprocessError):
-        return ''
-
-
-def monitor_under_pointer(root, text=None):
-    """(x, y, width, height) of the monitor holding the mouse pointer, from xrandr (`text`, or a query
-    when None); zeros if unknown."""
-    text = xrandr_query() if text is None else text
+        return 0, 0, 0, 0
     pointer_x, pointer_y = root.winfo_pointerxy()
     monitors = [(x, y, width, height) for width, height, x, y in
                 (tuple(map(int, match.groups())) for match in
@@ -254,208 +248,6 @@ def monitor_under_pointer(root, text=None):
         if x <= pointer_x < x + width and y <= pointer_y < y + height:
             return x, y, width, height
     return monitors[0] if monitors else (0, 0, 0, 0)
-
-
-def xrandr_modes(text, monitor):
-    """[(width, height)] the monitor at `monitor` (x, y, width, height, as monitor_under_pointer gives it)
-    can show, from `xrandr --query`, largest first, without duplicates or interlaced modes. A rotated output
-    (the Steam Deck's panel is 800x1280 turned right) lists its modes portrait; they are swapped to match the
-    geometry. [] when the monitor's block is not in the text."""
-    x, y, width, height = monitor
-    if not (width and height):
-        return []
-    block = re.search(r'^\S+ connected (?:primary )?%dx%d\+%d\+%d(?: (normal|left|right|inverted))?[^\n]*(?:\n|$)'
-                      r'((?:[ \t]+\S[^\n]*(?:\n|$))*)' % (width, height, x, y), text, re.M)
-    if not block:
-        return []
-    swap = block.group(1) in ('left', 'right')
-    modes = []
-    for match in re.finditer(r'^[ \t]+(\d+)x(\d+)\s', block.group(2), re.M):
-        w, h = map(int, match.groups())
-        if swap:
-            w, h = h, w
-        if (w, h) not in modes:
-            modes.append((w, h))
-    return sorted(modes, key=lambda m: (-m[0], -m[1]))
-
-
-def windows_modes(mode_at=None):
-    """[(width, height)] the primary display can show, from EnumDisplaySettingsW, largest first, without
-    duplicates (refresh rates and colour depths). `mode_at(index)` returns (width, height) or None past the
-    last mode; the default asks Windows. [] off Windows."""
-    if mode_at is None:
-        if not WINDOWS:
-            return []
-
-        class DEVMODEW(ctypes.Structure):
-            _fields_ = [('dmDeviceName', ctypes.c_wchar * 32), ('dmSpecVersion', ctypes.c_ushort),
-                        ('dmDriverVersion', ctypes.c_ushort), ('dmSize', ctypes.c_ushort),
-                        ('dmDriverExtra', ctypes.c_ushort), ('dmFields', ctypes.c_ulong),
-                        ('dmPositionX', ctypes.c_long), ('dmPositionY', ctypes.c_long),
-                        ('dmDisplayOrientation', ctypes.c_ulong), ('dmDisplayFixedOutput', ctypes.c_ulong),
-                        ('dmColor', ctypes.c_short), ('dmDuplex', ctypes.c_short),
-                        ('dmYResolution', ctypes.c_short), ('dmTTOption', ctypes.c_short),
-                        ('dmCollate', ctypes.c_short), ('dmFormName', ctypes.c_wchar * 32),
-                        ('dmLogPixels', ctypes.c_ushort), ('dmBitsPerPel', ctypes.c_ulong),
-                        ('dmPelsWidth', ctypes.c_ulong), ('dmPelsHeight', ctypes.c_ulong),
-                        ('dmDisplayFlags', ctypes.c_ulong), ('dmDisplayFrequency', ctypes.c_ulong),
-                        ('dmICMMethod', ctypes.c_ulong), ('dmICMIntent', ctypes.c_ulong),
-                        ('dmMediaType', ctypes.c_ulong), ('dmDitherType', ctypes.c_ulong),
-                        ('dmReserved1', ctypes.c_ulong), ('dmReserved2', ctypes.c_ulong),
-                        ('dmPanningWidth', ctypes.c_ulong), ('dmPanningHeight', ctypes.c_ulong)]
-        user32 = ctypes.windll.user32
-
-        def mode_at(index):
-            mode = DEVMODEW()
-            mode.dmSize = ctypes.sizeof(DEVMODEW)
-            if not user32.EnumDisplaySettingsW(None, index, ctypes.byref(mode)):
-                return None
-            return int(mode.dmPelsWidth), int(mode.dmPelsHeight)
-    modes = []
-    index = 0
-    while index < 4096:
-        mode = mode_at(index)
-        if mode is None:
-            break
-        if tuple(mode) not in modes:
-            modes.append(tuple(mode))
-        index += 1
-    return sorted(modes, key=lambda m: (-m[0], -m[1]))
-
-
-def display_modes(root, monitor, xrandr):
-    """The monitor's display modes for the Render resolution list: xrandr's on X11 (`xrandr` is the query's
-    text, read once), the primary display's on Windows, [] elsewhere or when unknown (the list then falls
-    back to the sizes that fit the monitor)."""
-    try:
-        system = root.tk.call('tk', 'windowingsystem')
-        if system == 'x11':
-            return xrandr_modes(xrandr, monitor)
-        if system == 'win32':
-            return windows_modes()
-    except Exception:
-        pass
-    return []
-
-
-MIN_SCREEN = graphics_options.MIN_GENERATED  # smaller monitors get no row of their own: see MIN_GENERATED
-
-
-def monitor_size(root, monitor):
-    """(width, height) of the monitor the launcher is on, in pixels; (0, 0) if unknown. `monitor` is
-    monitor_under_pointer's answer (X11 only), so xrandr runs once. On X11 the screen spans every monitor,
-    so without that answer the size is unknown, not the screen's."""
-    try:
-        if root.tk.call('tk', 'windowingsystem') == 'x11':
-            _x, _y, width, height = monitor
-            return (width, height) if width and height else (0, 0)
-        return root.winfo_screenwidth(), root.winfo_screenheight()
-    except Exception:
-        return 0, 0
-
-
-def your_screen_choice(size):
-    """(value, (label,)) of the monitor's size as a render resolution: a hand-made size by its name,
-    any other even size as "<width>x<height>" (generated at start); None below MIN_SCREEN or above
-    MAX_GENERATED."""
-    width, height = int(size[0]) & ~1, int(size[1]) & ~1
-    if width < MIN_SCREEN[0] or height < MIN_SCREEN[1]:
-        return None
-    if width > graphics_options.MAX_GENERATED[0] or height > graphics_options.MAX_GENERATED[1]:
-        return None
-    name = graphics_options.size_name(width, height)
-    return name, (f"{width} × {height} ({_('Native', 'Родное')})" + untested_mark(name),)
-
-
-UNTESTED_ABOVE = (3840, 2160)  # generated or scaled sizes larger than this on either side are untested
-
-
-def untested_mark(name):
-    """WARN for a render resolution above UNTESTED_ABOVE on either side, else ''."""
-    size = graphics_options.resolution_size(name)
-    return WARN if size and (size[0] > UNTESTED_ABOVE[0] or size[1] > UNTESTED_ABOVE[1]) else ''
-
-
-def plain_size_label(name):
-    """A render resolution as a PC game lists it: '2560 × 1440' (marked above UNTESTED_ABOVE); anything
-    without a size as it is."""
-    size = graphics_options.resolution_size(name)
-    return f'{size[0]} × {size[1]}' + untested_mark(name) if size else name
-
-
-def resolution_choices_for(names, size, saved=None, mods=(), modes=(), keep=()):
-    """The Render resolution list, plain sizes like a PC game's: the monitor's row first, then, largest
-    first, the sizes that take effect. With the monitor's `modes` known the list is those modes plus the
-    `names` that fit inside one of its modes; without them, `names` (hand-made and profile sizes) that fit
-    the monitor. Below MIN_GENERATED a size is inert (the game keeps 1920x1080, and the session runs at that size). The
-    game's own size, the saved size and the `keep` sizes (the one the launcher opened with) are never
-    dropped, whatever their size, with or without the modes. `mods`: the sizes the enabled mods list
-    themselves, which need no saved row."""
-    kept = list(dict.fromkeys(n for n in (saved, *keep) if n))  # at open the live and opened-with sizes are one
-    screen = your_screen_choice(size)
-    choices = [screen] if screen else []
-    floor = graphics_options.MIN_GENERATED
-    ceiling = graphics_options.MAX_GENERATED
-    modes = [(w, h) for w, h in modes if not (w % 2 or h % 2) and w <= ceiling[0] and h <= ceiling[1]]
-    if modes:
-        # The monitor's modes, and the hand-made sizes that fit inside one of them: a panel with a single
-        # mode (a laptop's, a gamescope session's) keeps the lower sizes a PC game would list.
-        bounds = modes
-        mode_names = [graphics_options.size_name(w, h) for w, h in modes]
-        names = ['native', *mode_names, *names]
-    else:
-        limit = screen and graphics_options.resolution_size(screen[0])
-        bounds = [limit] if limit else []
-    # Kept sizes stay (a mod lists its own); each name once.
-    names = list(dict.fromkeys([*names, *(n for n in kept if n not in mods)]))
-
-    def listed(name):
-        row = graphics_options.resolution_size(name)
-        if not row or name == 'native' or name in kept:
-            return True
-        if row[0] < floor[0] or row[1] < floor[1]:
-            return False
-        return not bounds or any(row[0] <= w and row[1] <= h for w, h in bounds)
-
-    def largest_first(choice):
-        row = graphics_options.resolution_size(choice[0])
-        return (0, -row[0], -row[1]) if row else (1, 0, 0)
-    choices += [(n, (plain_size_label(n),)) for n in names if (not screen or n != screen[0]) and listed(n)]
-    head = 1 if screen else 0
-    return choices[:head] + sorted(choices[head:], key=largest_first)
-
-
-def stale_render_resolution(options, size, deck):
-    """What a saved render resolution that is not in `options` becomes. The first row is right only when
-    it is the monitor's and this is no Deck: a docked Deck must not land on its monitor's size, and
-    without a monitor's row the first row is simply the largest size."""
-    values = [v for v, _t in options]
-    return 'native' if (deck or not your_screen_choice(size)) and 'native' in values else values[0]
-
-
-def default_render_resolution(ini, size):
-    """A fresh gow3.ini starts at the monitor's size, or at half of it per side when the monitor has more
-    pixels than UNTESTED_ABOVE (an integer scale of a size known to load); a saved value is never overridden."""
-    if ini.get('render_resolution'):
-        return ini['render_resolution']
-    screen = your_screen_choice(size)
-    if not screen:
-        return 'native'
-    width, height = graphics_options.resolution_size(screen[0])
-    if width * height > UNTESTED_ABOVE[0] * UNTESTED_ABOVE[1]:
-        half = your_screen_choice((width // 2, height // 2))
-        return half[0] if half else 'native'
-    return screen[0]
-
-
-def fresh_render_resolution(lines, size, offered, deck=False):
-    """What a new gow3.ini (no file, or one without lines) is given, None to leave it alone: a file
-    that has other keys is an existing install, and native is what the file's absence means. A Deck
-    keeps native and its tuned output default, docked or not."""
-    if lines or not offered or deck:
-        return None
-    value = default_render_resolution({}, size)
-    return None if value == 'native' else value
 
 
 def pick_fonts(families):
@@ -989,9 +781,8 @@ PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('B
 # resolution per axis, scaled up by FSR 3.1 or DLSS; the HUD stays at full size.
 UPSCALE_PRESETS = [('0', ('Off (full resolution)',)), ('1', ('Quality (scene at 1/1.5)',)),
                    ('2', ('Balanced (scene at 1/1.7)',)), ('3', ('Performance (scene at 1/2)',))]
-OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)),
-           ('1920x1080', ('1920 × 1080',)), ('2560x1440', ('2560 × 1440',)),
-           ('3840x2160', ('3840 × 2160 (4K)',))]
+OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
+           ('2560x1440', ('2560 × 1440',)), ('3840x2160', ('3840 × 2160 (4K)',))]
 LIVE = [('auto', ('Auto (by graphics card)', 'Авто (по видеокарте)')), ('0', ('Off (faster)', 'Выключена (быстрее)')),
         ('1', ('On (change without restarting)', 'Включена (без перезапуска)'))]
 # (PS4 system language ID, name, regions): the game's own table (eboot.bin 0x9B89A0) only takes a
@@ -1118,8 +909,6 @@ def load_ini():
     for line in lines:
         if '=' in line and not line.lstrip().startswith('#'):
             key, value = line.split('=', 1)
-            if key.strip() == 'output_res' and value.strip() == 'native':
-                continue  # a dropped choice: the default of a file without the key
             values[key.strip()] = value.strip()
     return values, lines
 
@@ -1716,12 +1505,8 @@ class Launcher:
         root.configure(bg=BG)
         self.fonts = {}
         self.desktop_scale = desktop_ui_scale(root)
-        x11 = root.tk.call('tk', 'windowingsystem') == 'x11'
-        xrandr = xrandr_query() if x11 else ''
-        self.monitor = monitor_under_pointer(root, xrandr) if x11 else (0, 0, 0, 0)
-        self.screen_size = monitor_size(root, self.monitor)
-        self.display_modes = display_modes(root, self.monitor, xrandr)
-        self.write_fresh_render_resolution()
+        self.monitor = (monitor_under_pointer(root) if root.tk.call('tk', 'windowingsystem') == 'x11'
+                        else (0, 0, 0, 0))
         self.apply_ui_scale()
         self.size_window()
         self.set_icon()
@@ -1908,10 +1693,9 @@ class Launcher:
             self.vars[key] = v
         return self.vars[key]
 
-    def choice(self, parent, key, store, options, width=30, var=None, stale=None):
+    def choice(self, parent, key, store, options, width=30, var=None):
         """A combobox over (value, (english, russian)) pairs, kept in sync with its variable.
-        `options` can be a function returning the pairs: it is asked again each time the list opens.
-        `stale(pairs)`: the value a variable that is not on the list becomes (default: the first row)."""
+        `options` can be a function returning the pairs: it is asked again each time the list opens."""
         var = var if var is not None else self.var(key, store)
         pairs = options if callable(options) else (lambda: options)
 
@@ -1931,7 +1715,7 @@ class Launcher:
         texts = labels()
         box = self.ttk.Combobox(parent, values=texts, state='readonly', width=fit(texts), postcommand=reload)
         if var.get() not in values():
-            var.set(stale(pairs()) if stale else values()[0])
+            var.set(values()[0])
 
         def show(*_args):
             reload()  # the list may have changed since it was last opened
@@ -1953,44 +1737,12 @@ class Launcher:
         names = ([n for n in self.mod_order if self.mod_vars.get(n) is None or self.mod_vars[n].get()]
                  if getattr(self, 'mod_vars', None) else selected(root, DATA_DIR / 'mods.json', self.var('game_dir', 'app').get()))
         files = [f for n in names for f in patch_files(root / n)]
-        return [(size, (graphics_options.resolution_label(size, generated=False) + ' (mod)',)) for size in resolution_names(files)
+        return [(size, (graphics_options.resolution_label(size) + ' (mod)',)) for size in resolution_names(files)
                 if size not in graphics_options.RESOLUTIONS]
 
     def resolution_options(self):
-        """The render resolutions to choose from: the built-in ones and those of the enabled mods,
-        for WipEout after the monitor's row."""
-        if not self.offers_your_screen():
-            return RESOLUTION_CHOICES + self.mod_resolutions()
-        mods = self.mod_resolutions()
-        return resolution_choices_for([v for v, _t in RESOLUTION_CHOICES], self.screen_size,
-                                      saved=self.current_render_resolution(), mods=[v for v, _t in mods],
-                                      modes=self.display_modes, keep=(self.ini.get('render_resolution'),)) + mods
-
-    def current_render_resolution(self):
-        """The render resolution as shown now: the live variable once it exists (the Render scale row
-        sets it), else the value the launcher opened with."""
-        return self.vars['render_resolution'].get() if 'render_resolution' in self.vars else self.ini.get('render_resolution')
-
-    def offers_your_screen(self):
-        """Whether the monitor's row is on the lists: it may need a generated patch, and only WipEout's binary
-        has the sites for one. With no game chosen, or no readable title id, it is: this launcher ships for WipEout."""
-        from patches import game_title_id
-        folder = self.vars['game_dir'].get() if 'game_dir' in self.vars else self.app.get('game_dir')
-        title_id = game_title_id(folder) if folder else None
-        return not title_id or title_id in graphics_options.GENERATED_TITLES
-
-    def write_fresh_render_resolution(self):
-        """A new gow3.ini starts at the monitor's size. Written here, before any variable shows it:
-        run.py reads the file, and Save skips a value that matches what the launcher opened with."""
-        value = fresh_render_resolution(self.ini_lines, self.screen_size, self.offers_your_screen(), deck=steam_deck())
-        if not value:
-            return
-        self.ini['render_resolution'] = value
-        try:
-            save_ini({'render_resolution': value}, self.ini_lines)
-            self.ini_lines = load_ini()[1]
-        except OSError:
-            pass  # a read-only folder: the window still shows it, and Save reports the problem
+        """The render resolutions to choose from: the built-in ones and those of the enabled mods."""
+        return RESOLUTION_CHOICES + self.mod_resolutions()
 
     def aspect_var(self):
         """The Aspect ratio filter (Home and Performance): not saved, it follows the render resolution;
@@ -2013,64 +1765,20 @@ class Launcher:
             resolution.trace_add('write', resolution_chosen)
         return self.aspect
 
-    def render_scale_var(self):
-        """The Render scale row (not saved): the render resolution as a percentage of the monitor's size.
-        It follows the render resolution ('custom' when the size is none of RENDER_SCALES), and choosing a
-        percentage sets the render resolution to that size, by its built-in name when it has one, else as a
-        size generated at start."""
-        if getattr(self, 'render_scale', None) is None:
-            resolution = self.var('render_resolution', 'ini')
-
-            def current():
-                return str(graphics_options.render_scale_of(self.screen_size, resolution.get()) or 'custom')
-            self.render_scale = self.tk.StringVar(value=current())
-
-            def scale_chosen(*_a):
-                if not self.offers_your_screen():
-                    return  # the folder was switched to another game: its sizes are not generated
-                percent = self.render_scale.get()
-                name = dict(graphics_options.render_scales_for(self.screen_size)).get(int(percent)) if percent.isdigit() else None
-                if name and name != resolution.get():
-                    resolution.set(name)
-
-            def resolution_chosen(*_a):
-                if current() != self.render_scale.get():
-                    self.render_scale.set(current())
-            self.render_scale.trace_add('write', scale_chosen)
-            resolution.trace_add('write', resolution_chosen)
-        return self.render_scale
-
-    def render_scale_options(self):
-        """The Render scale rows: each percentage with the size it means, and Custom while the render
-        resolution is none of them."""
-        rows = []
-        for percent, name in graphics_options.render_scales_for(self.screen_size):
-            width, height = graphics_options.resolution_size(name)
-            rows.append((str(percent), (f'{percent} % · {width} × {height}' + untested_mark(name),)))
-        if self.render_scale_var().get() == 'custom':
-            rows.append(('custom', ('Custom', 'Другое')))  # choice() translates option pairs itself
-        return rows
-
     def game_resolution_options(self):
         """The render resolutions with a patch for the chosen game (its profile's
-        GOW3_ALLOWED_RESOLUTIONS), else all built-in ones; for WipEout after the monitor's row."""
+        GOW3_ALLOWED_RESOLUTIONS), else all built-in ones."""
         import game_profiles
         from patches import game_title_id
         folder = self.var('game_dir', 'app').get()
         title_id = game_title_id(folder) if folder else None
         allowed = game_profiles.PROFILES.get(title_id, {}).get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS')
-        if allowed:
-            names = allowed.split(';')
-            choices = [(n, t) for n, t in RESOLUTION_CHOICES if n in names] + \
-                [(n, (graphics_options.resolution_label(n, generated=False),)) for n in names
-                 if n not in dict(RESOLUTION_CHOICES)]
-        else:
-            choices = RESOLUTION_CHOICES
-        if not self.offers_your_screen():
-            return choices
-        return resolution_choices_for([v for v, _t in choices], self.screen_size,
-                                      saved=self.current_render_resolution(), modes=self.display_modes,
-                                      keep=(self.ini.get('render_resolution'),))
+        if not allowed:
+            return RESOLUTION_CHOICES
+        names = allowed.split(';')
+        return [(n, t) for n, t in RESOLUTION_CHOICES if n in names] + \
+            [(n, (graphics_options.resolution_label(n),)) for n in names
+             if n not in dict(RESOLUTION_CHOICES)]
 
     def aspect_options(self):
         """The aspect ratios the render resolutions have (built-in and mods)."""
@@ -2082,8 +1790,7 @@ class Launcher:
         options = dict(self.resolution_options())
         names = graphics_options.resolutions_for(self.aspect_var().get(), list(options))
         mod = ' (mod)'
-        return [(n, (graphics_options.resolution_label(n, aspect=False, generated=not options[n][0].endswith(mod))
-                     + (mod if options[n][0].endswith(mod) else ''),))
+        return [(n, (graphics_options.resolution_label(n, aspect=False) + (mod if options[n][0].endswith(mod) else ''),))
                 for n in names]
 
     def next_row(self, parent):
@@ -2415,21 +2122,12 @@ class Launcher:
         f = self.scrolled_page('graphics', _('Graphics', 'Графика'), _('How the game appears on your screen.'))
         self.build_display(f)
         self.section(f, _('Resolution'))
-        stale = ((lambda options: stale_render_resolution(options, self.screen_size, steam_deck()))
-                 if self.offers_your_screen() else None)
-        # The list is a function: read again on every change, it keeps the size the Render scale row sets.
-        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options, stale=stale),
-                 _('Native is the size of this monitor when it is 1920 × 1080 or larger. Sizes without a patch are '
-                   'generated at start. Wider than 16:9 keeps the HUD at 16:9.')
-                 if self.offers_your_screen() else
+        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options()),
                  _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
-        if self.offers_your_screen() and graphics_options.render_scales_for(self.screen_size):
-            self.row(f, _('Render scale', 'Масштаб рендеринга'),
-                     self.choice(f, 'render_scale', None, self.render_scale_options, var=self.render_scale_var()),
-                     _('Renders at this share of this monitor\'s current size and shows it at the monitor\'s size. Above '
-                       '100 % is supersampling: sharper, slower. Generated or scaled sizes above 3840 × 2160 are untested.'),
-                     restart=True)
+        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
+                 _('Above 1920x1080 it works like 1920x1080; Render resolution sets how sharp the race is.',
+                   'Выше 1920x1080 работает как 1920x1080; чёткость гонки задаёт разрешение рендера.'), restart=True)
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
                    'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)
@@ -3295,12 +2993,6 @@ class Launcher:
         ttk.Label(holder, text=f'v{VERSION}', style='Muted.TLabel').pack(side='left', padx=self.px(10))
         if not WINDOWS:
             self.build_linux_options(f)
-        self.section(f, _('Rendering', 'Рендеринг'))
-        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('For the native 1920 × 1080 render resolution; above 1920 × 1080 it works like 1920 × 1080. '
-                   'Other render resolutions output at their own size.',
-                   'Для родного разрешения 1920 × 1080; выше 1920 × 1080 работает как 1920 × 1080. '
-                   'Другие разрешения выводятся в своём размере.'), restart=True)
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((6, 0)))
@@ -4428,8 +4120,7 @@ def write_deck_defaults():
     if not steam_deck():
         return
     values, lines = load_ini()
-    keys = {line.split('=', 1)[0].strip() for line in lines if '=' in line and not line.lstrip().startswith('#')
-            and line.replace(' ', '').strip() != 'output_res=native'}
+    keys = {line.split('=', 1)[0].strip() for line in lines if '=' in line and not line.lstrip().startswith('#')}
     if 'output_res' not in keys:
         save_ini({'output_res': values['output_res']}, lines)
 

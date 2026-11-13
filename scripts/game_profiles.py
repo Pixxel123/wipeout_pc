@@ -18,6 +18,7 @@ PROFILES = {
     # the frame limit turns on immediate flips, which flip above the vblank rate on demand.
     # GOW3_ALLOWED_RESOLUTIONS: only these built-in sizes have a resolution patch in
     # patches/WipEout_Omega_Collection.xml; the other built-ins are hidden from the in-game menu.
+    # "display" is the monitor's size, worked out at every start (run.py session_render_size).
     # GOW3_HUD_16X9: on a render resolution wider than 16:9 the HUD stays 16:9 in the middle
     # (the HUD is laid out for 1920x1080; vk_rasterizer.cpp PrepareRenderState).
     # GOW3_GAME_MOTION / GOW3_UPSCALE_BEFORE_PS (temporal upscalers, still behind the experimental
@@ -31,7 +32,7 @@ PROFILES = {
     'CUSA07671': {'name': 'WipEout Omega Collection',
                   'modules': ('libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx'),
                   'env': {'GOW3_RED_ZONE': '1', 'GOW3_ENGINE_FPS': '240', 'GOW3_HUD_16X9': '1', 'GOW3_MENU_FPS': '60',
-                          'GOW3_ALLOWED_RESOLUTIONS': 'native;720p;900p;1440p;4K;2560x1080;3440x1440;3840x1600;5120x1440;1920x1200;2560x1600;2880x1800;1920x1440;5120x2160;5120x2880;7680x4320',
+                          'GOW3_ALLOWED_RESOLUTIONS': 'display;native;720p;900p;1440p;4K;2560x1080;3440x1440;3840x1600;5120x1440;1920x1200;2560x1600;2880x1800;1920x1440;5120x2160;5120x2880;7680x4320',
                           'GOW3_GAME_MOTION': '1', 'GOW3_UPSCALE_BEFORE_PS': '4f6cc41b',
                           'GOW3_OBJECT_MOTION': '0', 'GOW3_MIN_RENDER_SIZE': '1920x1080'},
                   'reserve': 4097 * 0x360},
@@ -40,7 +41,7 @@ PROFILES = {
     'CUSA05670': {'name': 'WipEout Omega Collection',
                   'modules': ('libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx'),
                   'env': {'GOW3_RED_ZONE': '1', 'GOW3_ENGINE_FPS': '240', 'GOW3_HUD_16X9': '1', 'GOW3_MENU_FPS': '60',
-                          'GOW3_ALLOWED_RESOLUTIONS': 'native;720p;900p;1440p;4K;2560x1080;3440x1440;3840x1600;5120x1440;1920x1200;2560x1600;2880x1800;1920x1440;5120x2160;5120x2880;7680x4320',
+                          'GOW3_ALLOWED_RESOLUTIONS': 'display;native;720p;900p;1440p;4K;2560x1080;3440x1440;3840x1600;5120x1440;1920x1200;2560x1600;2880x1800;1920x1440;5120x2160;5120x2880;7680x4320',
                           'GOW3_GAME_MOTION': '1', 'GOW3_UPSCALE_BEFORE_PS': '4f6cc41b',
                           'GOW3_OBJECT_MOTION': '0', 'GOW3_MIN_RENDER_SIZE': '1920x1080'},
                   'reserve': 4097 * 0x360},

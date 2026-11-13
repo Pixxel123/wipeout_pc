@@ -136,5 +136,60 @@ class GeneratedResolutionTest(unittest.TestCase):
             self.assertFalse((out / 'generated-resolution.xml').exists())
 
 
+class DisplayResolutionTest(unittest.TestCase):
+    """render_resolution=display and render_scale: run.py works the size out at every start."""
+    EXTRA = [s for s in OWN if s not in g.RESOLUTIONS]
+
+    def size(self, ini, display='3440x1440', title_id='CUSA07671'):
+        return run.session_render_size(ini, self.EXTRA, {'GOW3_DISPLAY_SIZE': display}, title_id)
+
+    def test_the_profile_lists_display(self):
+        self.assertIn('display', self.EXTRA)
+
+    def test_display_is_the_monitors_size(self):
+        self.assertEqual(self.size({'render_resolution': 'display'}), (3440, 1440))
+        self.assertEqual(self.size({'render_resolution': 'display'}, '1280x800'), (1920, 1080))
+        self.assertEqual(self.size({'render_resolution': 'display', 'render_scale': '150'}), (5160, 2160))
+
+    def test_other_options_are_left_alone(self):
+        self.assertIsNone(self.size({'render_resolution': '1440p'}))
+        self.assertIsNone(self.size({}))
+        self.assertIsNone(self.size({'render_resolution': 'display'}, title_id='CUSA01623'))
+
+    def patches_for(self, ini, display, out):
+        """The resolution patch names a start applies, as main() does it."""
+        size = self.size(ini, display)
+        applied = g.size_name(*size)
+        files, _extra = run.generated_resolution_files({'render_resolution': applied}, [], OWN, out, 'CUSA07671')
+        merged = patches.merge_patch_files(WIPEOUT, files, out / 'merged.xml') if files else WIPEOUT
+        names = patches.selected_patches(merged, '01.00', '', only=False)
+        names = g.patch_names(names, {**g.startup_options(ini, self.EXTRA), 'render_resolution': applied})
+        names = g.restrict_to_available(names, patches.available_patches(merged, '01.00'))
+        return [n for n in names if n.startswith('Resolution Patch')], files
+
+    def test_a_monitor_with_a_hand_made_size_uses_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            names, files = self.patches_for({'render_resolution': 'display'}, '3440x1440', Path(directory))
+            self.assertEqual((names, files), (['Resolution Patch - 3440x1440'], []))
+            names, files = self.patches_for({'render_resolution': 'display'}, '2560x1440', Path(directory))
+            self.assertEqual((names, files), (['Resolution Patch - 1440p'], []))
+
+    def test_any_other_monitor_gets_a_generated_patch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            names, files = self.patches_for({'render_resolution': 'display'}, '2256x1504', out)
+            self.assertEqual((names, files), (['Resolution Patch - 2256x1504'], [out / 'generated-resolution.xml']))
+
+    def test_a_1080p_monitor_runs_as_the_game_does(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for display in ('1920x1080', '1280x800'):
+                self.assertEqual(self.patches_for({'render_resolution': 'display'}, display, Path(directory)), ([], []))
+
+    def test_a_scaled_named_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            names, files = self.patches_for({'render_resolution': '1440p', 'render_scale': '150'}, '', Path(directory))
+            self.assertEqual((names, files), (['Resolution Patch - 4K'], []))
+
+
 if __name__ == '__main__':
     unittest.main()
