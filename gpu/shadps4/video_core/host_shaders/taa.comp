@@ -97,6 +97,10 @@ void main() {
     float filter_weight = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
+#ifdef TAA_CROSS
+            // Experiment: the centre and its four direct neighbours, not the corners.
+            if (x != 0 && y != 0) continue;
+#endif
             ivec2 q = clamp(color_source + ivec2(x,y), ivec2(0), size - 1);
             vec3 c = texelFetch(color_tex, q, 0).rgb;
             if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
@@ -124,6 +128,9 @@ void main() {
     // alternate with background under jitter; a 3x3 nearest surface remains trackable.
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
+#ifdef TAA_CROSS
+            if (x != 0 && y != 0) continue;
+#endif
             ivec2 candidate = clamp(color_source+ivec2(x,y),ivec2(0),size-1);
             float candidate_depth = texelFetch(depth_tex,candidate,0).r;
             if (candidate_depth < depth) {

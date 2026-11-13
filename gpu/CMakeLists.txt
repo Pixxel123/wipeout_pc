@@ -122,6 +122,8 @@ add_host_shader(upscale_reactive.comp upscale_reactive_comp)
 add_host_shader(taa.comp taa_comp)
 # taa.comp while every A/B switch is off (vk_temporal_upscaler.cpp RecordTaa).
 add_host_shader(taa.comp taa_default_switches_comp TAA_DEFAULT_SWITCHES=1)
+# Experiment GOW3_TAA_VARIANT=cross: a 5-tap neighbourhood for the colour box and the depth dilation.
+add_host_shader(taa.comp taa_cross_comp TAA_DEFAULT_SWITCHES=1 TAA_CROSS=1)
 add_host_shader(taa_sharpen.comp taa_sharpen_comp)
 add_host_shader(taa_sharpen.comp taa_sharpen_ldr_comp LDR_OUTPUT=1)
 add_host_shader(taa_sharpen.comp taa_sharpen_scene_r11_comp SCENE_R11G11B10=1)

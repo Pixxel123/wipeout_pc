@@ -22,6 +22,7 @@
 #include "video_core/host_shaders/upscale_reactive_comp.h"
 #include "video_core/host_shaders/taa_comp.h"
 #include "video_core/host_shaders/taa_default_switches_comp.h"
+#include "video_core/host_shaders/taa_cross_comp.h"
 #include "video_core/host_shaders/taa_sharpen_comp.h"
 #include "video_core/host_shaders/taa_sharpen_ldr_comp.h"
 #include "video_core/host_shaders/taa_sharpen_scene_r11_comp.h"
@@ -670,6 +671,7 @@ void TemporalUpscaler::CreatePipelines() {
             .addressModeW = vk::SamplerAddressMode::eClampToEdge}));
         taa_pipeline = compute(TAA_COMP, *taa_pipeline_layout);
         taa_default_pipeline = compute(TAA_DEFAULT_SWITCHES_COMP, *taa_pipeline_layout);
+        taa_cross_pipeline = compute(TAA_CROSS_COMP, *taa_pipeline_layout);
     }
 }
 
@@ -747,8 +749,17 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     if (into_scene) {
         params.pad |= 1u << 31;
     }
+    // Experiment GOW3_TAA_VARIANT: cross = the 5-tap neighbourhood; resolve-only = no second pass
+    // (the picture is then the scene without anti-aliasing: only to time the resolve alone).
+    static const int variant = [] {
+        const char* value = std::getenv("GOW3_TAA_VARIANT");
+        const int v = !value ? 0 : !std::strcmp(value, "cross") ? 1 : !std::strcmp(value, "resolve-only") ? 2 : 0;
+        if (v) std::printf("TAA variant: %s\n", value);
+        return v;
+    }();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
-                        default_switches ? *taa_default_pipeline : *taa_pipeline);
+                        default_switches ? (variant == 1 ? *taa_cross_pipeline : *taa_default_pipeline)
+                                         : *taa_pipeline);
     if (params.pad & 0xffu) {
         static u32 diagnostic_frames = 0;
         if (diagnostic_frames++ < 16)
@@ -759,7 +770,7 @@ bool TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     cmdbuf.pushConstants(*taa_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
                          sizeof(params), &params);
     cmdbuf.dispatch((out_width + 7) / 8, (out_height + 7) / 8, 1);
-    if (sharpen) {
+    if (sharpen && !(variant == 2 && into_scene)) {
         const vk::MemoryBarrier2 resolved{
             .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
             .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
