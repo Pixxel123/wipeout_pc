@@ -69,9 +69,16 @@ if [[ -z $pgo ]]; then
 fi
 gpu_toolchain=()
 if [[ $gpu_compiler == clang ]]; then
-    command -v clang++ >/dev/null && command -v ld.lld >/dev/null ||
+    # Clang 19 or newer when there is one: Clang 18 cannot apply the profile to the command processor.
+    clang_suffix=
+    for suffix in -21 -20 -19 ''; do
+        if command -v "clang++$suffix" >/dev/null && command -v "ld.lld$suffix" >/dev/null; then
+            clang_suffix=$suffix; found_clang=1; break
+        fi
+    done
+    [[ -n ${found_clang:-} ]] ||
         { echo 'GOW3_GPU_COMPILER=clang needs clang, lld and llvm (llvm-ar).' >&2; exit 1; }
-    gpu_toolchain=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+    gpu_toolchain=(-DCMAKE_C_COMPILER="clang$clang_suffix" -DCMAKE_CXX_COMPILER="clang++$clang_suffix"
                    -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld)
 fi
 mkdir -p pgo
