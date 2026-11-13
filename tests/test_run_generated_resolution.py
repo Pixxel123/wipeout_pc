@@ -37,10 +37,11 @@ class GeneratedResolutionTest(unittest.TestCase):
     def test_big_generated_size_asks_for_memory(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
-            files, _extra = run.generated_resolution_files({'render_resolution': '5120x2880'}, [], [], out)
+            # 6016x3384 (20.4 MP, a 6K monitor): between the 5K and 8K entries, 2 GB more
+            files, _extra = run.generated_resolution_files({'render_resolution': '6016x3384'}, [], [], out)
             merged = patches.merge_patch_files(WIPEOUT, files, out / 'merged.xml')
-            dmem, _vblank = patches.patch_requirements(merged, ['Resolution Patch - 5120x2880'], '01.00')
-            self.assertEqual(dmem, patches.DMEM_RETAIL_MB + 1024)
+            dmem, _vblank = patches.patch_requirements(merged, ['Resolution Patch - 6016x3384'], '01.00')
+            self.assertEqual(dmem, patches.DMEM_RETAIL_MB + 2048)
 
     def test_known_sizes_generate_nothing(self):
         with tempfile.TemporaryDirectory() as directory:

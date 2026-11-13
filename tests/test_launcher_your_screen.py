@@ -455,7 +455,7 @@ class GameGateTest(unittest.TestCase):
         app = self.app(None, folder='')
         app.screen_size = (7680, 4320)  # every built-in size fits
         self.assertEqual(self.values(app.game_resolution_options()),
-                         ['7680x4320', '5120x2160', '5120x1440', '4K', '3840x1600', '3440x1440', '1800p', '2560x1920', '2560x1600',
+                         ['7680x4320', '5120x2880', '5120x2160', '5120x1440', '4K', '3840x1600', '3440x1440', '1800p', '2560x1920', '2560x1600',
                           '1440p', '2560x1080', '2048x1536', '1920x1440', '1920x1200', 'native'])
 
     def test_wipeout_lists_only_what_fits(self):

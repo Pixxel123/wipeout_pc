@@ -31,14 +31,14 @@ def hand_made():
 class ResolutionPatchTest(unittest.TestCase):
     def test_reproduces_every_hand_made_entry(self):
         entries = hand_made()
-        self.assertEqual(len(entries), 13)
+        self.assertEqual(len(entries), 15)
         for (width, height), lines in entries.items():
             with self.subTest(size=f'{width}x{height}'):
                 self.assertEqual(g.resolution_patch_lines(width, height), lines)
 
     def test_steam_deck_size(self):
         lines = {a: v for a, v, _p, _t in g.resolution_patch_lines(1280, 800)}
-        self.assertEqual(len(lines), 25)
+        self.assertEqual(len(lines), 27)
         self.assertEqual(lines['0x00c60d00'], struct.pack('<f', 0.8).hex())
         self.assertEqual(lines['0x00c60d04'], struct.pack('<f', 3.2).hex())
         self.assertEqual(lines['0x00c60d08'], struct.pack('<f', 1.6).hex())
@@ -50,6 +50,23 @@ class ResolutionPatchTest(unittest.TestCase):
     def test_memory_line_from_four_and_a_half_megapixels(self):
         self.assertIn('0x00c6bb60', {a for a, *_r in g.resolution_patch_lines(3840, 2400)})
         self.assertNotIn('0x00c6bb60', {a for a, *_r in g.resolution_patch_lines(2560, 1600)})
+
+    def test_memory_grows_in_steps(self):
+        self.assertEqual([g.memory_mb(w, h) for w, h in ((2560, 1600), (3440, 1440), (5120, 2160), (5120, 2880),
+                                                         (6016, 3384), (7680, 4320))],
+                         [0, 1024, 1024, 2048, 2048, 4096])
+
+    def test_narrower_than_16x9_is_vert_plus(self):
+        def fov(width, height):
+            lines = {a: v for a, v, _p, _t in g.resolution_patch_lines(width, height)}
+            return lines.get('0x00c60d0c'), lines.get('0x00c60d4c')
+        self.assertEqual(fov(3440, 1440), (None, None))  # wider: Hor+, the field of view is the game's
+        steam_deck = fov(1280, 800)
+        self.assertEqual(steam_deck, fov(1920, 1200))  # 16:10 at any size, both camera sets alike
+        self.assertEqual(steam_deck[0], steam_deck[1])
+        self.assertNotEqual(fov(2256, 1504), steam_deck)  # 3:2 has its own factor
+        self.assertAlmostEqual(g.vert_plus(1920, 1440), 1.2271, places=4)
+        self.assertAlmostEqual(g.vert_plus(1920, 1200), 1.0816, places=4)
 
     def test_sizes_must_be_even(self):
         for width, height in ((1365, 768), (1366, 767)):
@@ -69,9 +86,9 @@ class ResolutionPatchTest(unittest.TestCase):
             self.assertEqual(meta.get('AppVer'), '01.00')
             self.assertEqual(meta.get('isEnabled'), 'false')
             self.assertNotIn('DMEM', meta.get('Note'))
-            self.assertEqual(len(list(meta.iter('Line'))), 25)
-            big = g.resolution_patch_xml(5120, 2880, Path(directory) / 'big.xml')
-            self.assertIn('(DMEM to 1024 MB)', next(ET.parse(big).getroot().iter('Metadata')).get('Note'))
+            self.assertEqual(len(list(meta.iter('Line'))), 27)
+            big = g.resolution_patch_xml(6016, 3384, Path(directory) / 'big.xml')
+            self.assertIn('(DMEM to 2048 MB)', next(ET.parse(big).getroot().iter('Metadata')).get('Note'))
 
 
 if __name__ == '__main__':
