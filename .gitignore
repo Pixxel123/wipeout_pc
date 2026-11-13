@@ -6,7 +6,9 @@ user/
 *.mp4
 gow3.ini
 fsr4_shaders/
-pgo/
+# pgo/: profiles written by instrumented builds; only the merged Clang profile is kept
+pgo/*
+!pgo/gow3gpu.profdata
 *.png
 last_run.log
 dist/
