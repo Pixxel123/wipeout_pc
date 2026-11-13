@@ -852,9 +852,26 @@ public:
         if (work_semaphore.IsFree(tick)) {
             return true;
         }
+        // gow3 (experiment, GOW3_PENDING_POLL >= 1): the tick of a command buffer that is not
+        // submitted yet cannot be reached, so the query cannot change the answer.
+        const bool unsubmitted = tick >= work_semaphore.CurrentTick();
+        is_free_queries.fetch_add(1, std::memory_order_relaxed);
+        is_free_unsubmitted.fetch_add(unsubmitted, std::memory_order_relaxed);
+        if (unsubmitted && PendingPollMode() >= 1) {
+            return false;
+        }
         work_semaphore.Refresh();
         return work_semaphore.IsFree(tick);
     }
+    static int PendingPollMode() noexcept {
+        static const int mode = [] {
+            const char* value = std::getenv("GOW3_PENDING_POLL");
+            return value ? std::atoi(value) : 0;
+        }();
+        return mode;
+    }
+    static inline std::atomic<u64> is_free_queries{0}, is_free_unsubmitted{0}, pop_queries{0},
+        pop_unsubmitted{0}, submissions{0};
 
     /// Returns the scheduler timeline semaphore.
     [[nodiscard]] Semaphore* GetWorkSemaphore() noexcept {

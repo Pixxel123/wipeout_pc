@@ -42,6 +42,7 @@ public:
 
     /// Refresh the known GPU tick
     void Refresh();
+    static inline std::atomic<u64> refreshes{0}; ///< gow3 (experiment): queries of any timeline
 
     /// Waits for a tick to be hit on the GPU
     void Wait(u64 tick);

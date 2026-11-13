@@ -423,22 +423,8 @@ void Scheduler::PopPendingOperations() {
         //   0: as before, a query every 32 calls
         //   1: no query while the oldest operation's tick is not submitted yet
         //   2: as 1, and a query every 256 calls for a submitted tick
-        static const int mode = [] {
-            const char* value = std::getenv("GOW3_PENDING_POLL");
-            return value ? std::atoi(value) : 0;
-        }();
-        static std::atomic<u64> calls{0}, queries{0}, unsubmitted_queries{0}, unsubmitted_calls{0};
+        const int mode = PendingPollMode();
         const bool unsubmitted = pending_ops.front().gpu_tick >= work_semaphore.CurrentTick();
-        const u64 n = calls.fetch_add(1) + 1;
-        unsubmitted_calls.fetch_add(unsubmitted);
-        if ((n & 0x3ffff) == 0) {
-            std::printf("Pending polls: %llu calls with an operation waiting (%llu for a tick not "
-                        "submitted), %llu queries (%llu for a tick not submitted), mode %d\n",
-                        static_cast<unsigned long long>(n),
-                        static_cast<unsigned long long>(unsubmitted_calls.load()),
-                        static_cast<unsigned long long>(queries.load()),
-                        static_cast<unsigned long long>(unsubmitted_queries.load()), mode);
-        }
         if (mode >= 1 && unsubmitted) {
             return;
         }
@@ -446,8 +432,8 @@ void Scheduler::PopPendingOperations() {
         if ((++pending_polls & mask) != 0 && !Gow3Toggle::Disabled(Gow3Toggle::PendingPollLimit)) {
             return;
         }
-        queries.fetch_add(1);
-        unsubmitted_queries.fetch_add(unsubmitted);
+        pop_queries.fetch_add(1, std::memory_order_relaxed);
+        pop_unsubmitted.fetch_add(unsubmitted, std::memory_order_relaxed);
         work_semaphore.Refresh();
     }
     while (!pending_ops.empty() && work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
@@ -537,6 +523,16 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
+    if (const u64 n = submissions.fetch_add(1) + 1; (n & 1023) == 0) {
+        std::printf("Timeline queries after %llu submissions: all %llu, IsFree %llu (%llu for a tick "
+                    "not submitted), pending operations %llu (%llu), mode %d\n",
+                    static_cast<unsigned long long>(n),
+                    static_cast<unsigned long long>(Semaphore::refreshes.load()),
+                    static_cast<unsigned long long>(is_free_queries.load()),
+                    static_cast<unsigned long long>(is_free_unsubmitted.load()),
+                    static_cast<unsigned long long>(pop_queries.load()),
+                    static_cast<unsigned long long>(pop_unsubmitted.load()), PendingPollMode());
+    }
     work_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
 

@@ -29,6 +29,7 @@ Semaphore::Semaphore(const Instance& instance_) : instance{instance_} {
 Semaphore::~Semaphore() = default;
 
 void Semaphore::Refresh() {
+    refreshes.fetch_add(1, std::memory_order_relaxed);
     u64 this_tick{};
     u64 counter{};
     do {
