@@ -753,6 +753,16 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     draw_pipe->Commit(static_cast<u32>(out - start));
     PrintPipeStats();
+    // gow3 (experiment, GOW3_EARLY_SUBMIT=<draws>): after that many draws of a frame the
+    // recording thread submits what it has, so the GPU starts before the frame's last draw.
+    static const u32 early_at = [] {
+        const char* value = std::getenv("GOW3_EARLY_SUBMIT");
+        return value ? u32(std::atoi(value)) : 0u;
+    }();
+    if (early_at && ++draws_since_submit == early_at) {
+        scheduler.NoteEarlySubmitQueued();
+        RunInOrder([](Rasterizer& self, const u8*) { self.scheduler.FlushEarly(); }, nullptr, 0);
+    }
 }
 
 void Rasterizer::RetireSubmission() {
@@ -1607,6 +1617,15 @@ void Rasterizer::Finish() {
 
 void Rasterizer::OnSubmit() {
     DrainDrawPipe();
+    if (draws_since_submit) {
+        static u64 frames = 0;
+        if ((++frames & 1023) == 0) {
+            std::printf("Early submit: %llu made, %llu skipped\n",
+                        static_cast<unsigned long long>(Scheduler::early_submits.load()),
+                        static_cast<unsigned long long>(Scheduler::early_submits_skipped.load()));
+        }
+    }
+    draws_since_submit = 0;
     if (fault_process_pending) {
         fault_process_pending = false;
         buffer_cache.ProcessFaultBuffer();

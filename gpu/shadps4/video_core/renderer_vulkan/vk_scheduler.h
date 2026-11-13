@@ -844,8 +844,22 @@ public:
 
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
-        return work_semaphore.CurrentTick();
+        // gow3 (experiment, GOW3_EARLY_SUBMIT): the thread that queued an early submission
+        // works on commands that land in the submission after it.
+        return work_semaphore.CurrentTick() +
+               (counts_early_submits ? early_submits_queued.load(std::memory_order_acquire) : 0);
     }
+
+    /// gow3 (experiment): the recording thread submits what it has recorded so far, in the
+    /// middle of a frame, so the GPU starts on it while the rest is recorded. No submit callback
+    /// (the frame-end work stays with the frame's last submission). When another thread is
+    /// submitting, and so waiting for this one, there is nothing to gain: skipped.
+    void NoteEarlySubmitQueued() noexcept {
+        counts_early_submits = true;
+        early_submits_queued.fetch_add(1, std::memory_order_release);
+    }
+    bool FlushEarly();
+    static inline std::atomic<u64> early_submits{0}, early_submits_skipped{0};
 
     /// Returns true when a tick has been triggered by the GPU.
     [[nodiscard]] bool IsFree(u64 tick) noexcept {
@@ -889,6 +903,7 @@ private:
     void RecorderThread(std::stop_token stoken);
 
     void SubmitExecution(SubmitInfo& info);
+    void SubmitLocked(SubmitInfo& info, bool run_callback);
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
@@ -907,6 +922,8 @@ private:
     std::queue<PendingOp> pending_ops;
     std::recursive_mutex pending_ops_mutex;
     u32 pending_polls = 0; // gow3
+    std::atomic<u32> early_submits_queued{0}; ///< gow3 (experiment)
+    static inline thread_local bool counts_early_submits = false;
     std::atomic<u32> num_pending_ops{0}; ///< gow3: pending_ops.size(), checked without the lock
     std::queue<PendingOp> priority_pending_ops;
     std::mutex priority_pending_ops_mutex;

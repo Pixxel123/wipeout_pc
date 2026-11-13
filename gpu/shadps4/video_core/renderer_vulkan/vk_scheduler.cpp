@@ -452,6 +452,24 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
+    SubmitLocked(info, true);
+}
+
+bool Scheduler::FlushEarly() {
+    std::unique_lock lk{submit_mutex, std::try_to_lock};
+    const bool submit = lk.owns_lock();
+    if (submit) {
+        SubmitInfo info{};
+        SubmitLocked(info, false);
+        early_submits.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        early_submits_skipped.fetch_add(1, std::memory_order_relaxed);
+    }
+    early_submits_queued.fetch_sub(1, std::memory_order_release);
+    return submit;
+}
+
+void Scheduler::SubmitLocked(SubmitInfo& info, bool run_callback) {
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
@@ -462,7 +480,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
 #endif
 
-    if (on_submit) {
+    if (on_submit && run_callback) {
         on_submit(info);
     }
 

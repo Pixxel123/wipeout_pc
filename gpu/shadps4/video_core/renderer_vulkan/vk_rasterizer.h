@@ -102,6 +102,7 @@ public:
     /// thread while the draw pipeline is in use (PipelinedTasks), else here after a drain.
     using OrderedTask = void (*)(Rasterizer& rasterizer, const u8* data);
     /// Returns true when the task was handed to the recording thread (not run yet).
+    u32 draws_since_submit = 0; ///< gow3 (experiment, GOW3_EARLY_SUBMIT), command thread
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
                     u64 toggle = Gow3Toggle::PipelinedTasks);
     /// Stage A: the draw pipe position after the last handed-over packet, and whether the
