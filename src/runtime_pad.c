@@ -125,17 +125,74 @@ static int preferred_gamepad(int count) {
     if (!wanted) { const char *env=getenv("GOW3_GAMEPAD"); wanted=env && atoi(env)>0 ? atoi(env) : 1; }
     return wanted<=count ? wanted-1 : 0;
 }
+/* Player 1's gamepad going away (a controller that sleeps, or one switched off) hands player 1 to
+ * another gamepad that is still there, such as the Steam Deck's own controls. The next gamepad to
+ * connect after that (the one that went away, woken up) takes player 1 back. Without this, player
+ * 1 stayed on the fallback and the woken controller only reached player 2 until a restart. SDL
+ * never reuses a gamepad's instance ID and hands them out in increasing order, so "connected
+ * since" is an ID above every one that existed when player 1's gamepad went away. */
+typedef struct { SDL_Gamepad *g; float q[4]; uint64_t last; } Motion;
+static Motion motions[2]={{.q={0,0,0,1}},{.q={0,0,0,1}}};
+static bool reclaim;                  /* player 1 lost its gamepad: a newly connected one takes over */
+static SDL_JoystickID newest_at_loss; /* the highest ID that existed when it was lost */
+static uint64_t reclaim_checked;
+enum { RECLAIM_CHECK_US=100000 };
+/* Drops a gamepad that SDL reports gone; true if it was dropped. Called under lock. */
+static bool drop_if_gone(SDL_Gamepad **g, Motion *m, const char *who) {
+    if (!*g || SDL_GamepadConnected(*g)) return false;
+    printf("Runtime: gamepad disconnected%s\n",who);
+    SDL_CloseGamepad(*g);
+    *g=NULL;
+    m->g=NULL; /* a new gamepad at the same address still gets its sensors enabled */
+    return true;
+}
 /* Opens player 1's gamepad (preferred_gamepad); called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
-    if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+    const SDL_JoystickID lost=gamepad ? SDL_GetGamepadID(gamepad) : 0;
+    if (drop_if_gone(&gamepad,&motions[0],"")) {
+        int count=0;
+        SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        newest_at_loss=lost;
+        for (int i=0;ids && i<count;++i) if (ids[i]>newest_at_loss) newest_at_loss=ids[i];
+        SDL_free(ids);
+        reclaim=true;
+        reclaim_checked=0;
+    }
+    const uint64_t now=now_us();
+    if (reclaim && (!gamepad || now-reclaim_checked>=RECLAIM_CHECK_US)) {
+        reclaim_checked=now;
+        int count=0;
+        SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        SDL_JoystickID newest=0;
+        for (int i=0;ids && i<count;++i) if (ids[i]>newest_at_loss && ids[i]>newest) newest=ids[i];
+        SDL_free(ids);
+        if (newest) {
+            SDL_Gamepad *back=NULL;
+            if (gamepad2 && SDL_GetGamepadID(gamepad2)==newest) { /* player 2 picked it up first */
+                back=gamepad2; gamepad2=NULL; motions[1].g=NULL;
+            } else back=SDL_OpenGamepad(newest);
+            if (back) {
+                if (gamepad) SDL_CloseGamepad(gamepad); /* the fallback: free for player 2 again */
+                gamepad=back;
+                motions[0].g=NULL;
+                reclaim=false;
+                ++connected_count;
+                printf("Runtime: gamepad reconnected: %s\n",SDL_GetGamepadName(gamepad));
+            }
+        }
+    }
     if (!gamepad) {
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
         if (ids && count>0) {
             gamepad=SDL_OpenGamepad(ids[preferred_gamepad(count)]);
-            if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
+            if (gamepad) {
+                ++connected_count;
+                printf("Runtime: gamepad connected: %s%s\n",SDL_GetGamepadName(gamepad),
+                       reclaim ? " (until a gamepad connects again)" : "");
+            }
         }
         SDL_free(ids);
     }
@@ -144,7 +201,7 @@ static SDL_Gamepad *current_gamepad(void) {
 /* Player 2's gamepad: the first connected one that is not player 1's; called under lock. */
 static SDL_Gamepad *second_gamepad(void) {
     SDL_Gamepad *first=current_gamepad();
-    if (gamepad2 && !SDL_GamepadConnected(gamepad2)) { SDL_CloseGamepad(gamepad2); gamepad2=NULL; }
+    drop_if_gone(&gamepad2,&motions[1]," (player 2)");
     if (!gamepad2 && first) {
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
@@ -560,9 +617,8 @@ static Injected injected={.stick={-1,-1,-1,-1}}, injected2={.stick={-1,-1,-1,-1}
 static int injected2_seen;
 /* Motion sensors (#18): the gamepad's gyro (rad/s) and accelerometer (in g), and the orientation
  * integrated from the gyro as shadPS4 does it; scePadResetOrientation starts it over. The game's
- * own Motion control option steers with them. One per player; called under lock. */
-typedef struct { SDL_Gamepad *g; float q[4]; uint64_t last; } Motion;
-static Motion motions[2]={{.q={0,0,0,1}},{.q={0,0,0,1}}};
+ * own Motion control option steers with them. One per player (motions, above current_gamepad);
+ * called under lock. */
 static void read_motion(Motion *m, SDL_Gamepad *g, const Injected *in, PadData *d) {
     float gyro[3]={0,0,0}, accel[3]={0,0,0};
     int have=0;

@@ -237,11 +237,67 @@ int main(void) {
     assert(pad_read_state(2,&second)==0 && !second.connected && second.buttons==0);
     assert(!runtime_pad_second_user());
     assert(pad_close(2)==0 && pad_read_state(2,&second)==ERR_INVALID_HANDLE);
+    /* A controller that sleeps (the Steam Deck): player 1 falls back to the gamepad that is left
+     * (the Deck's own controls), and the controller takes player 1 back when it wakes up, which
+     * SDL reports as a new gamepad. Before, player 1 stayed on the fallback until a restart. */
+    desc.name="gow3 test built-in controls";
+    SDL_JoystickID builtin_id=SDL_AttachVirtualJoystick(&desc);
+    assert(builtin_id!=0);
+    SDL_Joystick *builtin=SDL_OpenJoystick(builtin_id);
+    assert(builtin);
+    pump();
+    data=read_pad();
+    assert(gamepad && SDL_GetGamepadID(gamepad)==id); /* a gamepad connecting later is not player 1's */
+    SDL_CloseJoystick(joystick);
+    assert(SDL_DetachVirtualJoystick(id)); /* the controller sleeps */
+    assert(SDL_SetJoystickVirtualButton(builtin,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    pump();
+    data=read_pad();
+    assert(gamepad && SDL_GetGamepadID(gamepad)==builtin_id && (data.buttons & BTN_CROSS));
+    assert(SDL_SetJoystickVirtualButton(builtin,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    desc.name="gow3 test controller";
+    id=SDL_AttachVirtualJoystick(&desc); /* it wakes up */
+    assert(id!=0);
+    joystick=SDL_OpenJoystick(id);
+    assert(joystick);
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,true));
+    pump();
+    usleep(RECLAIM_CHECK_US+20000);
+    data=read_pad();
+    assert(gamepad && SDL_GetGamepadID(gamepad)==id);
+    assert((data.buttons & BTN_CIRCLE) && !(data.buttons & BTN_CROSS));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,false));
+    /* Taken back once: the built-in controls going away and coming back leave player 1 alone. */
+    SDL_CloseJoystick(builtin);
+    assert(SDL_DetachVirtualJoystick(builtin_id));
+    pump();
+    data=read_pad();
+    builtin_id=SDL_AttachVirtualJoystick(&desc);
+    assert(builtin_id!=0);
+    pump();
+    usleep(RECLAIM_CHECK_US+20000);
+    data=read_pad();
+    assert(gamepad && SDL_GetGamepadID(gamepad)==id);
+    assert(SDL_DetachVirtualJoystick(builtin_id));
+    pump();
+    /* The only gamepad sleeping and waking up: player 1 has it again. */
+    SDL_CloseJoystick(joystick);
+    assert(SDL_DetachVirtualJoystick(id));
+    pump();
+    data=read_pad();
+    assert(!gamepad && data.connected);
+    id=SDL_AttachVirtualJoystick(&desc);
+    assert(id!=0);
+    joystick=SDL_OpenJoystick(id);
+    assert(joystick);
+    pump();
+    data=read_pad();
+    assert(gamepad && SDL_GetGamepadID(gamepad)==id);
     SDL_CloseJoystick(joystick);
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture, player 2");
+    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture, player 2, controller sleep and wake");
 }
