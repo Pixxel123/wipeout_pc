@@ -33,6 +33,10 @@ MINGW*|MSYS*)
         grep -v '^\[' out/gpu-build.log | tail -40 >&2
         echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
     fi
+    { echo "PROFILE CHECK: hash mismatch lines $(grep -c 'hash mismatch' out/gpu-build.log), no profile data lines $(grep -c 'no profile data available for function' out/gpu-build.log), warnings $(grep -c 'warning:' out/gpu-build.log)"
+      echo "distinct mismatched $(grep -o 'hash mismatch) [^ ]*' out/gpu-build.log | sort -u | wc -l), distinct without data $(grep -o 'no profile data available for function [^ ]*' out/gpu-build.log | sort -u | wc -l)"
+      grep -o 'hash mismatch) [^ ]*' out/gpu-build.log | sort | uniq -c | sort -rn | head -12 | cut -c1-200
+      grep -E 'warning:.*(Rasterizer4Draw|DrawRecordE|BindTexturesE|BindBuffersE|PostDraw)' out/gpu-build.log | sed -E 's/.*warning: //' | cut -c1-200 | sort -u | head -8; } || true
     cp out/gpu/gow3-probe.exe out/gpu/gow3-gpu-capabilities.exe out/gpu/gow3-play.exe out/gpu/gow3-server.exe out/
     echo "Built $PWD/out/gow3-probe.exe"
     exit 0

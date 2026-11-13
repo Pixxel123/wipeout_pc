@@ -43,7 +43,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT GOW3_PGO STREQUAL "off")
             message(FATAL_ERROR "GOW3_PGO=use: ${GOW3_PGO_PROFILE} is missing")
         endif()
         add_compile_options(-fprofile-use=${GOW3_PGO_PROFILE}
-                            -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+                            -Wprofile-instr-out-of-date -Wprofile-instr-unprofiled -Wno-error=backend-plugin -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled)
         add_link_options(-fprofile-use=${GOW3_PGO_PROFILE})
     endif()
 elseif (GOW3_PGO STREQUAL "generate")
