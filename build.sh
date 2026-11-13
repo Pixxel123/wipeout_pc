@@ -22,7 +22,7 @@ MINGW*|MSYS*)
             git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
         fi
     done
-    pgo=${GOW3_PGO:-}
+    pgo=${GOW3_PGO:-generate}
     if [[ -z $pgo ]]; then
         if [[ -f pgo/gow3gpu-windows.profdata ]]; then pgo=use; else pgo=off; fi
     fi
