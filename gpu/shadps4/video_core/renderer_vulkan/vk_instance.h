@@ -146,6 +146,12 @@ public:
         return maintenance_8;
     }
 
+    /// gow3 (experiment, GOW3_CUBE_VRS=1): pipelines take their fragment shading rate from the
+    /// command buffer; the reflection cube faces are shaded once per 2x2 pixels.
+    bool IsFragmentShadingRateOn() const {
+        return fragment_shading_rate;
+    }
+
     /// Returns true if VK_EXT_attachment_feedback_loop_layout is supported
     bool IsAttachmentFeedbackLoopLayoutSupported() const {
         return attachment_feedback_loop;
@@ -591,6 +597,7 @@ private:
     vk::PipelineBinaryKeyKHR pipeline_binary_global_key{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};
+    bool fragment_shading_rate{}; ///< gow3 (experiment, GOW3_CUBE_VRS)
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};

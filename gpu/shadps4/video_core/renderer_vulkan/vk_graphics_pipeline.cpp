@@ -172,6 +172,9 @@ GraphicsPipeline::GraphicsPipeline(
         vk::DynamicState::eLineWidth,          vk::DynamicState::ePrimitiveRestartEnable,
     };
 
+    if (instance.IsFragmentShadingRateOn()) {
+        dynamic_states.push_back(vk::DynamicState::eFragmentShadingRateKHR);
+    }
     if (instance.IsDepthBoundsSupported()) {
         dynamic_states.push_back(vk::DynamicState::eDepthBoundsTestEnable);
         dynamic_states.push_back(vk::DynamicState::eDepthBounds);

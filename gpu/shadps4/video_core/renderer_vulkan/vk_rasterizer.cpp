@@ -57,6 +57,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+    DynamicState::shading_rate_dynamic = instance.IsFragmentShadingRateOn(); // gow3 (experiment)
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     // Only the workers read the register checksum. Set before any command buffer: the guest
@@ -3834,6 +3835,22 @@ void Rasterizer::UpdateRasterizationState() const {
     const auto& regs = Regs();
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.SetLineWidth(regs.line_control.Width());
+    if (DynamicState::shading_rate_dynamic) {
+        // gow3 (experiment, GOW3_CUBE_VRS): WipEout's ship reflection cube faces are 256x256
+        // passes with two colour targets (colour and distance); they are sampled blurred.
+        const auto& cb0 = regs.color_buffers[0];
+        const auto& cb1 = regs.color_buffers[1];
+        const bool face = cb0 && cb1 && CbExtent(0).width == 256 && CbExtent(0).height == 256 &&
+                          CbExtent(1).width == 256;
+        dynamic_state.SetHalfRate(face);
+        static std::atomic<u64> draws{0}, half{0};
+        half.fetch_add(face, std::memory_order_relaxed);
+        if (const u64 n = draws.fetch_add(1, std::memory_order_relaxed) + 1; (n & 0xfffff) == 0) {
+            std::printf("Reflection cube faces: %llu of %llu draws at half rate\n",
+                        static_cast<unsigned long long>(half.load()),
+                        static_cast<unsigned long long>(n));
+        }
+    }
 }
 
 void Rasterizer::UpdateColorBlendingState(const GraphicsPipeline* pipeline) const {

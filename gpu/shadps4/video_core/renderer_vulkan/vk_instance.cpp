@@ -381,6 +381,17 @@ bool Instance::CreateDevice(bool needs_swapchain) {
             enabled_extensions.pop_back();
         }
     }
+    if (const char* vrs = std::getenv("GOW3_CUBE_VRS"); vrs && vrs[0] == '1') {
+        fragment_shading_rate = add_extension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+        if (fragment_shading_rate) {
+            const auto chain = physical_device.getFeatures2<
+                vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceFragmentShadingRateFeaturesKHR>();
+            fragment_shading_rate =
+                chain.get<vk::PhysicalDeviceFragmentShadingRateFeaturesKHR>().pipelineFragmentShadingRate;
+        }
+        std::printf("Reflection cube faces: half-rate shading %s\n",
+                    fragment_shading_rate ? "on" : "not supported by this GPU");
+    }
     depth_range_unrestricted = add_extension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     dynamic_state_3 = add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
     if (dynamic_state_3) {
@@ -675,6 +686,9 @@ bool Instance::CreateDevice(bool needs_swapchain) {
         vk::PhysicalDeviceMaintenance8FeaturesKHR{
             .maintenance8 = true,
         },
+        vk::PhysicalDeviceFragmentShadingRateFeaturesKHR{
+            .pipelineFragmentShadingRate = true,
+        },
         vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT{
             .attachmentFeedbackLoopLayout = true,
         },
@@ -761,6 +775,9 @@ bool Instance::CreateDevice(bool needs_swapchain) {
     }
     if (!maintenance_8) {
         device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
+    }
+    if (!fragment_shading_rate) {
+        device_chain.unlink<vk::PhysicalDeviceFragmentShadingRateFeaturesKHR>();
     }
     if (!attachment_feedback_loop) {
         device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT>();

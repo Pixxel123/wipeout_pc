@@ -136,6 +136,7 @@ struct DynamicState {
         bool blend_constants : 1;
         bool color_write_masks : 1;
         bool line_width : 1;
+        bool half_rate : 1; // gow3 (experiment, GOW3_CUBE_VRS)
         bool feedback_loop_enabled : 1;
     } dirty_state{};
 
@@ -173,6 +174,8 @@ struct DynamicState {
     std::array<float, 4> blend_constants{};
     ColorWriteMasks color_write_masks{};
     float line_width{};
+    bool half_rate{};                                  ///< gow3: 2x2 fragment shading rate
+    static inline bool shading_rate_dynamic = false;   ///< gow3: pipelines carry the dynamic state
     bool feedback_loop_enabled{};
 
     /// Commits the dynamic state to the provided command buffer (a null one only clears the
@@ -337,6 +340,17 @@ struct DynamicState {
             dirty_state.line_width = false;
             emit([v = line_width](vk::CommandBuffer c) { c.setLineWidth(v); });
         }
+        if (dirty_state.half_rate) {
+            dirty_state.half_rate = false;
+            if (shading_rate_dynamic) {
+                emit([v = half_rate](vk::CommandBuffer c) {
+                    const vk::Extent2D size{v ? 2u : 1u, v ? 2u : 1u};
+                    const std::array ops{vk::FragmentShadingRateCombinerOpKHR::eKeep,
+                                         vk::FragmentShadingRateCombinerOpKHR::eKeep};
+                    c.setFragmentShadingRateKHR(&size, ops.data());
+                });
+            }
+        }
         if (dirty_state.feedback_loop_enabled && feedback_loop_supported) {
             dirty_state.feedback_loop_enabled = false;
             emit([v = feedback_loop_enabled](vk::CommandBuffer c) {
@@ -397,6 +411,7 @@ struct DynamicState {
         dirty_state.blend_constants = true;
         dirty_state.color_write_masks = true;
         dirty_state.line_width = true;
+        dirty_state.half_rate = true;
         dirty_state.feedback_loop_enabled = true;
     }
 
@@ -557,6 +572,13 @@ struct DynamicState {
         if (!std::ranges::equal(color_write_masks, color_write_masks_)) {
             color_write_masks = color_write_masks_;
             dirty_state.color_write_masks = true;
+        }
+    }
+
+    void SetHalfRate(const bool half) {
+        if (half_rate != half) {
+            half_rate = half;
+            dirty_state.half_rate = true;
         }
     }
 
