@@ -417,9 +417,37 @@ void Scheduler::PopPendingOperations() {
         return;
     }
     if (!work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
-        if ((++pending_polls & 31) != 0 && !Gow3Toggle::Disabled(Gow3Toggle::PendingPollLimit)) {
+        // gow3 (experiment, GOW3_PENDING_POLL): an operation is tagged with the tick of the
+        // command buffer being recorded when it was deferred. Until that buffer is submitted
+        // the GPU cannot reach its tick, so a query for it cannot complete anything.
+        //   0: as before, a query every 32 calls
+        //   1: no query while the oldest operation's tick is not submitted yet
+        //   2: as 1, and a query every 256 calls for a submitted tick
+        static const int mode = [] {
+            const char* value = std::getenv("GOW3_PENDING_POLL");
+            return value ? std::atoi(value) : 0;
+        }();
+        static std::atomic<u64> calls{0}, queries{0}, unsubmitted_queries{0}, unsubmitted_calls{0};
+        const bool unsubmitted = pending_ops.front().gpu_tick >= work_semaphore.CurrentTick();
+        const u64 n = calls.fetch_add(1) + 1;
+        unsubmitted_calls.fetch_add(unsubmitted);
+        if ((n & 0x3ffff) == 0) {
+            std::printf("Pending polls: %llu calls with an operation waiting (%llu for a tick not "
+                        "submitted), %llu queries (%llu for a tick not submitted), mode %d\n",
+                        static_cast<unsigned long long>(n),
+                        static_cast<unsigned long long>(unsubmitted_calls.load()),
+                        static_cast<unsigned long long>(queries.load()),
+                        static_cast<unsigned long long>(unsubmitted_queries.load()), mode);
+        }
+        if (mode >= 1 && unsubmitted) {
             return;
         }
+        const u32 mask = mode >= 2 ? 255 : 31;
+        if ((++pending_polls & mask) != 0 && !Gow3Toggle::Disabled(Gow3Toggle::PendingPollLimit)) {
+            return;
+        }
+        queries.fetch_add(1);
+        unsubmitted_queries.fetch_add(unsubmitted);
         work_semaphore.Refresh();
     }
     while (!pending_ops.empty() && work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
