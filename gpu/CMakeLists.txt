@@ -190,7 +190,7 @@ file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
 # the counts of the command processor's packet loop, a coroutine; Clang 19 does not. With Clang 18 that
 # one file is built without the profile.
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND GOW3_PGO STREQUAL "use" AND
-    CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
+    CMAKE_CXX_COMPILER_VERSION VERSION_LESS 99)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/shadps4/video_core/amdgpu/liverpool.cpp
                                 PROPERTIES COMPILE_OPTIONS "-fno-profile-instr-use")
 endif()
