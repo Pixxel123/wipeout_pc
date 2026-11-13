@@ -19,7 +19,7 @@ KEYS = [
     'Upscaling',
     "Temporal upscaling with the game's own motion vectors. FSR 4 needs its assets (below) and a GPU with INT8 dot products; otherwise the game falls back to FSR 3.1 by itself.",
     'Quality preset', 'Render scale per axis: Quality renders at 1/1.5 of the output size.',
-    'Output resolution', 'What the upscaler produces; the HUD is drawn at this size too.',
+    'Output resolution', 'Above 1920x1080 it works like 1920x1080; Render resolution sets how sharp the race is.',
     'Live resolution changes',
     'Off: outputs other than 1080p are set by a patch at start (fastest; changing them in the game restarts it). On: change output and preset in the game without a restart, at a cost.',
     'Sharpening (RCAS)', 'Sharpness', 'Object motion vectors',
@@ -751,7 +751,8 @@ WINDOWS_LANGUAGES = {0x19: 'ru', 0x01: 'ar', 0x0a: 'es', 0x16: 'pt', 0x0c: 'fr',
 EXTRA = {
     'pt': {
         'Show Discord Rich Presence': 'Mostrar Discord Rich Presence',
-        'Shows only the game name and the time played on your Discord profile.': 'Mostra no seu perfil do Discord apenas o nome do jogo e o tempo jogado.',
+        'Shows the game, the track and mode you play, your online lobby and the time played on your Discord profile, as "Playing WipEout: Omega Collection" with its game page.':
+            'Mostra no seu perfil do Discord o jogo, a pista e o modo em que você joga, o seu lobby online e o tempo jogado, como "Playing WipEout: Omega Collection" com a página do jogo.',
         'Game multisampling': 'Multisampling do jogo',
         'Automatic ({}: off)': 'Automático ({}: desligado)',
         'Automatic ({}: on)': 'Automático ({}: ligado)',
@@ -964,7 +965,7 @@ EXTRA = {
         "Renders at this share of this monitor's current size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Generated or scaled sizes above 3840 × 2160 are untested.":
             'Renderiza nesta fração do tamanho atual deste monitor e mostra no tamanho do monitor. Acima de 100 % é supersampling: mais nítido, mais lento. Tamanhos gerados ou escalados acima de 3840 × 2160 não foram testados.',
         'Rendering': 'Renderização',
-        'For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). Other render resolutions output at their own size.': 'Para a resolução de renderização nativa de 1920 × 1080: o que o upscaler produz (o HUD também). As outras resoluções de renderização saem no próprio tamanho.',
+        'For the native 1920 × 1080 render resolution; above 1920 × 1080 it works like 1920 × 1080. Other render resolutions output at their own size.': 'Para a resolução de renderização nativa de 1920 × 1080; acima de 1920 × 1080 funciona como 1920 × 1080. As outras resoluções de renderização saem no próprio tamanho.',
         'Temporal anti-aliasing': 'Antisserrilhamento temporal',
         'Shuffle': 'Aleatório',
         'Music volume': 'Volume da música',
@@ -1100,7 +1101,8 @@ EXTRA = {
     },
     'es': {
         'Show Discord Rich Presence': 'Mostrar Discord Rich Presence',
-        'Shows only the game name and the time played on your Discord profile.': 'Muestra en tu perfil de Discord solo el nombre del juego y el tiempo jugado.',
+        'Shows the game, the track and mode you play, your online lobby and the time played on your Discord profile, as "Playing WipEout: Omega Collection" with its game page.':
+            'Muestra en tu perfil de Discord el juego, la pista y el modo que juegas, tu sala online y el tiempo jugado, como "Playing WipEout: Omega Collection" con la página del juego.',
         'Game multisampling': 'Multisampling del juego',
         'Automatic ({}: off)': 'Automático ({}: desactivado)',
         'Automatic ({}: on)': 'Automático ({}: activado)',
@@ -1369,7 +1371,7 @@ EXTRA = {
         "Renders at this share of this monitor's current size and shows it at the monitor's size. Above 100 % is supersampling: sharper, slower. Generated or scaled sizes above 3840 × 2160 are untested.":
             'Renderiza a esta fracción del tamaño actual de este monitor y lo muestra al tamaño del monitor. Por encima de 100 % es supersampling: más nítido, más lento. Los tamaños generados o escalados mayores de 3840 × 2160 no están probados.',
         'Rendering': 'Renderizado',
-        'For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). Other render resolutions output at their own size.': 'Para la resolución de renderizado nativa de 1920 × 1080: lo que produce el upscaler (también el HUD). Las demás resoluciones de renderizado salen a su propio tamaño.',
+        'For the native 1920 × 1080 render resolution; above 1920 × 1080 it works like 1920 × 1080. Other render resolutions output at their own size.': 'Para la resolución de renderizado nativa de 1920 × 1080; por encima de 1920 × 1080 funciona como 1920 × 1080. Las demás resoluciones de renderizado salen a su propio tamaño.',
         'Temporal anti-aliasing': 'Antialiasing temporal',
         'Shuffle': 'Aleatorio',
         'Music volume': 'Volumen de la música',

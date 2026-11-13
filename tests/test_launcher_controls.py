@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import queue
@@ -849,6 +850,125 @@ class TextureQualityTest(unittest.TestCase):
             self.assertNotIn('GOW3_TEXTURE_LIMIT', launcher.game_environment(dict(launcher.APP_DEFAULTS)))
             low = launcher.game_environment({**launcher.APP_DEFAULTS, 'texture_limit': '2048'})
         self.assertEqual(low['GOW3_TEXTURE_LIMIT'], '2048')
+
+
+class PortableTest(unittest.TestCase):
+    def test_a_settings_file_next_to_the_launcher_keeps_its_options_there(self):
+        # #203: settings.json next to WipEout.exe keeps the launcher's options in that folder.
+        import importlib
+        with tempfile.TemporaryDirectory() as folder:
+            try:
+                with mock.patch.dict(os.environ, {'GOW3_DATA_DIR': folder}):
+                    importlib.reload(launcher)
+                    self.assertNotEqual(launcher.CONFIG_FILE.parent, Path(folder))
+                    (Path(folder) / 'settings.json').write_text('', encoding='utf-8')  # empty: defaults
+                    importlib.reload(launcher)
+                    self.assertEqual(launcher.CONFIG_FILE, Path(folder) / 'settings.json')
+                    self.assertEqual(launcher.load_json(launcher.CONFIG_FILE, {}), {})
+            finally:
+                importlib.reload(launcher)
+
+
+class LauncherGamepadSwitchTest(unittest.TestCase):
+    def test_the_switch_off_ignores_the_controller(self):
+        # #179: players who move the mouse with the stick turn the launcher's controller off.
+        for on, calls in ((True, 1), (False, 0)):
+            app = types.SimpleNamespace(var=lambda key, store, on=on: types.SimpleNamespace(get=lambda: on),
+                                        root=mock.Mock(), gamepad_action=mock.Mock(), poll_gamepad=None,
+                                        in_front=lambda: True)
+            app.root.wm_frame.return_value = '0x10'
+            with mock.patch.object(launcher, 'xinput_buttons', return_value=0x1000), \
+                    mock.patch.object(launcher, 'ctypes', create=True) as fake_ctypes:
+                fake_ctypes.windll.user32.GetForegroundWindow.return_value = 0x10
+                launcher.Launcher.poll_gamepad(app)
+            self.assertEqual(app.gamepad_action.call_count, calls)
+
+
+class TrickButtonTest(unittest.TestCase):
+    def test_the_trick_button_has_no_pad_default_and_binds_on_both_tables(self):
+        # #207: V on the keyboard (the game's own key: nothing sent), no gamepad button until chosen.
+        self.assertNotIn('trick', launcher.keyboard_map({'key': {}}))
+        self.assertEqual(launcher.control_map({'pad': {}}, 'pad'), '')
+        self.assertEqual(launcher.control_map({'pad': {'trick': 'y'}}, 'pad'), 'trick=y')
+        self.assertIn('trick=B', launcher.keyboard_map({'key': {'trick': 'B'}}))
+
+    def test_the_gamepad_icon_of_an_unbound_trick_button_is_empty(self):
+        # The launcher crashed at start (KeyError 'trick') drawing an icon for a button without a default.
+        icon = mock.Mock()
+        app = types.SimpleNamespace(control_vars={'pad': {'trick': types.SimpleNamespace(get=lambda: '')}},
+                                    pad_icons={'trick': icon}, pad_style=types.SimpleNamespace(get=lambda: 'xbox'),
+                                    px=lambda v: v)
+        launcher.Launcher.draw_pad_icon(app, 'trick')
+        icon.delete.assert_called_once_with('all')
+
+
+class MenuFpsCapTest(unittest.TestCase):
+    def test_the_menu_cap_switch_off_lifts_the_60_fps_menus(self):
+        # #177: off sets GOW3_MENU_FPS=0 over the profile's 60; on leaves the profile (or the player's variable).
+        base = dict(launcher.APP_DEFAULTS, game_dir='')
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('GOW3_MENU_FPS', None)
+            self.assertNotIn('GOW3_MENU_FPS', launcher.game_environment(base))
+            self.assertEqual(launcher.game_environment(dict(base, menu_fps_cap=False))['GOW3_MENU_FPS'], '0')
+            self.assertNotIn('GOW3_PHOTO_FLARE', launcher.game_environment(base))
+            self.assertEqual(launcher.game_environment(dict(base, photo_flare=False))['GOW3_PHOTO_FLARE'], '0')
+
+
+class LinuxLauncherTest(unittest.TestCase):
+    def test_joystick_events_give_the_launcher_buttons(self):
+        # Knack #28: /dev/input/js* events (time, value, type, number), keys by kernel code.
+        pad = launcher.LinuxPad()
+        pad.keys, pad.axes = (0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b), (0x00, 0x01, 0x10, 0x11)
+        event = lambda value, kind, number: struct.pack('<IhBB', 0, value, kind, number)
+        pad.feed(event(0, 0x81, 0) + event(0, 0x82, 1))  # the starting state: nothing held
+        self.assertEqual(pad.buttons(), 0)
+        pad.feed(event(1, 1, 0) + event(-32767, 2, 1) + event(1, 1, 7))  # A, stick up, Start
+        self.assertEqual(pad.buttons(), 0x1000 | 0x1 | 0x10)
+        pad.feed(event(0, 1, 0) + event(0, 2, 1) + event(32767, 2, 2))  # released; hat right
+        self.assertEqual(pad.buttons(), 0x10 | 0x8)
+
+    def test_linux_offers_the_appimage_and_swaps_it_in(self):
+        import io
+        release = {'tag_name': 'windows-v9.9.9', 'html_url': 'p', 'body': '', 'assets': [
+            {'name': 'wipeout-windows.zip', 'browser_download_url': 'z'},
+            {'name': 'wipeout-x86_64.AppImage', 'browser_download_url': 'a'}]}
+        response = lambda *_a, **_k: io.BytesIO(json.dumps(release).encode())
+        for windows, url in ((True, 'z'), (False, 'a')):
+            with mock.patch.object(launcher, 'WINDOWS', windows),                     mock.patch.object(launcher.urllib.request, 'urlopen', response):
+                self.assertEqual(launcher.latest_release()[1], url)
+        with tempfile.TemporaryDirectory() as folder:
+            running, new = Path(folder) / 'w.AppImage', Path(folder) / 'w.AppImage.part'
+            running.write_bytes(b'old')
+            new.write_bytes(b'new')
+            with mock.patch.object(launcher.subprocess, 'Popen') as started:
+                launcher.install_appimage(new, running)
+            self.assertEqual(running.read_bytes(), b'new')
+            self.assertFalse(new.exists())
+            self.assertEqual(started.call_args[0][0], [str(running)])
+
+
+class UpdateDownloadTest(unittest.TestCase):
+    def test_a_cut_download_is_an_error_and_a_whole_zip_is_kept(self):
+        # #191: the connection ended early and the launcher said "File is not a zip file".
+        import io
+        import zipfile
+        whole = io.BytesIO()
+        with zipfile.ZipFile(whole, 'w') as package:
+            package.writestr('WipEout.exe', b'x' * 5000)
+        data = whole.getvalue()
+
+        def opener(body, length):
+            response = io.BytesIO(body)
+            response.headers = {'Content-Length': str(length)}
+            return lambda request, timeout: response
+        with tempfile.TemporaryDirectory() as folder:
+            archive = Path(folder) / 'update.zip'
+            with self.assertRaises(OSError):
+                launcher.download_update('https://example.invalid/w.zip', archive, opener=opener(data[:100], len(data)))
+            with self.assertRaises(OSError):  # no length from the server and not a zip
+                launcher.download_update('https://example.invalid/w.zip', archive, opener=opener(b'<html>', 0))
+            launcher.download_update('https://example.invalid/w.zip', archive, opener=opener(data, len(data)))
+            self.assertTrue(zipfile.is_zipfile(archive))
 
 
 class ReleaseVersionTest(unittest.TestCase):

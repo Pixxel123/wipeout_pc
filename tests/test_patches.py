@@ -270,6 +270,16 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(patch_requirements(GOW3, ['Frame Rate Patch - 120 FPS'], '01.02'), (None, 120))
         self.assertEqual(patch_requirements(GOW3, [], '01.02'), (None, None))
 
+    def test_native_4k_grows_the_pro_heap_only_in_pro_mode(self):
+        # #184: the Pro heap table (0x86bb80) goes 4736 -> 5248 MB; the pool follows only in Pro mode.
+        native = ['Native 4K rendering (no checkerboard)']
+        self.assertEqual(patch_requirements(WIPEOUT, native, '01.00'), (None, None))
+        self.assertEqual(patch_requirements(WIPEOUT, native, '01.00', neo=True), (5056 + 1024, None))
+        self.assertEqual(patch_requirements(WIPEOUT, native + ['Resolution Patch - 4K'], '01.00'),
+                         (5056 + 1024, None))
+        writes = dict(compile_patches(WIPEOUT, native + ['Resolution Patch - 4K'], '01.00', SEGMENTS))
+        self.assertEqual(writes[0x86bb80], bytes.fromhex('0000004801000000'))  # Pro: 5248 MB
+        self.assertEqual(writes[0x86bb60], bytes.fromhex('0000004801000000'))  # PS4: 5248 MB (4K patch)
 
 
 class ModPatchTests(unittest.TestCase):
@@ -419,12 +429,13 @@ class HalfResolutionTests(unittest.TestCase):
         names = [m.get('Name') for m in ET.parse(WIPEOUT).getroot().iter('Metadata')]
         self.assertEqual(names, ['Resolution Patch - 2560x1080', 'Resolution Patch - 5120x2160',
                                  'Resolution Patch - 720p', 'Resolution Patch - 900p',
-                                 'Resolution Patch - 1440p', 'Resolution Patch - 4K', 'Resolution Patch - 3440x1440',
+                                 'Resolution Patch - 1440p', 'Resolution Patch - 4K', 'Resolution Patch - 5120x2880',
+                                 'Resolution Patch - 7680x4320', 'Resolution Patch - 3440x1440',
                                  'Resolution Patch - 1920x1200', 'Resolution Patch - 2560x1600', 'Resolution Patch - 2880x1800',
                                  'Resolution Patch - 1920x1440',
                                  'Resolution Patch - 3840x1600', 'Resolution Patch - 5120x1440',
                                  'Native 4K rendering (no checkerboard)',
-                                 'Bug Fix - Startup Hang', 'Bug Fix - Effects above 60 FPS', 'Bug Fix - Engine trail above 60 FPS',
+                                 'Skip the autosave notice', 'Bug Fix - Startup Hang', 'Bug Fix - Effects above 60 FPS', 'Bug Fix - Engine trail above 60 FPS',
                                  'Bug Fix - Zone crash above 60 FPS', 'Bug Fix - Model slots',
                                  'Cheat - Unlock all HD and Fury events',
                                  'Cheat - Top rank in 2048', 'Cheat - Unlock all ships',
@@ -461,6 +472,20 @@ class HalfResolutionTests(unittest.TestCase):
         self.assertIn('Bug Fix - Zone crash above 60 FPS', selected_patches(WIPEOUT, '01.00', '', only=True))
         self.assertEqual(compile_patches(WIPEOUT, ['Bug Fix - Zone crash above 60 FPS'], '01.00', SEGMENTS),
                          [(0x665e66, bytes.fromhex('8b0558ff8600 ffc8 83e003 890535223400'))])
+
+    def test_wipeout_fades_take_the_exact_factor(self):
+        # The fades step once by 1 - (1 - rate)^(dt * 60) at any frame rate: F (x87: fyl2x, f2xm1, fscale
+        # in X) lives in the underwater sound's old loop, X in the shield block, and the shield's first call
+        # lands on F. The engine trail is one line (A, the check between, B) with its own F and X.
+        writes = dict(compile_patches(WIPEOUT, ['Bug Fix - Effects above 60 FPS'], '01.00', SEGMENTS))
+        shield, f_at = writes[0x39ce99], 0x789b21 + 20
+        self.assertEqual(shield[37], 0xe8)
+        self.assertEqual(0x39ce99 + 42 + struct.unpack_from('<i', shield, 38)[0], f_at)
+        self.assertEqual(writes[0x789b21][20:24], bytes.fromhex('4883ec08'))  # F: sub rsp, 8
+        self.assertIn(bytes.fromhex('d9f1'), shield)  # fyl2x
+        trail = compile_patches(WIPEOUT, ['Bug Fix - Engine trail above 60 FPS'], '01.00', SEGMENTS)
+        self.assertEqual([(at, len(data)) for at, data in trail], [(0x736db0, 254)])
+        self.assertIn(bytes.fromhex('d9f0'), trail[0][1])  # f2xm1
 
     def test_wipeout_model_slots_move_to_the_reserve(self):
         # #96: the model table (1396 slots of 0x360) moves to 4096 slots in the linked image's
@@ -507,7 +532,8 @@ class HalfResolutionTests(unittest.TestCase):
     def test_wipeout_native_4k_keeps_the_4k_mode_flag_false(self):
         # (field & 0xff00) > imm: 0xff00 can never be exceeded, the original 0xeff is from 3840 wide.
         self.assertEqual(compile_patches(WIPEOUT, ['Native 4K rendering (no checkerboard)'], '01.00', SEGMENTS),
-                         [(0x7fb659, (0xff00).to_bytes(4, 'little'))])
+                         [(0x7fb659, (0xff00).to_bytes(4, 'little')),
+                          (0x86bb80, (5248 << 20).to_bytes(8, 'little'))])  # Pro heap (#184)
 
     def test_wipeout_resolution_patches_size_output_half_buffers_and_aspect(self):
         size = lambda value: int.from_bytes(bytes.fromhex(value), 'little')

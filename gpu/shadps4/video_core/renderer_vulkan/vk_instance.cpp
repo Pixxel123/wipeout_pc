@@ -195,7 +195,7 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
                VK_VERSION_MAJOR(TargetVulkanApiVersion), VK_VERSION_MINOR(TargetVulkanApiVersion),
                VK_VERSION_MAJOR(properties.apiVersion), VK_VERSION_MINOR(properties.apiVersion));
 
-    CreateDevice();
+    CreateDevice(window_info.type != Frontend::WindowSystemType::Headless);
     CollectPhysicalMemoryInfo();
     CollectImageFormatInfo();
     CollectToolingInfo();
@@ -229,6 +229,21 @@ namespace {
 bool PipelineBinaryCacheRequested() {
     const char* setting = std::getenv("GOW3_PIPELINE_BINARIES");
     return !setting || *setting != '0';
+}
+/// gow3: NVIDIA returns a 2 MB compression dictionary with every pipeline's binaries and keeps a
+/// copy of it in each pipeline restored from them: about 2 MiB of commit a pipeline. A warm-up of
+/// 9,168 pipelines on an RTX 5090 ended at 22.6 GB of private commit with the binary cache and
+/// 3.2 GB without, and was no faster (4.2 s vs 3.7 s): the driver's own shader cache builds them
+/// as quickly. GOW3_PIPELINE_BINARIES_NVIDIA=1 keeps the binary cache there.
+bool PipelineBinariesForVendor(u32 vendor_id) {
+    constexpr u32 Nvidia = 0x10DE;
+    const char* keep = std::getenv("GOW3_PIPELINE_BINARIES_NVIDIA");
+    if (vendor_id != Nvidia || (keep && *keep && *keep != '0')) {
+        return true;
+    }
+    std::printf("Pipeline binary cache: off on NVIDIA (the driver keeps a 2 MB copy in every "
+                "pipeline restored from binaries; GOW3_PIPELINE_BINARIES_NVIDIA=1 keeps it)\n");
+    return false;
 }
 }
 
@@ -278,7 +293,7 @@ bool InitializePipelineBinaryCache(vk::Device device, bool supported,
     return true;
 }
 
-bool Instance::CreateDevice() {
+bool Instance::CreateDevice(bool needs_swapchain) {
     const vk::StructureChain feature_chain = physical_device.getFeatures2<
         vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
         vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
@@ -327,8 +342,12 @@ bool Instance::CreateDevice() {
     };
 
     // Required
-    ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
-               "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // A headless instance has no VK_KHR_surface. Enabling swapchain without its
+    // required instance extension is invalid, even when no swapchain is created.
+    if (needs_swapchain) {
+        ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
+                   "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
     ASSERT_MSG(add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME),
@@ -347,7 +366,8 @@ bool Instance::CreateDevice() {
 
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
-    pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&
+    pipeline_binaries = PipelineBinaryCacheRequested() &&
+        PipelineBinariesForVendor(properties.vendorID) && maintenance_5 &&
         feature_chain.get<vk::PhysicalDeviceMaintenance5FeaturesKHR>().maintenance5 &&
         feature_chain.get<vk::PhysicalDevicePipelineBinaryFeaturesKHR>().pipelineBinaries &&
         add_extension(VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);

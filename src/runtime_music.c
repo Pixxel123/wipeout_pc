@@ -38,6 +38,7 @@ static size_t *order, pos;    /* play order (file indexes): order[pos] is being 
 static int order_shuffled;
 static long jump=-1;          /* the song the menu asked for */
 static volatile int skipping; /* the decoder drops what it decodes until it takes the jump */
+static char current_song[256]; /* the song announced last, for Discord when the music comes back on */
 static char notice[600];      /* "Now playing" once the ring reaches frame notice_at */
 static size_t notice_at;
 static long notice_file=-1, playing=-1;
@@ -50,6 +51,7 @@ static unsigned char *played;    /* per file: played in this round (music_played
 static char played_path[1100];
 static size_t menu_songs;        /* songs in any group's subfolder */
 static size_t group_songs[GROUPS];
+static long group_last[GROUPS]={-1,-1,-1,-1,-1}; /* #182: each group's last song started */
 static volatile int mode;        /* GROUP_ZONE..GROUP_DETONATOR from the mode's sound banks, else 0 */
 static volatile int in_race;     /* the game loaded a race's sound banks, not the menus' */
 static volatile unsigned loads;  /* sound bank loads of a race or the menus: a loading screen */
@@ -104,8 +106,9 @@ static char *display_name(const char *path) {
 }
 /* Whether a song plays now: the group of the scene (menus, the race's mode, other races); every
  * song when that group has none. */
+static int scene_group(void) { return !in_race ? GROUP_MENU : group_songs[mode] ? mode : GROUP_RACE; }
 static int fits(size_t file) {
-    const int group=!in_race ? GROUP_MENU : group_songs[mode] ? mode : GROUP_RACE;
+    const int group=scene_group();
     return !group_songs[group] || menu_song[file]==group;
 }
 /* The play order from `first` on (under lock): shuffled, or the list's order. */
@@ -200,12 +203,15 @@ static void announce(const AVFormatContext *format, const AVStream *stream, size
     const AVDictionaryEntry *title=av_dict_get(format->metadata,"title",NULL,0), *artist=av_dict_get(format->metadata,"artist",NULL,0);
     if (!title) title=av_dict_get(stream->metadata,"title",NULL,0);
     if (!artist) artist=av_dict_get(stream->metadata,"artist",NULL,0);
-    char text[sizeof(notice)];
-    if (title && artist) snprintf(text,sizeof(text),"Now playing: %s - %s",artist->value,title->value);
-    else snprintf(text,sizeof(text),"Now playing: %s",title ? title->value : names[file]);
+    char text[sizeof(notice)], song[sizeof(notice)];
+    if (title && artist) snprintf(song,sizeof(song),"%s - %s",artist->value,title->value);
+    else snprintf(song,sizeof(song),"%s",title ? title->value : names[file]);
+    snprintf(text,sizeof(text),"Now playing: %.*s",(int)sizeof(text)-14,song); /* GCC -Wformat-truncation */
     pthread_mutex_lock(&lock); /* shown once the ring plays this file's first frame */
-    if (!skipping) { memcpy(notice,text,sizeof(notice)); notice_at=head; notice_file=(long)file; notice_pending=1; }
+    const int announced=!skipping;
+    if (announced) { memcpy(notice,text,sizeof(notice)); notice_at=head; notice_file=(long)file; notice_pending=1; snprintf(current_song,sizeof(current_song),"%.*s",(int)sizeof(current_song)-1,song); }
     pthread_mutex_unlock(&lock);
+    if (announced) runtime_presence_song(song); /* Discord shows it too */
 }
 /* Decodes one file into the ring; 0 if it cannot be played. */
 static int play(size_t file) {
@@ -280,6 +286,7 @@ static void *decode(void *unused) {
         pthread_mutex_lock(&lock);
         const size_t file=order[pos];
         played[file]=1;
+        group_last[menu_song[file]]=(long)file;
         save_played();
         pthread_mutex_unlock(&lock);
         failures=play(file) ? 0 : failures+1;
@@ -333,15 +340,27 @@ void runtime_music_step(int direction) {
     const size_t now=playing>=0 ? (size_t)playing : order[pos];
     size_t k=pos;
     for (size_t i=0;i<file_count;++i) if (order[i]==now) k=i;
-    size_t song=order[(k+(direction>0 ? 1 : file_count-1))%file_count];
-    for (size_t tries=1; tries<file_count && !fits(song); ++tries)
-        song=order[(k+(direction>0 ? 1+tries : file_count-1-tries))%file_count];
+    size_t song;
+    if (direction>0) {
+        /* #182: like the end of a song (this round's next in shuffle). After a scene change, from
+         * the new scene's last song: stepping from the other scene's song always landed on the
+         * same neighbour (one menu song -> the same race song every race). */
+        const long last=group_last[scene_group()];
+        if (!fits(now) && last>=0) for (size_t i=0;i<file_count;++i) if (order[i]==(size_t)last) k=i;
+        next_song((k+1)%file_count,order_shuffled,(long)now);
+        song=order[pos];
+    } else {
+        song=order[(k+file_count-1)%file_count];
+        for (size_t tries=1; tries<file_count && !fits(song); ++tries) song=order[(k+file_count-1-tries)%file_count];
+    }
     pthread_mutex_unlock(&lock);
     runtime_music_play((int)song);
 }
 
 /* The game loaded a race's sound banks last, not the menus' (frame limit in the menus, #118). */
 int runtime_music_in_race(void) { return in_race; }
+/* A Zone race (its sound banks): WipEout adds the Zone points once a frame (#118). */
+int runtime_music_in_zone(void) { return in_race && mode==GROUP_ZONE; }
 
 void runtime_music_scene(const char *guest_path) {
     const char *env=strstr(guest_path,"/audio/sound/") ? strstr(guest_path,"/env") : NULL;
@@ -359,7 +378,7 @@ void runtime_music_scene(const char *guest_path) {
     else if (!strcmp(name,"speech_elim.bnk")) mode=GROUP_ELIMINATOR;
     else if (!strcmp(name,"speech_det.bnk") || !strcmp(name,"weapons_det.bnk") || !strcmp(name,"env0_det.bnk")) mode=GROUP_DETONATOR;
     if ((in_race!=was || mode!=was_mode) && menu_songs) {
-        const int group=!in_race ? GROUP_MENU : group_songs[mode] ? mode : GROUP_RACE;
+        const int group=scene_group();
         printf("Music: %s songs from now on\n",group==GROUP_RACE ? "race" : group_folders[group]);
     }
 }
@@ -370,7 +389,12 @@ int runtime_music_bgm(float *pcm, int frames, int channels) {
     int show=0;
     pthread_once(&once,start);
     if (!scanned || !file_count || !playable || channels<2 || frames<=0 || frames>2048) return 0;
-    if (!gow3gpu_music_on()) return 0; /* the game's music; the ring waits where it stopped */
+    static int music_off; /* Discord shows no song while the game's music plays */
+    if (!gow3gpu_music_on()) { /* the game's music; the ring waits where it stopped */
+        if (!music_off) { music_off=1; runtime_presence_song(""); }
+        return 0;
+    }
+    if (music_off) { music_off=0; runtime_presence_song(current_song); }
     /* Follow the game's own music (#66), which pcm still holds: it is silent while loading and at
      * the race intro, fades out between menus and races, and starts again for each race. Our songs
      * play at full level while the game's music is within 10 dB of its usual level, follow its
@@ -404,9 +428,11 @@ int runtime_music_bgm(float *pcm, int frames, int channels) {
         const unsigned now_loads=loads;
         /* After a loading screen: the game's music comes back after its silence, or it came back
          * just before the sound banks loaded (Quit in the pause menu, whose silence came first),
-         * or it never stopped: 10 s, or 2 s when the song is of the other scene (#130: after a
-         * finished race the game's music goes on, and the race song played on for 10 s). */
-        if (now_loads!=loads_seen && (silent_frames>=12000 || since_silence<3*48000 || since_load>=(switch_song ? 2 : 10)*48000)) {
+         * or it never stopped: 10 s, or 2 s back in the menus with a race song (#130: after a
+         * finished race the game's music goes on, and the race song played on for 10 s). Not into a
+         * race: there the game's music fades out for the intro a few seconds after the load, and a
+         * race song started at 2 s played a moment, then waited for the race (#180). */
+        if (now_loads!=loads_seen && (silent_frames>=12000 || since_silence<3*48000 || since_load>=(switch_song && !in_race ? 2 : 10)*48000)) {
             loads_seen=now_loads; since_load=0;
             if (heard && (switch_song || !gow3gpu_music_continue())) { runtime_music_step(1); heard=0; }
             switch_song=0;

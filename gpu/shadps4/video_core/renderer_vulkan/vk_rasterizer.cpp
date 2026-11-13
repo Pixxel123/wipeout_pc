@@ -1070,9 +1070,19 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     DiagPassBoundary(false);
     const auto& regs = Regs();
     // gow3: the pass copying a finished frame to a display buffer; the previous draw's
-    // target is that frame.
-    if (camera_motion->Enabled() && regs.color_buffers[0] &&
-        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+    // target is that frame. Once per display buffer: WipEout draws its HUD into the display
+    // buffer after the copy, and each HUD draw ran the frame hooks again (#206: history reset,
+    // jitter advanced several times a frame).
+    // ponytail: assumes flips rotate display buffers; a single-buffer game counts one frame.
+    const VAddr display = regs.color_buffers[0] &&
+                                  FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())
+                              ? regs.color_buffers[0].Address()
+                              : 0;
+    const bool new_display_frame = display && display != last_display_buffer;
+    if (new_display_frame) {
+        last_display_buffer = display;
+    }
+    if (new_display_frame && camera_motion->Enabled()) {
         scene_started = false;
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
@@ -1083,21 +1093,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         object_motion->OnFrameStart();
         NoteFrameStart();
         static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
-        // gow3: armed once per frame, at the first draw into a new display buffer. WipEout draws
-        // its HUD into the display buffer after the copy, and each of those draws comes through
-        // here: re-testing the trigger cleared the flag before the next frame's scene passes.
-        if (regs.color_buffers[0].Address() != scene_debug_buffer) {
-            scene_debug_buffer = regs.color_buffers[0].Address();
-            scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
-            scene_targets->debug = scene_debug_frame;
-        }
-    } else if (regs.color_buffers[0] &&
-               FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
-               regs.color_buffers[0].Address() != last_display_buffer) {
-        // Without an upscaler: still count the frame (GOW3_GPU_PROFILE, GOW3_BUFFER_STATS),
-        // once per display buffer since the HUD draws into it as well.
-        // ponytail: assumes flips rotate display buffers; a single-buffer game counts one frame.
-        last_display_buffer = regs.color_buffers[0].Address();
+        scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
+        scene_targets->debug = scene_debug_frame;
+    } else if (new_display_frame) {
+        // Without an upscaler: still count the frame (GOW3_GPU_PROFILE, GOW3_BUFFER_STATS).
         NoteFrameStart();
     }
     bind_prepared = used_prepared;
@@ -1256,7 +1255,31 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
+    // gow3: draws left out by their pixel shader. GOW3_SKIP_PS=<hex>,<hex> (debugging: find a draw
+    // by its effect; the frame capture lists the hashes). GOW3_PHOTO_FLARE=0 (#199): WipEout's photo
+    // mode adds a lens flare (ps 38e15bc4, a half-size pass sampling its flare textures) that colours
+    // the ship and its exhaust; the races don't draw it.
+    static const std::vector<u64> skip_ps = [] {
+        std::vector<u64> list;
+        if (const char* v = std::getenv("GOW3_SKIP_PS")) {
+            for (const char* p = v; *p;) {
+                char* end;
+                list.push_back(std::strtoull(p, &end, 16));
+                p = *end ? end + 1 : end;
+            }
+        }
+        if (const char* v = std::getenv("GOW3_PHOTO_FLARE"); v && v[0] == '0') {
+            list.push_back(0x38e15bc4);
+        }
+        return list;
+    }();
+    const auto* skip_stage = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const bool skip_draw =
+        skip_stage && std::find(skip_ps.begin(), skip_ps.end(), skip_stage->pgm_hash) != skip_ps.end();
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        if (skip_draw) {
+            return;
+        }
         const auto draw = [&] {
             if (is_indexed) {
                 cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
@@ -3287,9 +3310,13 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto* depth =
             db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
         census.raster_samples = u8(key.num_samples);
+        const auto* fs_info = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        const bool per_sample =
+            fs_info && FragmentShadesPerSample(regs, fs_info, pipeline_cache.GetProfile());
         census.path = PassCensus::ResolveSamplePath(
             census.color_samples, census.depth_samples, depth != nullptr,
-            instance.IsMixedAnySamplesSupported(), instance.IsMixedDepthSamplesSupported());
+            instance.IsMixedAnySamplesSupported(), instance.IsMixedDepthSamplesSupported(),
+            per_sample);
         census.sample_shading =
             regs.ps_input_addr.persp_sample_ena || regs.ps_input_addr.linear_sample_ena;
         census.feedback_loop = attachment_feedback_loop;

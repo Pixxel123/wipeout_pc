@@ -26,6 +26,7 @@ import runpy
 import shutil
 import stat
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,8 @@ from prepare import load_sfo  # noqa: E402  (scripts/)
 DATA_DIR = Path(os.environ.get('GOW3_DATA_DIR', PORT_DIR))
 CONFIG_DIR = (Path(os.environ.get('APPDATA', Path.home())) if WINDOWS else
               Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')) / 'wipeout-launcher'
+if (DATA_DIR / 'settings.json').is_file():  # #203 portable: the launcher's settings stay next to it
+    CONFIG_DIR = DATA_DIR
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 WINDOW_POSITION = CONFIG_DIR / 'window.json'  # #151: the launcher's last position
 MOD_PRESETS = DATA_DIR / 'mods_presets.json'
@@ -539,6 +542,11 @@ def launcher_ui_scale(mode, desktop_scale=1.0):
     return float(mode) if mode in ('1', '2') else desktop_scale
 
 
+def can_update():
+    """Windows installs a zip; Linux replaces the AppImage it runs from (Knack #28)."""
+    return WINDOWS or bool(os.environ.get('APPIMAGE'))
+
+
 def host_environment():
     """The environment of the user's session for programs outside the bundle (xdg-open)."""
     env = dict(os.environ)
@@ -644,7 +652,9 @@ PAD_ACTIONS = ((0x1, 'up'), (0x2, 'down'), (0x4, 'left'), (0x8, 'right'), (0x10,
 
 
 def xinput_buttons():
-    """The first connected Xbox controller's buttons, None when there is none (Windows only)."""
+    """The first connected Xbox controller's buttons, None when there is none (LINUX_PAD on Linux)."""
+    if not WINDOWS:
+        return LINUX_PAD.read()
     global _xinput
     if '_xinput' not in globals():
         _xinput = None
@@ -662,6 +672,79 @@ def xinput_buttons():
                 int.from_bytes(bytes(state[10:12]), 'little', signed=True)
             return buttons | (ly > 16000) | (ly < -16000) << 1 | (lx < -16000) << 2 | (lx > 16000) << 3
     return None
+
+
+# Knack #28: on Linux the first joystick device (/dev/input/js*, readable without extra groups) gives
+# the same bits as xinput_buttons. Its buttons and axes are found by the kernel's codes (JSIOCGBTNMAP,
+# JSIOCGAXMAP), so Xbox, PlayStation and Steam Deck pads map alike.
+JS_KEYS = {0x130: 0x1000, 0x131: 0x2000, 0x136: 0x100, 0x137: 0x200, 0x13a: 0x20, 0x13b: 0x10,
+           0x220: 0x1, 0x221: 0x2, 0x222: 0x4, 0x223: 0x8}  # BTN_SOUTH, EAST, TL, TR, SELECT, START, D-pad
+JS_AXES = {0x00: (0x4, 0x8), 0x01: (0x1, 0x2), 0x10: (0x4, 0x8), 0x11: (0x1, 0x2)}  # X, Y, hat X, hat Y
+JS_DEFAULT_KEYS = (0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e)  # xpad order
+JS_DEFAULT_AXES = (0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x10, 0x11)
+
+
+class LinuxPad:
+    def __init__(self):
+        self.fd, self.keys, self.axes, self.down, self.values, self.next_try = None, JS_DEFAULT_KEYS, JS_DEFAULT_AXES, set(), {}, 0.0
+
+    def feed(self, data):
+        """js_event records (u32 time, s16 value, u8 type, u8 number), JS_EVENT_INIT ones included."""
+        for offset in range(0, len(data) - 7, 8):
+            _time, value, kind, number = struct.unpack_from('<IhBB', data, offset)
+            if kind & 0x7f == 1 and number < len(self.keys):
+                (self.down.add if value else self.down.discard)(self.keys[number])
+            elif kind & 0x7f == 2 and number < len(self.axes):
+                self.values[self.axes[number]] = value
+
+    def buttons(self):
+        bits = 0
+        for code in self.down:
+            bits |= JS_KEYS.get(code, 0)
+        for code, (negative, positive) in JS_AXES.items():
+            value = self.values.get(code, 0)
+            bits |= negative if value < -16000 else positive if value > 16000 else 0
+        return bits
+
+    def read(self):
+        """The buttons now; None without a joystick (looked for every 3 seconds)."""
+        if self.fd is None:
+            if time.monotonic() < self.next_try:
+                return None
+            self.next_try = time.monotonic() + 3
+            for path in sorted(glob.glob('/dev/input/js*')):
+                with contextlib.suppress(OSError):
+                    self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                    self.keys, self.axes, self.down, self.values = JS_DEFAULT_KEYS, JS_DEFAULT_AXES, set(), {}
+                    with contextlib.suppress(OSError, ImportError):
+                        import array
+                        import fcntl
+                        count = array.array('B', [0])
+                        fcntl.ioctl(self.fd, 0x80016a12, count)  # JSIOCGBUTTONS
+                        keys = array.array('H', [0] * 0x200)
+                        fcntl.ioctl(self.fd, 0x84006a34, keys)  # JSIOCGBTNMAP
+                        self.keys = tuple(keys[:count[0]])
+                        count = array.array('B', [0])
+                        fcntl.ioctl(self.fd, 0x80016a11, count)  # JSIOCGAXES
+                        axes = array.array('B', [0] * 0x40)
+                        fcntl.ioctl(self.fd, 0x80406a32, axes)  # JSIOCGAXMAP
+                        self.axes = tuple(axes[:count[0]])
+                    break
+            if self.fd is None:
+                return None
+        try:
+            while data := os.read(self.fd, 8 * 64):
+                self.feed(data)
+        except BlockingIOError:
+            pass
+        except OSError:  # unplugged
+            os.close(self.fd)
+            self.fd = None
+            return None
+        return self.buttons()
+
+
+LINUX_PAD = LinuxPad()
 # The custom soundtrack's file types, as src/runtime_music.c.
 MUSIC_TYPES = ('.mp3', '.ogg', '.oga', '.opus', '.flac', '.wav', '.m4a', '.aac', '.wma')
 UI_SCALES = [('auto', ('Auto',)), ('1', ('1x',)), ('2', ('2x',))]
@@ -676,7 +759,7 @@ APP_DEFAULTS = {'ui_language': 'en', 'ui_scale': 'auto', 'game_dir': os.environ.
                 'gpu_id': '', 'partial_height_views': True, 'background_warmup': True, 'parallel_warmup': True, 'pipeline_binary_cache': True,
                 'perf_diag': False, 'frame_capture_key': False, 'upscaler_key': False, 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'close_on_play': False, 'discord_rpc': False,
-                'update_popup': True, 'game_patches': {}, 'controls': {}, 'pad_style': 'playstation', 'gamepad_number': '1', 'pad_scheme': '',
+                'update_popup': True, 'launcher_gamepad': True, 'menu_fps_cap': True, 'photo_flare': True, 'game_patches': {}, 'controls': {}, 'pad_style': 'playstation', 'gamepad_number': '1', 'pad_scheme': '',
                 'controls_layout': 2,
                 'glyph_style': 'off', 'eliminator_limit': '2000'}
 
@@ -688,11 +771,13 @@ CONTROLS = [('cross', 'Space', 'a'), ('circle', 'Left Shift', 'b'), ('square', '
             ('l2', 'R', None), ('r2', 'F', None), ('l3', 'Z', 'leftstick'),
             ('r3', 'C', 'rightstick'), ('options', 'Return', 'start'),
             ('touchpad_left', 'Tab', None), ('touchpad_right', 'Backspace', 'back'),
-            ('up', 'I', 'dpup'), ('down', 'K', 'dpdown'), ('left', 'J', 'dpleft'), ('right', 'L', 'dpright')]
+            ('up', 'I', 'dpup'), ('down', 'K', 'dpdown'), ('left', 'J', 'dpleft'), ('right', 'L', 'dpright'),
+            ('trick', 'V', '')]  # #207: no gamepad button by default ('' = none, bindable)
 PS_BUTTON_NAMES = {'cross': 'Cross', 'circle': 'Circle', 'square': 'Square', 'triangle': 'Triangle',
                    'l1': 'L1', 'r1': 'R1', 'l2': 'L2', 'r2': 'R2', 'l3': 'L3', 'r3': 'R3',
                    'options': 'Options', 'touchpad_left': 'Touchpad left', 'touchpad_right': 'Touchpad right',
-                   'up': 'D-pad up', 'down': 'D-pad down', 'left': 'D-pad left', 'right': 'D-pad right'}
+                   'up': 'D-pad up', 'down': 'D-pad down', 'left': 'D-pad left', 'right': 'D-pad right',
+                   'trick': 'Side-shift / barrel roll'}
 # Gamepad buttons by SDL name, labelled as on a PlayStation or an Xbox controller.
 PAD_STYLES = {
     'playstation': {'a': 'Cross', 'b': 'Circle', 'x': 'Square', 'y': 'Triangle', 'leftshoulder': 'L1',
@@ -844,7 +929,7 @@ def keyboard_map(controls):
 def control_changes(values, kind):
     """The buttons whose chosen key or SDL gamepad name differs from the default."""
     return {row[0]: values[row[0]].strip() for row in CONTROLS
-            if default_input(row, kind) and values.get(row[0], '').strip()
+            if default_input(row, kind) is not None and values.get(row[0], '').strip()
             and values[row[0]].strip().casefold() != default_input(row, kind).casefold()}
 
 
@@ -858,7 +943,8 @@ def control_values(controls, kind):
     if 'touchpad' in chosen and 'touchpad_left' not in values:
         values['touchpad_left'] = chosen['touchpad']
     return {button: values[button] for button, key, pad in CONTROLS
-            if (pad if kind == 'pad' else key) and isinstance(values.get(button), str) and values[button].strip()}
+            if (pad if kind == 'pad' else key) is not None and isinstance(values.get(button), str)
+            and values[button].strip()}
 
 
 def control_map(controls, kind):
@@ -1454,6 +1540,10 @@ def game_environment(s):
     # The Graphics page's anti-aliasing switch (build_graphics); off, run.py keeps the upscaler out.
     env['GOW3_EXPERIMENTAL_UPSCALER'] = '1' if s.get('experimental_upscaler') else '0'
     env['GOW3_NEO'] = '1' if s.get('ps4_pro') else '0'  # the game asks sceKernelIsNeoMode
+    if not s.get('menu_fps_cap', True):  # #177: menus at the frame rate limit too (the profile caps them at 60)
+        env['GOW3_MENU_FPS'] = '0'
+    if not s.get('photo_flare', True):  # #199: the photo mode's lens flare left out
+        env['GOW3_PHOTO_FLARE'] = '0'
     if s.get('update_dir'):
         env['GOW3_PATCH_DIR'] = s['update_dir']
     if not WINDOWS:
@@ -1644,9 +1734,8 @@ class Launcher:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
         root.after(500, self.watch_changes)
-        if WINDOWS:
-            root.after(500, self.poll_gamepad)
-        if WINDOWS and self.app['update_popup']:
+        root.after(500, self.poll_gamepad)
+        if can_update() and self.app['update_popup']:
             threading.Thread(target=self.check_update, daemon=True).start()
 
     def meta_dir(self):
@@ -2176,12 +2265,22 @@ class Launcher:
                 and 'popdown' not in str(event.widget):
             page.scroll({4: -1, 5: 1}.get(event.num) or int(-event.delta / 120))
 
+    def in_front(self):
+        """Whether the launcher window has the focus (its gamepad input is only for itself)."""
+        if WINDOWS:
+            return ctypes.windll.user32.GetForegroundWindow() == int(self.root.wm_frame(), 16)
+        try:
+            return self.root.focus_displayof() is not None
+        except self.tk.TclError:
+            return False
+
     def poll_gamepad(self):
         """#145: an Xbox (XInput) controller drives the launcher while its window is in front:
         LB/RB pages, D-pad or left stick up/down moves, left/right changes a choice or a slider,
         A selects, B goes home, Start plays, Back saves."""
         state = xinput_buttons()
-        held = state if state and ctypes.windll.user32.GetForegroundWindow() == int(self.root.wm_frame(), 16) else 0
+        on = self.var('launcher_gamepad', 'app').get()  # #179: off for players who move the cursor with the stick
+        held = state if on and state and self.in_front() else 0
         now = time.monotonic()
         fire = held & ~getattr(self, 'pad_prev', 0)
         if fire:
@@ -2412,12 +2511,18 @@ class Launcher:
                                Path(self.var('user_dir', 'app').get() or DATA_DIR / 'user') / 'screenshots'))
         self.row(f, _('F12 in the game'), shots,
                  _("Saves the game's image, without the overlay, as a PNG in the screenshots folder of the saves."))
+        self.check(f, 'photo_flare', 'app', _('Lens flare in photo mode'),
+                   _("Off: no colour flare over the ship and its exhaust in the game's photo mode."),
+                   restart=True)
 
     def build_performance(self):
         f = self.scrolled_page('performance', _('Performance'), _('Frame rate and speed options.'))
         self.section(f, _('Frame rate', 'Частота кадров'), top=4)
         self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', 'ini', FPS_LIMITS),
                  _("Unlimited: up to 240 FPS. With VSync on, your monitor's refresh rate is the highest it goes."))
+        self.check(f, 'menu_fps_cap', 'app', _('Menus at 60 FPS'),
+                   _('On: the menus and the pause menu run at 60 FPS like on PS4. Off: at the frame rate limit '
+                     '(some menu animations then run faster).'))
         self.row(f, _('Frames queued'), self.choice(f, 'frames_queued', 'ini', FRAMES_QUEUED),
                  _('1 is the lowest input latency; more can raise FPS when the graphics card is the limit.'))
         self.section(f, _('Shaders'))
@@ -3002,7 +3107,7 @@ class Launcher:
             pad_icon = icon_canvas(table)
             pad_icon.grid(row=r, column=2, sticky='w', padx=self.px((0, 6)))
             self.pad_icons[button] = pad_icon
-            if pad:
+            if pad is not None:
                 box = ttk.Combobox(table, state='readonly', values=list(labels.values()),
                                    width=max(22, *(len(l) + 2 for l in labels.values())))
                 box.set(labels.get(pad_name, pad_name))
@@ -3021,6 +3126,8 @@ class Launcher:
         self.note(f, _('L2/R2 stay on the triggers. Touchpad right opens the game\'s pause menu; Touchpad left '
                        '(photo mode) is L1 + Touchpad right. R3+L2 always opens the port\'s menu. '
                        'Applied when the game starts.'))
+        self.note(f, _('Side-shift / barrel roll: press it with an airbrake held to side-shift that way, or while '
+                       'steering left or right in the air to barrel-roll. The double taps of the game still work.'))
         ttk.Button(f, text=_('Reset gamepad to defaults'), command=lambda: self.reset_controls('pad')).grid(
             row=self.next_row(f), column=0, sticky='w', pady=self.px((14, 0)))
         self.show_device(fit=False)
@@ -3107,7 +3214,10 @@ class Launcher:
 
     def draw_pad_icon(self, button):
         """The gamepad column's icon of a game button, in the chosen style (L2/R2: the triggers)."""
-        name = self.control_vars['pad'][button].get() or button_icons.GAME_BUTTONS[button]
+        name = self.control_vars['pad'][button].get() or button_icons.GAME_BUTTONS.get(button)
+        if not name:  # the trick button has no gamepad button until one is chosen (#207)
+            self.pad_icons[button].delete('all')
+            return
         button_icons.draw(self.pad_icons[button], name, self.pad_style.get(), self.px(28))
 
     def pad_name(self, label):
@@ -3168,9 +3278,16 @@ class Launcher:
         self.row(f, _('GUI Scale'), self.choice(f, 'ui_scale', 'app', UI_SCALES),
                  _('For launcher only. Applies after Save.'))
         self.check(f, 'close_on_play', 'app', _('Close the launcher when the game starts', 'Закрывать лаунчер при запуске игры'))
-        if WINDOWS:
+        self.check(f, 'discord_rpc', 'app', _('Show Discord Rich Presence', 'Показывать Discord Rich Presence'),
+                   _('Shows the game, the track and mode you play, your online lobby and the time played on your '
+                     'Discord profile, as "Playing WipEout: Omega Collection" with its game page.',
+                     'Показывает в вашем профиле Discord игру, трассу и режим, онлайн-лобби и время в игре: '
+                     '«Playing WipEout: Omega Collection» со страницей игры.'))
+        if can_update():
             self.check(f, 'update_popup', 'app', _('Check for updates when the launcher opens',
                                                     'Проверять обновления при открытии лаунчера'))
+        self.check(f, 'launcher_gamepad', 'app', _('Control the launcher with a gamepad'),
+                   _('Off: the controller does nothing in the launcher (for example while it moves the mouse).'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((10, 0)))
         ttk.Button(holder, text=_('Desktop shortcut', 'Ярлык на рабочем столе'), command=self.shortcut).pack(side='left', padx=self.px((0, 6)))
@@ -3180,9 +3297,9 @@ class Launcher:
             self.build_linux_options(f)
         self.section(f, _('Rendering', 'Рендеринг'))
         self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('For the native 1920 × 1080 render resolution: what the upscaler produces (the HUD too). '
+                 _('For the native 1920 × 1080 render resolution; above 1920 × 1080 it works like 1920 × 1080. '
                    'Other render resolutions output at their own size.',
-                   'Для родного разрешения 1920 × 1080: что выдаёт апскейлер (и интерфейс). '
+                   'Для родного разрешения 1920 × 1080; выше 1920 × 1080 работает как 1920 × 1080. '
                    'Другие разрешения выводятся в своём размере.'), restart=True)
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
@@ -4058,7 +4175,7 @@ class Launcher:
         if self.process:
             self.messagebox.showinfo(APP_NAME, _('Close the game before updating.', 'Закройте игру перед обновлением.'))
             return
-        if not FROZEN:  # a source tree updates with git
+        if not FROZEN or not can_update():  # a source tree updates with git
             open_url(page)
             return
         if not url:
@@ -4078,17 +4195,27 @@ class Launcher:
                 shutil.rmtree(UPDATE_DIR, ignore_errors=True)
                 UPDATE_DIR.mkdir(parents=True, exist_ok=True)
                 archive = UPDATE_DIR / 'update.zip'
-                request = urllib.request.Request(url, headers={'User-Agent': 'wipeout-launcher'})
-                with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
-                    total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
-                    while chunk := response.read(1 << 20):
-                        out.write(chunk)
-                        done += len(chunk)
-                        percent = done * 100 // total if total else 0
-                        if percent != shown:
-                            shown = percent
-                            text = _('Downloading version {}… {} of {} MB').format(version, done >> 20, total >> 20)
-                            self.ui_calls.put(lambda t=text, p=percent: self.update_progress(t, p))
+
+                def progress(done, total):
+                    text = _('Downloading version {}… {} of {} MB').format(version, done >> 20, total >> 20)
+                    self.ui_calls.put(lambda t=text, p=done * 100 // total if total else 0: self.update_progress(t, p))
+                appimage = None if WINDOWS else Path(os.environ['APPIMAGE'])
+                if appimage:  # Knack #28: the new AppImage next to the running one, then in its place
+                    archive = appimage.with_name(appimage.name + '.part')
+                for attempt in range(3):  # #191: a dropped connection left a cut zip ("not a zip file")
+                    try:
+                        download_update(url, archive, progress, whole_zip=not appimage)
+                        break
+                    except OSError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(3)
+                if appimage:
+                    install_appimage(archive, appimage)
+                    self.ui_calls.put(lambda: self.update_progress(
+                        _('Installing… the launcher opens again in a few seconds.'), 100))
+                    self.ui_calls.put(lambda: self.root.after(1500, self.root.destroy))
+                    return
                 self.ui_calls.put(lambda: self.update_progress(_('Unpacking…'), 100))
                 with zipfile.ZipFile(archive) as package:
                     package.extractall(UPDATE_DIR / 'new')
@@ -4363,9 +4490,34 @@ def latest_release():
     with urllib.request.urlopen(request, timeout=15) as response:
         release = json.load(response)
     version = '.'.join(re.findall(r'\d+', release['tag_name']))
+    kind = '.zip' if WINDOWS else '.appimage'  # Linux: the AppImage that replaces the running one
     url = next((asset['browser_download_url'] for asset in release.get('assets', [])
-                if asset.get('name', '').lower().endswith('.zip')), None)
+                if asset.get('name', '').lower().endswith(kind)), None)
     return version, url, release.get('html_url') or RELEASES_PAGE, whats_new(release.get('body') or '')
+
+
+def download_update(url, archive, progress=None, opener=urllib.request.urlopen, whole_zip=True):
+    """Downloads the release zip to `archive`; progress(done, total) per MiB. Raises OSError when
+    the connection ends early or the file is not a whole zip (#191)."""
+    request = urllib.request.Request(url, headers={'User-Agent': 'wipeout-launcher'})
+    with opener(request, timeout=60) as response, open(archive, 'wb') as out:
+        total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
+        while chunk := response.read(1 << 20):
+            out.write(chunk)
+            done += len(chunk)
+            if progress and done >> 20 != shown:
+                shown = done >> 20
+                progress(done, total)
+    if (total and done != total) or (whole_zip and not zipfile.is_zipfile(archive)):
+        raise OSError(f'the download stopped early ({done >> 20} of {total >> 20} MB)')
+
+
+def install_appimage(new, running):
+    """Linux: the downloaded AppImage takes the running one's place (the running launcher keeps its
+    open copy) and starts; the old one exits."""
+    os.chmod(new, 0o755)
+    os.replace(new, running)
+    subprocess.Popen([str(running)], env=host_environment(), stdin=subprocess.DEVNULL, start_new_session=True)
 
 
 def install_update(target, wait_pid):

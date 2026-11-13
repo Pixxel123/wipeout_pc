@@ -343,7 +343,8 @@ def main():
             # leaves the engine at 60 FPS, and the notes' memory and VBlank needs follow the same list.
             applied = (patch_status(out) or {}).get('applied', [])
             engine_fps = graphics_options.applied_engine_fps(applied)
-            dmem, vblank = patch_requirements(patch_xml, applied, profile[2])
+            dmem, vblank = patch_requirements(patch_xml, applied, profile[2],
+                                              neo=env.get('GOW3_NEO', '').startswith('1'))
             for key, value in (('GOW3_DMEM_MB', dmem), ('GOW3_VBLANK_HZ', vblank)):
                 if value and key not in env:
                     env[key] = str(value)
@@ -399,12 +400,21 @@ def main():
                    '--patches', str(out / 'patches.bin'), '--app0', str(game),
                    '--user', str(user_dir),
                    '--timeout', env.get('GOW3_TIMEOUT', '0'), *isa_args, *mount_args, *args]
+        # Discord Rich Presence: the runtime writes the game's state (menus, race, track, mode, online
+        # room, song) to this file, and the client beside the game publishes it (scripts/discord_presence.py).
+        presence_file = None
+        env.pop('GOW3_PRESENCE_FILE', None)
+        if discord_presence and env.get('GOW3_DISCORD') != '0':
+            presence_file = out / 'presence.json'
+            for stale in (presence_file, out / 'presence.json.tmp'):
+                stale.unlink(missing_ok=True)
+            env['GOW3_PRESENCE_FILE'] = str(presence_file)
         # No stdin: an inherited pipe (shells such as Git Bash) cost the game its console output.
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, creationflags=no_console())
         presence = None
         try:
             try:
-                presence = discord_presence.Presence(pid=process.pid) if discord_presence else None
+                presence = discord_presence.Presence(pid=process.pid, state_file=presence_file) if discord_presence else None
             except (OSError, RuntimeError):
                 print('Discord presence unavailable; the game will continue', flush=True)
             status = process.wait()
