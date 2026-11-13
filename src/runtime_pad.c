@@ -120,95 +120,152 @@ static void play_click(PadData *d) {
 
 /* GOW3_GAMEPAD=N: player 1 is the Nth connected gamepad (#88: arcade cabinets with several
  * sticks); the first when fewer are connected. */
+static int wanted_gamepad;
 static int preferred_gamepad(int count) {
-    static int wanted;
-    if (!wanted) { const char *env=getenv("GOW3_GAMEPAD"); wanted=env && atoi(env)>0 ? atoi(env) : 1; }
-    return wanted<=count ? wanted-1 : 0;
+    if (!wanted_gamepad) { const char *env=getenv("GOW3_GAMEPAD"); wanted_gamepad=env && atoi(env)>0 ? atoi(env) : 1; }
+    return wanted_gamepad<=count ? wanted_gamepad-1 : 0;
 }
-/* Player 1's gamepad going away (a controller that sleeps, or one switched off) hands player 1 to
- * another gamepad that is still there, such as the Steam Deck's own controls. The next gamepad to
- * connect after that (the one that went away, woken up) takes player 1 back. Without this, player
- * 1 stayed on the fallback and the woken controller only reached player 2 until a restart. SDL
- * never reuses a gamepad's instance ID and hands them out in increasing order, so "connected
- * since" is an ID above every one that existed when player 1's gamepad went away. */
+static const char *pad_name(SDL_Gamepad *g) {
+    const char *name=g ? SDL_GetGamepadName(g) : NULL;
+    return name ? name : "unknown";
+}
 typedef struct { SDL_Gamepad *g; float q[4]; uint64_t last; } Motion;
 static Motion motions[2]={{.q={0,0,0,1}},{.q={0,0,0,1}}};
-static bool reclaim;                  /* player 1 lost its gamepad: a newly connected one takes over */
-static SDL_JoystickID newest_at_loss; /* the highest ID that existed when it was lost */
-static uint64_t reclaim_checked;
-enum { RECLAIM_CHECK_US=100000 };
-/* Drops a gamepad that SDL reports gone; true if it was dropped. Called under lock. */
-static bool drop_if_gone(SDL_Gamepad **g, Motion *m, const char *who) {
-    if (!*g || SDL_GamepadConnected(*g)) return false;
-    printf("Runtime: gamepad disconnected%s\n",who);
+/* Closes a gamepad; who (NULL: nothing) is logged as the one that disconnected. Called under lock. */
+static void drop_gamepad(SDL_Gamepad **g, Motion *m, const char *who) {
+    if (who) printf("Runtime: gamepad disconnected%s\n",who);
     SDL_CloseGamepad(*g);
     *g=NULL;
     m->g=NULL; /* a new gamepad at the same address still gets its sensors enabled */
-    return true;
+}
+
+/* Player 1's gamepad going away (a controller that sleeps, or one switched off). Another gamepad
+ * that is still connected stands in, such as the Steam Deck's own controls, and player 1's own
+ * one takes player 1 back when it returns. Without this, player 1 stayed on the stand-in and the
+ * woken controller only reached player 2 until a restart.
+ *   - Its own one returning is the gamepad with the same serial number, or, as many gamepads have
+ *     none (all of Steam Input's), a gamepad that connected since: SDL never reuses a gamepad's
+ *     instance ID and hands them out in increasing order, so that is an ID above every one that
+ *     existed when player 1's went away. Of several, the same model comes first, then GOW3_GAMEPAD.
+ *   - Input on the stand-in ends the wait: player 1 plays on it and keeps it, and a gamepad that
+ *     connects later is player 2's, as always.
+ *   - A gamepad that player 2 is playing on never stands in: one gamepad would move both players. */
+typedef struct { uint16_t vendor, product; char serial[64]; } PadIdentity;
+static PadIdentity home;              /* player 1's own gamepad */
+static bool away;                     /* it is gone: player 1 has a stand-in, or no gamepad */
+static SDL_JoystickID newest_at_loss; /* the highest ID that existed when it went away */
+static SDL_JoystickID judged;         /* gamepads up to this ID were looked at since (fits_home) */
+static uint64_t away_checked;         /* the last look, with a stand-in: every AWAY_CHECK_US */
+static uint64_t pad2_read_at;         /* the game's last read of player 2's pad */
+enum { AWAY_CHECK_US=100000, PAD2_IDLE_US=1000000, CANDIDATES_MAX=8 };
+static void remember_home(SDL_Gamepad *g) {
+    const char *serial=SDL_GetGamepadSerial(g);
+    home.vendor=SDL_GetGamepadVendor(g); home.product=SDL_GetGamepadProduct(g);
+    snprintf(home.serial,sizeof(home.serial),"%s",serial ? serial : "");
+}
+static bool is_player2s(SDL_JoystickID id) { return gamepad2 && SDL_GetGamepadID(gamepad2)==id; }
+static bool player2_plays(uint64_t now) { return opened2 && pad2_read_at && now-pad2_read_at<PAD2_IDLE_US; }
+/* How well a connected gamepad fits player 1's own one: 3 the same serial number (that device,
+ * whenever it connected), 2 connected since it went away and the same model, 1 connected since,
+ * 0 not it. */
+static int fits_home(SDL_JoystickID id) {
+    if (*home.serial) { /* the serial number is read from an open gamepad */
+        SDL_Gamepad *g=SDL_OpenGamepad(id);
+        const char *serial=g ? SDL_GetGamepadSerial(g) : NULL;
+        const bool same=serial && !strcmp(serial,home.serial);
+        if (g) SDL_CloseGamepad(g);
+        if (same) return 3;
+    }
+    if (id<=newest_at_loss) return 0;
+    return SDL_GetGamepadVendorForID(id)==home.vendor && SDL_GetGamepadProductForID(id)==home.product ? 2 : 1;
+}
+/* Looks at the gamepads not yet judged for player 1's own one and opens the best fit; one that
+ * does not open leaves the next. Called under lock while away. */
+static void reclaim_home(const SDL_JoystickID *ids, int count) {
+    const SDL_JoystickID stand_in=gamepad ? SDL_GetGamepadID(gamepad) : 0;
+    SDL_JoystickID found[CANDIDATES_MAX], newest=judged;
+    int n=0, best=0;
+    for (int i=0;i<count;++i) {
+        if (ids[i]>newest) newest=ids[i];
+        if (ids[i]<=judged || ids[i]==stand_in) continue;
+        const int fit=fits_home(ids[i]);
+        if (fit>best) { best=fit; n=0; }
+        if (fit && fit==best && n<CANDIDATES_MAX) found[n++]=ids[i];
+    }
+    judged=newest;
+    const int first=best==3 ? 0 : preferred_gamepad(n);
+    for (int k=0;k<n;++k) {
+        const SDL_JoystickID id=found[(first+k)%n];
+        SDL_Gamepad *back=SDL_OpenGamepad(id);
+        if (!back) continue;
+        if (is_player2s(id)) drop_gamepad(&gamepad2,&motions[1],NULL); /* player 2 picked it up first */
+        if (gamepad) drop_gamepad(&gamepad,&motions[0],NULL);          /* the stand-in */
+        gamepad=back;
+        away=false;
+        ++connected_count;
+        remember_home(gamepad);
+        printf("Runtime: gamepad reconnected: %s\n",pad_name(gamepad));
+        return;
+    }
+}
+/* Input on the stand-in: player 1 plays on it now. Called under lock. */
+static void keep_stand_in(void) {
+    away=false;
+    remember_home(gamepad);
+    if (gamepad2==gamepad) drop_gamepad(&gamepad2,&motions[1],NULL); /* player 2's, idle: player 1's alone now */
+    printf("Runtime: gamepad kept for player 1: %s\n",pad_name(gamepad));
 }
 /* Opens player 1's gamepad (preferred_gamepad); called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
-    const SDL_JoystickID lost=gamepad ? SDL_GetGamepadID(gamepad) : 0;
-    if (drop_if_gone(&gamepad,&motions[0],"")) {
-        int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        newest_at_loss=lost;
-        for (int i=0;ids && i<count;++i) if (ids[i]>newest_at_loss) newest_at_loss=ids[i];
-        SDL_free(ids);
-        reclaim=true;
-        reclaim_checked=0;
+    bool lost_now=false;
+    if (gamepad && !SDL_GamepadConnected(gamepad)) {
+        const SDL_JoystickID lost=SDL_GetGamepadID(gamepad);
+        drop_gamepad(&gamepad,&motions[0],"");
+        if (!away) { away=true; judged=0; newest_at_loss=lost; lost_now=true; } /* else: the stand-in went too */
     }
+    if (gamepad && !away) return gamepad;
     const uint64_t now=now_us();
-    if (reclaim && (!gamepad || now-reclaim_checked>=RECLAIM_CHECK_US)) {
-        reclaim_checked=now;
-        int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        SDL_JoystickID newest=0;
-        for (int i=0;ids && i<count;++i) if (ids[i]>newest_at_loss && ids[i]>newest) newest=ids[i];
-        SDL_free(ids);
-        if (newest) {
-            SDL_Gamepad *back=NULL;
-            if (gamepad2 && SDL_GetGamepadID(gamepad2)==newest) { /* player 2 picked it up first */
-                back=gamepad2; gamepad2=NULL; motions[1].g=NULL;
-            } else back=SDL_OpenGamepad(newest);
-            if (back) {
-                if (gamepad) SDL_CloseGamepad(gamepad); /* the fallback: free for player 2 again */
-                gamepad=back;
-                motions[0].g=NULL;
-                reclaim=false;
-                ++connected_count;
-                printf("Runtime: gamepad reconnected: %s\n",SDL_GetGamepadName(gamepad));
-            }
-        }
-    }
+    if (gamepad && now-away_checked<AWAY_CHECK_US) return gamepad;
+    away_checked=now;
+    int count=0;
+    SDL_JoystickID *ids=SDL_GetGamepads(&count);
+    if (!ids) count=0;
+    if (lost_now) for (int i=0;i<count;++i) if (ids[i]>newest_at_loss) newest_at_loss=ids[i];
+    if (away) reclaim_home(ids,count);
     if (!gamepad) {
-        int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        if (ids && count>0) {
-            gamepad=SDL_OpenGamepad(ids[preferred_gamepad(count)]);
-            if (gamepad) {
-                ++connected_count;
-                printf("Runtime: gamepad connected: %s%s\n",SDL_GetGamepadName(gamepad),
-                       reclaim ? " (until a gamepad connects again)" : "");
-            }
+        const bool spare=player2_plays(now); /* player 2's gamepad stays player 2's alone */
+        int n=0;
+        for (int i=0;i<count;++i) if (!(spare && is_player2s(ids[i]))) ++n;
+        int want=preferred_gamepad(n);
+        for (int i=0;i<count && !gamepad;++i) {
+            if (spare && is_player2s(ids[i])) continue;
+            if (want--) continue;
+            gamepad=SDL_OpenGamepad(ids[i]);
+            break;
         }
-        SDL_free(ids);
+        if (gamepad) {
+            ++connected_count;
+            if (!away) remember_home(gamepad);
+            printf("Runtime: gamepad connected: %s%s\n",pad_name(gamepad),
+                   away ? " (stands in until player 1's gamepad is back or this one is used)" : "");
+        }
     }
+    SDL_free(ids);
     return gamepad;
 }
 /* Player 2's gamepad: the first connected one that is not player 1's; called under lock. */
 static SDL_Gamepad *second_gamepad(void) {
     SDL_Gamepad *first=current_gamepad();
-    drop_if_gone(&gamepad2,&motions[1]," (player 2)");
+    if (gamepad2 && !SDL_GamepadConnected(gamepad2)) drop_gamepad(&gamepad2,&motions[1]," (player 2)");
     if (!gamepad2 && first) {
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
         for (int i=0;ids && i<count && !gamepad2;++i) {
             if (ids[i]==SDL_GetGamepadID(first)) continue;
             gamepad2=SDL_OpenGamepad(ids[i]);
-            if (gamepad2) printf("Runtime: gamepad connected for player 2: %s\n",SDL_GetGamepadName(gamepad2));
+            if (gamepad2) printf("Runtime: gamepad connected for player 2: %s\n",pad_name(gamepad2));
         }
         SDL_free(ids);
     }
@@ -550,6 +607,7 @@ static void sample_host(PadData *d) {
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     load_button_maps();
     read_gamepad(g,d);
+    if (away && g && d->buttons) keep_stand_in();
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. */
     if (!k) return;
@@ -943,7 +1001,7 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     pthread_mutex_lock(&lock);
     const int first=handle==PAD_HANDLE;
     if (first) { sample(data); ++reads; }
-    else sample_second(data);
+    else { sample_second(data); pad2_read_at=data->timestamp; }
     pthread_mutex_unlock(&lock);
     if (first) runtime_user_events(); /* user 2 logging in or out (split-screen) */
     return 0;
@@ -1003,7 +1061,7 @@ static const RuntimeExport exports[]={
     {"scePadSetMotionSensorState",pad_ok_handle_flag},
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
-void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
+void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? pad_name(gamepad) : "none"); }
 
 /* probe --gamepad: runs before any game state exists, so it uses its own SDL gamepad and leaves
  * the lock and statics above alone. run.py parses this line; keep the format. */
