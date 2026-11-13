@@ -2110,6 +2110,19 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
         // Assume if a shader writes metadata without address calculation, it is a clear shader.
         for (const auto& desc : info.buffers) {
             const VAddr address = desc.GetSharp(info).base_address;
+            if (!desc.IsSpecial() && desc.is_written && !texture_cache.IsMeta(address)) {
+                static std::atomic<u32> tried{0}, told{0};
+                if (tried.fetch_add(1) < 200000 && told.load() < 40) {
+                    if (const auto [base, layers] = texture_cache.MetaBelow(address); base) {
+                        told.fetch_add(1);
+                        std::printf("CMask diag: a %u-byte write at %#llx, %llu bytes above the CMask "
+                                    "of a %u-layer target\n",
+                                    desc.GetSharp(info).GetSize(),
+                                    static_cast<unsigned long long>(address),
+                                    static_cast<unsigned long long>(address - base), layers);
+                    }
+                }
+            }
             if (!desc.IsSpecial() && desc.is_written && texture_cache.ClearMeta(address)) {
                 // gow3: the target reads as cleared from now on, also when the game only samples
                 // it and draws nothing into it before. Clearing it at the next bind only left

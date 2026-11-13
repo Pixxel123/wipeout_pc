@@ -314,6 +314,24 @@ public:
         return false;
     }
 
+    /// gow3 (diagnostic): the layered target whose CMask starts below `address` and within 64 KiB
+    /// of it: {its CMask address, its layer count}.
+    std::pair<VAddr, u32> MetaBelow(VAddr address) {
+        std::scoped_lock lock{mutex};
+        for (auto it = surface_metas.begin(); it != surface_metas.end(); ++it) {
+            if (it->second.type != MetaType::CMask || !it->second.image ||
+                !slot_images.is_allocated(it->second.image) || address <= it->first ||
+                address - it->first > 0x10000) {
+                continue;
+            }
+            const u32 layers = slot_images[it->second.image].info.resources.layers;
+            if (layers > 1) {
+                return {it->first, layers};
+            }
+        }
+        return {0, 0};
+    }
+
     /// Clears all slices of the specified metadata surface.
     bool ClearMeta(VAddr address) {
         auto it = surface_metas.find(address);
