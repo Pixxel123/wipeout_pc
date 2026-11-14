@@ -9,7 +9,10 @@ never did, the next start goes back to the last confirmed values.
 """
 import json
 import math
+import re
 from pathlib import Path
+
+from display_info import _this_display
 
 RESOLUTIONS = ('native', '480p', '720p', '900p', '1440p', '1800p', '4K',
                '2560x1080', '3440x1440', '3840x1600', '5120x1440', '1920x1200', '2560x1600', '1280x800',
@@ -24,9 +27,13 @@ SIZES = {'native': (1920, 1080), '480p': (854, 480), '720p': (1280, 720), '900p'
          '1440p': (2560, 1440), '1800p': (3200, 1800), '4K': (3840, 2160)}
 ASPECTS = (('16:9', 16 / 9), ('16:10', 16 / 10), ('21:9', 2.37), ('32:9', 32 / 9), ('4:3', 4 / 3))
 ENGINE_FPS = (60, 100, 120, 240)
-DEFAULTS = {'render_resolution': 'native', 'engine_fps': '120', 'deferred_readback': '1',
+DEFAULTS = {'render_resolution': 'native', 'render_scale': '100', 'engine_fps': '120', 'deferred_readback': '1',
             'stale_readback': '1', 'async_shaders': '1'}
 RESOLUTION_PREFIX = 'Resolution Patch'
+# The games the generated resolution patches apply to (WipEout Omega Collection).
+GENERATED_TITLES = ('CUSA07671', 'CUSA05670')
+MIN_GENERATED = (1920, 1080)  # measured: below the game's own size the buffer stays 1920x1080 while the camera changes
+MAX_GENERATED = (7680, 4320)  # 8K, the largest hand-made size; generated sizes above 3840x2160 are untested
 FPS_PREFIX = 'Frame Rate Patch'
 TEXTURE_FIX = 'Bug Fix - Texture Corruption Fix'
 
@@ -78,14 +85,18 @@ def aspect_name(width, height):
     return f'{width // divisor}:{height // divisor}'
 
 
+_SIZE_NAME = re.compile(r'([1-9][0-9]{0,4})x([1-9][0-9]{0,4})')
+
 
 def resolution_size(name):
-    """(width, height) of a built-in name or a mod's "<width>x<height>"; None for anything else."""
-    try:
-        width, height = SIZES.get(name) or map(int, name.split('x'))
-    except ValueError:
+    """(width, height) of a built-in name or a mod's "<width>x<height>" (plain digits, no sign, space or
+    leading zero); None for anything else (a hand-edited state file's number or list too)."""
+    if not isinstance(name, str):
         return None
-    return width, height
+    if name in SIZES:
+        return tuple(SIZES[name])
+    match = _SIZE_NAME.fullmatch(name)
+    return (int(match[1]), int(match[2])) if match else None
 
 
 def aspect_of(name):
@@ -121,10 +132,12 @@ def resolution_label(name, aspect=True):
     """What the lists show for a render resolution: '1440p · 2560 × 1440 · 16:9', '3440 × 1440 · 21:9 (beta)'.
     `name` is a built-in name or a mod's "<width>x<height>"; anything else is shown as it is. Without
     `aspect` the ratio is left out (the launcher's list beside the Aspect ratio filter)."""
-    try:
-        width, height = SIZES.get(name) or map(int, name.split('x'))
-    except ValueError:
+    if name == DISPLAY:
+        return display_label(_this_display())
+    size = resolution_size(name)
+    if not size:
         return name
+    width, height = size
     title = 'Native' if name == 'native' else name if name in SIZES else None
     label = ' · '.join(p for p in (title, f'{width} × {height}', aspect and aspect_name(width, height)) if p)
     return label + (' (beta)' if name in BETA_RESOLUTIONS else '')
@@ -136,11 +149,29 @@ def startup_options(ini, extra=()):
     options = {key: ini.get(key, value) for key, value in DEFAULTS.items()}
     if options['render_resolution'] not in resolutions(extra):
         options['render_resolution'] = 'native'
+    if options['render_scale'] not in tuple(str(p) for p in RENDER_SCALES):
+        options['render_scale'] = '100'
     if options['engine_fps'] not in {str(f) for f in ENGINE_FPS}:
         options['engine_fps'] = '120'
     for key in ('deferred_readback', 'stale_readback', 'async_shaders'):
         options[key] = '0' if options[key] == '0' else '1'
     return options
+
+
+def launch_ini(config, state_path):
+    """The options this launch will start with, read without writing anything: the ini's, or the last
+    confirmed ones when prepare() is about to restore them (the previous restart never confirmed its own)."""
+    ini = read_ini(config)
+    if ini.get('restart_unconfirmed') != '1':
+        return ini
+    try:
+        state = json.loads(Path(state_path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return ini
+    if not isinstance(state, dict):
+        return ini
+    last_good = state.get('last_good')
+    return last_good if state.get('attempt') and isinstance(last_good, dict) and last_good else ini
 
 
 def prepare(config, state_path, extra=()):
@@ -209,3 +240,55 @@ def environment(options):
     return {'GOW3_DEFERRED_READBACK': options['deferred_readback'],
             'GOW3_STALE_READBACK': options['stale_readback'],
             'GOW3_ASYNC_SHADERS': options['async_shaders']}
+
+
+def generated_resolution(value, known):
+    """(width, height) when `value` is an even size ("<width>x<height>" or a built-in name), at least
+    MIN_GENERATED and at most MAX_GENERATED, that no resolution in `known` provides, else None (nothing to
+    generate)."""
+    if not value or value == 'native' or value in known:
+        return None
+    size = resolution_size(value)
+    if (not size or size[0] % 2 or size[1] % 2 or size[0] < MIN_GENERATED[0] or size[1] < MIN_GENERATED[1]
+            or size[0] > MAX_GENERATED[0] or size[1] > MAX_GENERATED[1]):
+        return None
+    return size
+
+
+DISPLAY = 'display'  # render_resolution: the monitor's size, read again at every start
+RENDER_SCALES = (100, 150, 200)  # render_scale, percent of the render resolution: above 100 % is supersampling
+
+
+def size_name(width, height):
+    """The render resolution name of a size: a built-in name with exactly that size ('1440p', 'native'),
+    else '<width>x<height>' (generated at start for WipEout)."""
+    return next((n for n in RESOLUTIONS if resolution_size(n) == (width, height)), f'{width}x{height}')
+
+
+def scaled_size(size, percent):
+    """`size` at `percent`, each side rounded to the nearest even pixel (the game halves its buffers)."""
+    return tuple(int(side * percent / 100 / 2 + 0.5) * 2 for side in size)
+
+
+def display_label(size):
+    """The list's name for render_resolution=display: 'Display · 3440 × 1440', or 'Display' when the
+    monitor's size is unknown."""
+    return f'Display · {size[0]} × {size[1]}' if size else 'Display'
+
+
+def render_size(options, display):
+    """(width, height) the game renders at when the options ask for the monitor's size or a render scale,
+    else None (the render resolution as it is named). An unknown monitor, or one smaller than the game's
+    own size, renders at the game's own size; an odd side of the monitor loses its last pixel; a scale that
+    passes MAX_GENERATED becomes the largest listed one that fits."""
+    name, scale = options['render_resolution'], int(options['render_scale'])
+    if name != DISPLAY and scale == 100:
+        return None
+    base = ((display[0] & ~1, display[1] & ~1) if display else None) if name == DISPLAY else resolution_size(name)
+    base = base or SIZES['native']
+    fits = lambda size: size[0] <= MAX_GENERATED[0] and size[1] <= MAX_GENERATED[1]
+    sizes = (scaled_size(base, p) for p in sorted(RENDER_SCALES, reverse=True) if p <= scale)
+    size = next((s for s in sizes if fits(s)), SIZES['native'])
+    return SIZES['native'] if size[0] < MIN_GENERATED[0] or size[1] < MIN_GENERATED[1] else size
+
+

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -77,6 +78,17 @@ inline constexpr std::array<std::string_view, 24> ResolutionLabels = {
     "2048 × 1536 · 4:3 (beta)", "2560 × 1920 · 4:3 (beta)", "5120 × 2160 · 21:9 (beta)",
     "5120 × 2880 · 16:9 (beta)", "7680 × 4320 · 16:9 (beta)"};
 inline const char* ResolutionLabel(const std::string& name) {
+    if (name == "display") {
+        // "Display · 3440 × 1440": run.py says the monitor's size in GOW3_DISPLAY_SIZE at every start.
+        static const std::string label = [] {
+            int w = 0, h = 0;
+            const char* text = std::getenv("GOW3_DISPLAY_SIZE");
+            if (text && std::sscanf(text, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+                return "Display · " + std::to_string(w) + " × " + std::to_string(h);
+            return std::string("Display");
+        }();
+        return label.c_str();
+    }
     const auto it = std::find(Resolutions.begin(), Resolutions.end(), name);
     return it != Resolutions.end() ? ResolutionLabels[it - Resolutions.begin()].data() : name.c_str();
 }
@@ -108,6 +120,20 @@ constexpr int IndexOf(const std::array<T, N>& values, const T& value, int fallba
     return fallback;
 }
 
+/// The size this session renders at: run.py's GOW3_RENDER_SIZE when the startup options asked for the
+/// monitor's size ("display") or a render scale, else the size of the startup resolution's name.
+inline std::pair<int, int> SessionRenderSize(std::string_view startup_name) {
+    int width = 0, height = 0;
+    const char* text = std::getenv("GOW3_RENDER_SIZE");
+    if (text && std::sscanf(text, "%dx%d", &width, &height) == 2 && width > 0 && height > 0) return {width, height};
+    return ResolutionSize(startup_name);
+}
+/// render_scale: percent of the render resolution the game renders at (above 100 is supersampling);
+/// applied by run.py at start.
+inline constexpr std::array<int, 3> RenderScales = {100, 150, 200};
+inline int ParseRenderScale(int value) {
+    return IndexOf(RenderScales, value, -1) >= 0 ? value : 100;
+}
 inline int ParseDisplayMode(std::string_view text) {
     return IndexOf(DisplayModeKeys, text, Windowed);
 }

@@ -103,6 +103,33 @@ is added to `TESTED_IN_GAME` in the tool. A mod's resolutions are listed by the 
 its patch file; to make a size built in, also add its entry to `patches/God_of_War_III_Remastered.xml` and its
 name to the resolution lists (`scripts/graphics_options.py`, `gpu/shim/gow3_graphics.h`, `gow3_overlay.cpp`).
 
+## WipEout: the monitor's size, any size, render scale
+
+For WipEout Omega Collection the resolution patch is a function of width and height, so `run.py` can make it for
+any even size (`scripts/resolution_patch.py`, `resolution_patch_lines`): the output size, the half-resolution
+buffers, the camera aspect ratio (wider than 16:9 shows more at the sides, narrower keeps the width and shows
+more on top and bottom) and 1, 2 or 4 GB more of the game's video memory from 4.5, 12 and 24 megapixels.
+`tests/test_resolution_patch.py` keeps it equal, byte for byte, to every hand-made entry of
+`patches/WipEout_Omega_Collection.xml`.
+
+Two keys of `gow3.ini` use it; `run.py` works the size out at every start and logs it
+(`Render resolution: display 3440x1440 at 100 % -> 3440x1440`):
+
+| Key | Values | Meaning |
+|---|---|---|
+| `render_resolution` | `display` | The primary monitor's desktop size, read at every start, so it follows a new monitor or a DSR/DLDSR desktop. Listed as `Display · 3440 × 1440` in the launcher and the in-game menu |
+| `render_resolution` | any even `<width>x<height>` | That size, generated when no hand-made entry or mod has it |
+| `render_scale` | `100` (default), `150`, `200` | Percent of the render resolution the game renders at. Above 100 is supersampling: a larger picture shown at the window's size |
+
+- A size with a hand-made entry uses that entry (a 2560 × 1440 monitor runs "Resolution Patch - 1440p").
+- Sizes run from 1920 × 1080 to 7680 × 4320. A smaller monitor (the Steam Deck's 1280 × 800) renders at the
+  game's own 1920 × 1080: measured there with 720p, 900p and 1280 × 800, the game keeps its 1920 × 1080 buffers
+  below that. A scale that would pass 7680 × 4320 becomes the largest one that fits.
+- The monitor's size comes from Windows, or from `xrandr` on Linux; when neither answers, `display` is
+  1920 × 1080. `GOW3_DISPLAY_SIZE=<width>x<height>` says it instead.
+- The upscaling presets render below any render resolution and upscale back to it.
+- Generated sizes are not tested in game one by one; above 3840 × 2160 they need a lot of video memory.
+
 ## Reference build addresses
 
 The `Address` attributes the tool writes are addresses in the `6e72…` build. The signatures are what is used.
