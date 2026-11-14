@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 #include "gow3_graphics.h"
 #include "gow3_settings.h"
 
@@ -42,9 +43,26 @@ int main() {
     _putenv_s("GOW3_RENDER_SIZE", "bogus");
     assert(G::SessionRenderSize("1440p") == std::make_pair(2560, 1440));
     _putenv_s("GOW3_RENDER_SIZE", "");
-    _putenv_s("GOW3_DISPLAY_SIZE", "3440x1440");
-    assert(std::string(G::ResolutionLabel("display")) == "Display · 3440 × 1440");
-    _putenv_s("GOW3_DISPLAY_SIZE", "");
+    // The in-game lists are the launcher's: run.py says the order, the labels and the scales.
+    {
+        const std::vector<std::string> names = {"native", "720p", "1440p", "4K", "display"};
+        const auto rows = [&](int current) {
+            std::string text;
+            for (const auto& c : G::ResolutionChoices(names, current)) text += std::to_string(c.index) + ":" + c.label + "|";
+            return text;
+        };
+        _putenv_s("GOW3_RESOLUTION_LIST", "");
+        assert(rows(0) == "0:native|1:720p|2:1440p|3:4K|4:display|");  // no list: every name
+        _putenv_s("GOW3_RESOLUTION_LIST", "display=3440 × 1440;1440p=2560 × 1440;gone=1 × 1;native=1920 × 1080");
+        assert(rows(0) == "4:3440 × 1440|2:2560 × 1440|0:1920 × 1080|");  // an unknown name is skipped
+        assert(rows(3) == "4:3440 × 1440|2:2560 × 1440|0:1920 × 1080|3:4K|");  // the current one stays
+        _putenv_s("GOW3_RESOLUTION_LIST", "");
+        _putenv_s("GOW3_RENDER_SCALES", "");
+        assert((G::RenderScaleChoices() == std::vector<int>{100}));
+        _putenv_s("GOW3_RENDER_SCALES", "100;150;125;200");
+        assert((G::RenderScaleChoices() == std::vector<int>{100, 150, 200}));
+        _putenv_s("GOW3_RENDER_SCALES", "");
+    }
     assert(G::ParseRenderScale(150) == 150 && G::ParseRenderScale(200) == 200 && G::ParseRenderScale(125) == 100);
     assert(G::ParseEngineFps(240) == 240 && G::ParseEngineFps(100) == 100 && G::ParseEngineFps(90) == 120);
     assert(G::ParseFramesQueued(2) == 2 && G::ParseFramesQueued(0) == 0 && G::ParseFramesQueued(5) == 1);
@@ -81,6 +99,23 @@ int main() {
     _putenv_s("GOW3_FSR1", "");
     assert(!Gow3Settings::GraphicsNeedRestart());
     assert(v.applied_engine_fps == 240);  // no GOW3_ENGINE_FPS: the configured rate
+    {
+        // No render_resolution saved: the monitor's size where the game lists it (WipEout), else native.
+        const char* bare = "graphics-settings-bare.ini";
+        std::ofstream(bare) << "vsync=1\nrender_scale=150\n";
+        _putenv_s("GOW3_CONFIG", bare);
+        _putenv_s("GOW3_EXTRA_RESOLUTIONS", "display");
+        Gow3Settings::Load();
+        assert(G::ResolutionNames()[v.render_resolution] == "display" && v.render_scale == 150);
+        v.render_scale = 200;
+        assert(Gow3Settings::GraphicsNeedRestart());  // Resolution scale applies on restart
+        _putenv_s("GOW3_EXTRA_RESOLUTIONS", "");
+        Gow3Settings::Load();
+        assert(G::ResolutionNames()[v.render_resolution] == "native");
+        _putenv_s("GOW3_CONFIG", path);
+        Gow3Settings::Load();
+        std::remove(bare);
+    }
     _putenv_s("GOW3_ENGINE_FPS", "60");    // run.py: the frame rate patch did not apply
     Gow3Settings::Load();
     assert(v.engine_fps == 240 && v.applied_engine_fps == 60 && !Gow3Settings::GraphicsNeedRestart());
@@ -128,9 +163,11 @@ int main() {
         assert(filtered.size() == 4 && filtered[0] == "native" && filtered[1] == "2560x1080" &&
                filtered[2] == "5120x2160" && filtered[3] == "3440x1440");
         // Labels go by name: the second entry of the shorter list is 2560x1080, not 480p (#23).
-        assert(std::string_view(G::ResolutionLabel(filtered[1])) == "2560 × 1080 · 21:9 (beta)" &&
-               std::string_view(G::ResolutionLabel(filtered[2])) == "5120 × 2160 · 21:9 (beta)" &&
-               std::string_view(G::ResolutionLabel(filtered[3])) == "3440 × 1440 · 21:9 (beta)");
+        _putenv_s("GOW3_RESOLUTION_LIST", "5120x2160=5120 × 2160;2560x1080=2560 × 1080;native=1920 × 1080");
+        const auto listed = G::ResolutionChoices(filtered, 0);
+        assert(listed.size() == 3 && listed[1].index == 1 && listed[1].label == "2560 × 1080" &&
+               listed[0].index == 2 && listed[0].label == "5120 × 2160");
+        _putenv_s("GOW3_RESOLUTION_LIST", "");
         _putenv_s("GOW3_ALLOWED_RESOLUTIONS", "nope");
         assert(G::ResolutionNames().front() == "native" && G::ResolutionNames().size() == 2);
         _putenv_s("GOW3_ALLOWED_RESOLUTIONS", "");

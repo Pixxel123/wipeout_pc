@@ -46,6 +46,7 @@ if WINDOWS:
 FROZEN = getattr(sys, 'frozen', False)
 PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
+import display_info  # noqa: E402  (scripts/)
 import graphics_options  # noqa: E402  (scripts/)
 import online_host  # noqa: E402  (scripts/)
 import save_backup  # noqa: E402  (scripts/)
@@ -426,7 +427,7 @@ INI_DEFAULTS = {'upscaler': 'fsr3', 'preset': '0', 'dlss_preset': '0',
                 'object_motion': '1', 'show_fps': '1', 'output_res': '1920x1080',
                 'live_resolution': 'auto', 'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
                 'async_shaders': '1', 'deferred_readback': '1', 'stale_readback': '1',
-                'render_resolution': 'native', 'engine_fps': '120',
+                'render_resolution': 'display', 'render_scale': '100', 'engine_fps': '120',
                 'frames_queued': '1', 'cheat_very_hard': '0', 'cheat_double_jumps': '0',
                 'anisotropy': '0', 'vibration': '100', 'stick_deadzone': '0', 'mouse_prompt_distance': '48', 'mouse_lock': '1',
                 'mouse_aim_style': '0', 'mouse_aim_sensitivity': '100', 'music': '1', 'music_shuffle': '1', 'music_continue': '0',
@@ -770,8 +771,9 @@ UPSCALERS = [('fsr3', ('FSR 3.1 (every GPU)', 'FSR 3.1 (любая видеок�
              ('off', ('Off', 'Выключен'))]
 # WipEout's anti-aliasing (Graphics page): native size only, fed by the game's own motion vectors.
 # TAA reprojects with God of War III's camera and is left out.
-AA_CHOICES = [('off', ('Off',)), ('fsr3', ('FSR 3.1 (every GPU)',))]
-DLSS_CHOICE = ('dlss', ('DLAA (NVIDIA RTX)',))
+# The Graphics page's Anti-aliasing list (anti_aliasing_var): the game's own, none, or a temporal method.
+ANTI_ALIASING = [('msaa', ('Game default (MSAA)',)), ('off', ('Off',)), ('fsr3', ('FSR 3.1 (every GPU)',))]
+DLSS_CHOICE = ('dlss', ('DLSS (NVIDIA RTX)',))
 DLSS_PRESETS = [('0', ('Driver default (K)',)), ('11', ('K (transformer)',)),
                 ('13', ('M (transformer 2, DLSS 4.5)',)), ('12', ('L (transformer 2, cleanest, slowest)',)),
                 ('10', ('J (less ghosting, more flicker)',))]
@@ -1487,6 +1489,7 @@ class Launcher:
         self.root = root
         self.app = {**APP_DEFAULTS, **migrate_controls(load_json(CONFIG_FILE, {}))}
         self.ini, self.ini_lines = load_ini()
+        display_info.this_display()  # the monitor's size for the Resolution list, read once at start
         self.vars = {}
         self.process = self.job = None
         self.output = queue.Queue()
@@ -1767,20 +1770,30 @@ class Launcher:
             resolution.trace_add('write', resolution_chosen)
         return self.aspect
 
-    def game_resolution_options(self):
-        """The render resolutions with a patch for the chosen game (its profile's
-        GOW3_ALLOWED_RESOLUTIONS), else all built-in ones."""
+    def game_resolution_names(self):
+        """The render resolutions of the chosen game: those with a patch (its profile's
+        GOW3_ALLOWED_RESOLUTIONS, else all built-in ones) and those of the enabled mods."""
         import game_profiles
         from patches import game_title_id
         folder = self.var('game_dir', 'app').get()
         title_id = game_title_id(folder) if folder else None
-        allowed = game_profiles.PROFILES.get(title_id, {}).get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS')
-        if not allowed:
-            return RESOLUTION_CHOICES
-        names = allowed.split(';')
-        return [(n, t) for n, t in RESOLUTION_CHOICES if n in names] + \
-            [(n, (graphics_options.resolution_label(n),)) for n in names
-             if n not in dict(RESOLUTION_CHOICES)]
+        # No game chosen yet: WipEout's list, the game this launcher ships for.
+        profile = game_profiles.PROFILES.get(title_id or graphics_options.GENERATED_TITLES[0], {})
+        allowed = profile.get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS')
+        names = allowed.split(';') if allowed else [n for n, _t in RESOLUTION_CHOICES]
+        return names + [n for n, _t in self.mod_resolutions() if n not in names]
+
+    def game_resolution_options(self):
+        """The Resolution list as a PC game's (graphics_options.resolution_choices): the monitor's size first
+        when the game has "display", then largest first and none above the monitor. The saved one stays."""
+        names = self.game_resolution_names()
+        saved = self.var('render_resolution', 'ini').get()
+        choices = [(n, (label,)) for n, label in
+                   graphics_options.resolution_choices(names, display_info.this_display(), keep=(saved,))]
+        if saved == graphics_options.DISPLAY and graphics_options.DISPLAY not in names:
+            # A game without "display" (God of War III) runs the default at its own size: shown first.
+            choices.sort(key=lambda choice: choice[0] != 'native')
+        return choices
 
     def aspect_options(self):
         """The aspect ratios the render resolutions have (built-in and mods)."""
@@ -1792,7 +1805,7 @@ class Launcher:
         options = dict(self.resolution_options())
         names = graphics_options.resolutions_for(self.aspect_var().get(), list(options))
         mod = ' (mod)'
-        return [(n, (graphics_options.resolution_label(n, aspect=False) + (mod if options[n][0].endswith(mod) else ''),))
+        return [(n, (graphics_options.resolution_label(n) + (mod if options[n][0].endswith(mod) else ''),))
                 for n in names]
 
     def next_row(self, parent):
@@ -2119,89 +2132,56 @@ class Launcher:
             return self.banner_image.subsample(factor) if factor > 1 else self.banner_image
 
     def build_graphics(self):
-        """Window and overlay controls, render resolution and WipEout's anti-aliasing; God of War III's
-        upscaler presets stay commented out."""
+        """The Graphics page, laid out as a PC game's: display, image quality, then the extras."""
         f = self.scrolled_page('graphics', _('Graphics', 'Графика'), _('How the game appears on your screen.'))
-        self.build_display(f)
-        self.section(f, _('Resolution'))
-        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options()),
-                 _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
-                 restart=True)
-        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('From 1920x1080 up it follows Render resolution, which sets how sharp the race is; Upscaling divides that.',
-                   'От 1920x1080 и выше следует разрешению рендера, которое задаёт чёткость гонки; апскейлинг делит его.'), restart=True)
-        self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
-                 _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
-                   'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)
-        self.check(f, 'ps4_pro', 'app', _('PS4 Pro mode (experimental)'),
-                   _('The game runs as on a PS4 Pro, with its Pro graphics. Menus and a race start work; other events '
-                     'are not tested yet. Turn it off if something looks wrong.'), restart=True)
-        self.section(f, _('Anti-aliasing (experimental)'))
-        self.check(f, 'experimental_upscaler', 'app', _('Temporal anti-aliasing'),
-                   _('Off (default): the game\'s own image. On: FSR 3.1 or DLAA smooth edges at the render '
-                     'resolution, from the game\'s own motion vectors, in place of the game\'s multisampling. '
-                     'The method can also be changed while playing: in-game menu (Insert / R3+L2) > Image.'),
-                   restart=True)
-        # DLAA is listed once NVIDIA's runtime is installed (the list is asked again when it opens).
-        self.row(f, _('Method'), self.choice(f, 'upscaler', 'ini',
-                                             lambda: AA_CHOICES + ([DLSS_CHOICE] if dlss_installed() else [])),
-                 restart=True)
-        if WINDOWS:
-            self.build_dlss_row(f)
-        self.row(f, _('Upscaling'), self.choice(f, 'preset', 'ini', UPSCALE_PRESETS),
-                 _('Draws the race at a lower resolution and scales it up with the method above: more FPS, a '
-                   'softer picture. The HUD and menus stay sharp. Off: smooth edges only, at full resolution. '
-                   'Also in the game: Insert > Image.'))
-        # Only DLAA has presets; FSR 3.1 at native size has none (its quality modes choose
-        # an upscaling ratio). The row (title, box, note) hides with another method.
-        first = self.next_row(f)
-        self.row(f, _('DLAA preset'), self.choice(f, 'dlss_preset', 'ini', DLSS_PRESETS),
-                 _('K is the driver\'s default for DLAA. M and L are the newer second-generation '
-                   'models; L costs a few percent more.'), restart=True)
-        preset_widgets = [w for r in range(first, self.next_row(f)) for w in f.grid_slaves(row=r)]
-        method = self.var('upscaler', 'ini')
-
-        def preset_visible(*_args):
-            for widget in preset_widgets:
-                widget.grid() if method.get() == 'dlss' and dlss_installed() else widget.grid_remove()
-        method.trace_add('write', preset_visible)
-        self.dlss_preset_visible = preset_visible
-        preset_visible()
-        # Temporal upscaling is parked until its image quality is validated.
-        # self.section(f, _('Experimental'))
-        # self.check(f, 'experimental_upscaler', 'app', _('Enable the upscaler (experimental)'),
-        #            _('Off (default): the game runs without temporal upscaling; FSR 3.1 and TAA need this switch on. '
-        #              'FSR 3.1 is not calibrated for this game yet: expect ghosting or flicker. The remaining options require this switch; '
-        #              'leave it off for normal gameplay.',
-        #              'Выкл. (по умолчанию): игра без временного апскейлинга; FSR 3.1 и TAA нужен этот переключатель. '
-        #              'FSR 3.1 ещё не откалиброван для этой игры: возможны гостинг и мерцание.'), restart=True)
-        # self.section(f, _('Upscaling', 'Апскейлинг'))
-        # self.row(f, _('Upscaler', 'Апскейлер'), self.choice(f, 'upscaler', 'ini', UPSCALERS))
-        # self.row(f, _('Quality preset', 'Пресет'), self.choice(f, 'preset', 'ini', PRESETS),
-        #          _('Render scale per axis: Quality renders at 1/1.5 of the output size.',
-        #            'Масштаб рендера по каждой оси: Quality рисует в 1/1.5 размера вывода.'))
-        # self.row(f, _('Live resolution changes', 'Смена разрешения на лету'), self.choice(f, 'live_resolution', 'ini', LIVE),
-        #          _('Off: outputs other than 1080p are set by a patch at start (fastest; changing them in the '
-        #            'game restarts it). On: change output and preset in the game without a restart, at a cost.',
-        #            'Выкл.: разрешения кроме 1080p задаются патчем при запуске (быстрее). Вкл.: менять в игре '
-        #            'без перезапуска, но медленнее.'))
-        # self.check(f, 'object_motion', 'ini', _('Object motion vectors', 'Векторы движения объектов'),
-        #            _('Less ghosting on characters, cloth and weapons; costs about 10% FPS.',
-        #              'Меньше гостинга на персонажах и одежде; стоит около 10% FPS.'))
-
-    def build_display(self, f):
-        """Window and overlay: the top of the Graphics page."""
-        self.section(f, _('Window', 'Окно'), top=4)
+        self.section(f, _('Display'), top=4)
         self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
                  _('Borderless covers the screen without changing the display mode.'))
+        self.row(f, _('Resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options),
+                 _('The first size is your monitor\'s and follows it. Wider than 16:9 keeps the HUD at 16:9.'),
+                 restart=True)
+        self.row(f, _('Resolution scale'), self.choice(f, 'render_scale', 'ini', self.render_scale_options),
+                 _('Above 100 % draws a larger picture and scales it down to the screen: sharper, slower.'),
+                 restart=True)
         self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'))
         self.check(f, 'hdr', 'app', _('Allow HDR output', 'Разрешить HDR'),
                    _('When HDR is on in Windows and the display supports it.',
                      'Если HDR включён в Windows и монитор его поддерживает.'))
-        self.section(f, _('Textures'))
+        self.section(f, _('Image quality'))
+        aa = self.anti_aliasing_var()
+        self.row(f, _('Anti-aliasing'), self.choice(f, None, None, self.anti_aliasing_options, var=aa),
+                 _('FSR 3.1 and DLSS smooth edges over time, from the game\'s own motion vectors, in place of its '
+                   'multisampling. Also in the game: Insert > Image.'), restart=True)
+        if WINDOWS:
+            self.build_dlss_row(f)
+        upscaling = self.row(f, _('Upscaling'), self.choice(f, 'preset', 'ini', UPSCALE_PRESETS),
+                             _('Draws the race smaller and scales it up with FSR 3.1 or DLSS: more FPS, a softer '
+                               'picture. The HUD and menus stay sharp.'))
+        # Only DLSS has presets. The row (title, box, note) hides with another method.
+        first = self.next_row(f)
+        self.row(f, _('DLSS preset'), self.choice(f, 'dlss_preset', 'ini', DLSS_PRESETS),
+                 _('K is the driver\'s default. M and L are the newer second-generation models; L costs a few '
+                   'percent more.'), restart=True)
+        preset_widgets = [w for r in range(first, self.next_row(f)) for w in f.grid_slaves(row=r)]
+
+        def follow_method(*_args):
+            temporal = aa.get() in ('fsr3', 'dlss')
+            upscaling.configure(state='readonly' if temporal else 'disabled')
+            for widget in preset_widgets:
+                widget.grid() if aa.get() == 'dlss' and dlss_installed() else widget.grid_remove()
+        aa.trace_add('write', follow_method)
+        self.dlss_preset_visible = follow_method
+        follow_method()
         self.row(f, _('Anisotropic filtering'), self.choice(f, 'anisotropy', 'ini', ANISOTROPY),
                  _('Sharper floors and walls seen at an angle, at little cost on most graphics cards.'),
                  restart=True)
+        self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
+                 _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
+                   'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)
+        self.section(f, _('Experimental'))
+        self.check(f, 'ps4_pro', 'app', _('PS4 Pro mode'),
+                   _('The game runs as on a PS4 Pro, with its Pro graphics. Menus and a race start work; other events '
+                     'are not tested yet. Turn it off if something looks wrong.'), restart=True)
         self.section(f, _('Overlay'))
         self.check(f, 'show_fps', 'ini', _('Show performance overlay'),
                    _('Items, size and corner: in-game menu (Insert / R3+L2) > Overlay.'))
@@ -2214,6 +2194,53 @@ class Launcher:
         self.check(f, 'photo_flare', 'app', _('Lens flare in photo mode'),
                    _("Off: no colour flare over the ship and its exhaust in the game's photo mode."),
                    restart=True)
+
+    def anti_aliasing_options(self):
+        """The Anti-aliasing list; DLSS once NVIDIA's runtime is installed (asked again when it opens)."""
+        choices = ANTI_ALIASING + ([DLSS_CHOICE] if dlss_installed() else [])
+        # A saved method the list lacks (an older build's, DLSS without its file) is shown as it is.
+        saved = self.var('upscaler', 'ini').get()
+        if self.var('experimental_upscaler', 'app').get() and saved not in dict(choices):
+            choices = choices + [(saved, (saved.upper(),))]
+        return choices
+
+    def anti_aliasing_var(self):
+        """One choice over two settings, as a PC game shows it: the game's own multisampling is the
+        anti-aliasing switch off; Off, FSR 3.1 and DLSS turn it on with that method (gow3.ini upscaler).
+        Not saved itself: it follows the two settings and sets them."""
+        if getattr(self, 'anti_aliasing', None) is None:
+            switch, method = self.var('experimental_upscaler', 'app'), self.var('upscaler', 'ini')
+            shown = lambda: method.get() if switch.get() else 'msaa'
+            self.anti_aliasing = aa = self.tk.StringVar(value=shown())
+
+            def chosen(*_a):
+                value = aa.get()
+                if value == 'msaa':
+                    if switch.get():
+                        switch.set(False)
+                    return
+                if not switch.get():
+                    switch.set(True)
+                if method.get() != value:
+                    method.set(value)
+
+            def followed(*_a):
+                if aa.get() != shown():
+                    aa.set(shown())
+            aa.trace_add('write', chosen)
+            switch.trace_add('write', followed)
+            method.trace_add('write', followed)
+        return self.anti_aliasing
+
+    def render_scale_options(self):
+        """The Resolution scale list: 100, 150 and 200 % while the result stays within 7680 × 4320; 100 %
+        alone for a game without "display" (run.py scales WipEout only)."""
+        name = self.var('render_resolution', 'ini').get()
+        monitor = display_info.this_display()
+        base = (graphics_options.display_render_size(monitor) if monitor else None) \
+            if name == graphics_options.DISPLAY else graphics_options.resolution_size(name)
+        offered = graphics_options.DISPLAY in self.game_resolution_names()
+        return [(value, (label,)) for value, label in graphics_options.render_scale_choices(base, offered)]
 
     def build_performance(self):
         f = self.scrolled_page('performance', _('Performance'), _('Frame rate and speed options.'))
@@ -2998,6 +3025,10 @@ class Launcher:
         ttk.Label(holder, text=f'v{VERSION}', style='Muted.TLabel').pack(side='left', padx=self.px(10))
         if not WINDOWS:
             self.build_linux_options(f)
+        self.section(f, _('Graphics', 'Графика'))
+        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
+                 _('Below 1920 × 1080: the size of the game\'s picture (the Steam Deck uses 1280 × 720). From '
+                   '1920 × 1080 up it follows Graphics > Resolution.'), restart=True)
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((6, 0)))
@@ -3025,7 +3056,7 @@ class Launcher:
         self.check(body, 'frame_capture_key', 'app', _('F11 captures a frame for analysis'),
                    _('Records how the next frame is drawn into the captures folder.'))
         self.check(body, 'upscaler_key', 'app', _('F10 switches the anti-aliasing (off, FSR 3.1, DLAA)'),
-                   _('For comparing them in the same scene. Needs Graphics > Temporal anti-aliasing on; '
+                   _('For comparing them in the same scene. Needs Graphics > Anti-aliasing on FSR 3.1 or DLSS; '
                      'DLAA only where the game found DLSS working.'))
         self.check(body, 'vk_validation', 'app', _('Vulkan validation layers (needs the Vulkan SDK; much slower)',
                                                    'Слои валидации Vulkan (нужен Vulkan SDK; сильно замедляет)'))
@@ -3088,7 +3119,8 @@ class Launcher:
         self.store_game_patches()
         title_id, _profile = game_profile_of(self.meta_dir())
         names = self.app.get('game_patches', {}).get(title_id) or []
-        resolution = dict((v, _(*t)) for v, t in self.resolution_options()).get(self.var('render_resolution', 'ini').get(), '?')
+        choices = self.resolution_options() + self.game_resolution_options()
+        resolution = dict((v, _(*t)) for v, t in choices).get(self.var('render_resolution', 'ini').get(), '?')
         from patches import game_patchable, patch_status
         if not game_patchable(self.meta_dir()):
             return _('{} · 60 FPS · no patches for this game').format(resolution)
@@ -3839,12 +3871,12 @@ class Launcher:
                 if error:
                     self.messagebox.showerror(APP_NAME, _('Could not download NVIDIA DLSS: {}').format(error))
                     return
-                # DLAA needs the temporal anti-aliasing switch: both are set, Save keeps them.
+                # Anti-aliasing goes to DLSS (the switch and the method): Save keeps them.
                 self.var('experimental_upscaler', 'app').set(True)
                 self.var('upscaler', 'ini').set('dlss')
                 self.dlss_preset_visible()
-                self.messagebox.showinfo(APP_NAME, _('NVIDIA DLSS is installed. Temporal anti-aliasing is on with '
-                                                     'DLAA: click Save, then PLAY.'))
+                self.messagebox.showinfo(APP_NAME, _('NVIDIA DLSS is installed. Anti-aliasing is set to '
+                                                     'DLSS: click Save, then PLAY.'))
             self.ui_calls.put(finished)
         threading.Thread(target=work, daemon=True).start()
 

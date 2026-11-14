@@ -12,7 +12,7 @@ import math
 import re
 from pathlib import Path
 
-from display_info import _this_display
+from display_info import this_display
 
 RESOLUTIONS = ('native', '480p', '720p', '900p', '1440p', '1800p', '4K',
                '2560x1080', '3440x1440', '3840x1600', '5120x1440', '1920x1200', '2560x1600', '1280x800',
@@ -27,7 +27,7 @@ SIZES = {'native': (1920, 1080), '480p': (854, 480), '720p': (1280, 720), '900p'
          '1440p': (2560, 1440), '1800p': (3200, 1800), '4K': (3840, 2160)}
 ASPECTS = (('16:9', 16 / 9), ('16:10', 16 / 10), ('21:9', 2.37), ('32:9', 32 / 9), ('4:3', 4 / 3))
 ENGINE_FPS = (60, 100, 120, 240)
-DEFAULTS = {'render_resolution': 'native', 'render_scale': '100', 'engine_fps': '120', 'deferred_readback': '1',
+DEFAULTS = {'render_resolution': 'display', 'render_scale': '100', 'engine_fps': '120', 'deferred_readback': '1',
             'stale_readback': '1', 'async_shaders': '1'}
 RESOLUTION_PREFIX = 'Resolution Patch'
 # The games the generated resolution patches apply to (WipEout Omega Collection).
@@ -128,25 +128,55 @@ def closest_resolution(aspect, current, names):
     return min(chosen, key=lambda n: abs(resolution_size(n)[0] * resolution_size(n)[1] - size[0] * size[1]))
 
 
-def resolution_label(name, aspect=True):
-    """What the lists show for a render resolution: '1440p · 2560 × 1440 · 16:9', '3440 × 1440 · 21:9 (beta)'.
-    `name` is a built-in name or a mod's "<width>x<height>"; anything else is shown as it is. Without
-    `aspect` the ratio is left out (the launcher's list beside the Aspect ratio filter)."""
+def resolution_label(name):
+    """What the lists show for a render resolution, as a PC game shows it: '2560 × 1440'. "display" is the
+    monitor's size; `name` is otherwise a built-in name or a mod's "<width>x<height>", and anything else is
+    shown as it is."""
     if name == DISPLAY:
-        return display_label(_this_display())
+        return display_label(display_render_size(this_display()) if this_display() else None)
     size = resolution_size(name)
-    if not size:
-        return name
-    width, height = size
-    title = 'Native' if name == 'native' else name if name in SIZES else None
-    label = ' · '.join(p for p in (title, f'{width} × {height}', aspect and aspect_name(width, height)) if p)
-    return label + (' (beta)' if name in BETA_RESOLUTIONS else '')
+    return f'{size[0]} × {size[1]}' if size else name
+
+
+def resolution_choices(names, monitor, keep=()):
+    """[(name, label)] of the Resolution list as a PC game lists it: "display" first (when `names` has it),
+    labelled with the size it renders at on this monitor, then the other sizes largest first. A size equal
+    to that one or larger is left out (Resolution scale goes above the monitor). The `keep` names (the saved
+    one) are always listed, also a size `names` lacks. An unknown `monitor` (None) leaves every size in."""
+    shown = display_render_size(monitor) if monitor and DISPLAY in names else None
+    names = [*names, *(k for k in keep if k and k not in names and resolution_size(k))]
+
+    def listed(name):
+        size = resolution_size(name)
+        if name in keep or not size or not shown:
+            return True
+        return size != shown and size[0] <= shown[0] and size[1] <= shown[1]
+
+    def largest_first(name):
+        size = resolution_size(name)
+        return (0, -size[0] * size[1], -size[0]) if size else (1, 0, 0)
+    first = [DISPLAY] if DISPLAY in names else []
+    rest = sorted((n for n in dict.fromkeys(names) if n != DISPLAY and listed(n)), key=largest_first)
+    return [(n, display_label(shown) if n == DISPLAY else resolution_label(n)) for n in first + rest]
+
+
+def render_scale_choices(base, offered=True):
+    """[(percent, label)] of the Resolution scale list: the RENDER_SCALES whose size for `base` (the
+    resolution's size, None when unknown) stays within MAX_GENERATED; 100 % alone for a game that has no
+    render scale (`offered` False)."""
+    def fits(percent):
+        if not base:
+            return True
+        width, height = scaled_size(base, percent)
+        return width <= MAX_GENERATED[0] and height <= MAX_GENERATED[1]
+    return [(str(p), f'{p} %') for p in RENDER_SCALES if p == 100 or (offered and fits(p))]
 
 
 def startup_options(ini, extra=()):
     """The startup options, normalized; unknown values fall back to the defaults. `extra`: the
     resolutions of the enabled mods (a mod that is off leaves its resolution out: native)."""
     options = {key: ini.get(key, value) for key, value in DEFAULTS.items()}
+    # "display" (the default) where the game lists it, else the game's own size.
     if options['render_resolution'] not in resolutions(extra):
         options['render_resolution'] = 'native'
     if options['render_scale'] not in tuple(str(p) for p in RENDER_SCALES):
@@ -270,10 +300,16 @@ def scaled_size(size, percent):
     return tuple(int(side * percent / 100 / 2 + 0.5) * 2 for side in size)
 
 
+def display_render_size(monitor):
+    """What "display" renders at, at 100 %, on a monitor of this size (None: unknown): the monitor's size,
+    never below the game's own."""
+    return render_size({'render_resolution': DISPLAY, 'render_scale': '100'}, monitor)
+
+
 def display_label(size):
-    """The list's name for render_resolution=display: 'Display · 3440 × 1440', or 'Display' when the
-    monitor's size is unknown."""
-    return f'Display · {size[0]} × {size[1]}' if size else 'Display'
+    """The list's name for render_resolution=display: the size it renders at, '3440 × 1440', or 'Display'
+    when the monitor is unknown."""
+    return f'{size[0]} × {size[1]}' if size else 'Display'
 
 
 def render_size(options, display):

@@ -152,9 +152,13 @@ class DisplayResolutionTest(unittest.TestCase):
         self.assertEqual(self.size({'render_resolution': 'display'}, '1280x800'), (1920, 1080))
         self.assertEqual(self.size({'render_resolution': 'display', 'render_scale': '150'}), (5160, 2160))
 
+    def test_display_is_the_default(self):
+        self.assertEqual(self.size({}), (3440, 1440))
+        self.assertEqual(g.startup_options({}, self.EXTRA)['render_resolution'], 'display')
+        self.assertEqual(g.startup_options({})['render_resolution'], 'native')  # a game without it
+
     def test_other_options_are_left_alone(self):
         self.assertIsNone(self.size({'render_resolution': '1440p'}))
-        self.assertIsNone(self.size({}))
         self.assertIsNone(self.size({'render_resolution': 'display'}, title_id='CUSA01623'))
 
     def patches_for(self, ini, display, out):
@@ -194,6 +198,24 @@ class DisplayResolutionTest(unittest.TestCase):
         self.assertEqual(run.session_render_size(ini, extra, None, 'CUSA07671'), (4500, 2550))
         self.assertIsNone(run.custom_resolution({'render_resolution': '1440p'}, [], OWN, 'CUSA07671'))
         self.assertIsNone(run.custom_resolution(ini, [], OWN, 'CUSA01623'))
+
+    def test_the_in_game_lists_are_the_launchers(self):
+        resolutions, scales = run.menu_lists(OWN, self.EXTRA, (3440, 1440), 'display', True)
+        rows = resolutions.split(';')
+        self.assertEqual(rows[:3], ['display=3440 × 1440', '1440p=2560 × 1440', '2560x1080=2560 × 1080'])
+        self.assertNotIn('4K=3840 × 2160', rows)  # larger than the monitor
+        self.assertEqual(scales, '100;150;200')
+        # The Steam Deck: "display" is the game's own size there, and says so.
+        resolutions, _scales = run.menu_lists(OWN, self.EXTRA, (1280, 800), 'display', True)
+        self.assertEqual(resolutions.split(';')[:2], ['display=1920 × 1080', '900p=1600 × 900'])
+        # A saved size above the monitor stays; its scales stop at 7680 × 4320.
+        resolutions, scales = run.menu_lists(OWN, self.EXTRA, (3440, 1440), '5120x2880', True)
+        self.assertIn('5120x2880=5120 × 2880', resolutions.split(';'))
+        self.assertEqual(scales, '100;150')
+        # God of War III: every built-in size, no render scale.
+        resolutions, scales = run.menu_lists([''], [], None, 'native', False)
+        self.assertEqual(resolutions.split(';')[0], '7680x4320=7680 × 4320')
+        self.assertEqual(scales, '100')
 
     def test_a_scaled_named_size(self):
         with tempfile.TemporaryDirectory() as directory:

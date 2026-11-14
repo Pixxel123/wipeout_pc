@@ -39,7 +39,8 @@ class PortugueseTest(unittest.TestCase):
         self.assertEqual(sorted(n for n in notes if n not in self.pt), [])
 
     def test_resolution_labels(self):
-        self.assertEqual(self.pt[launcher.RESOLUTION_CHOICES[0][1][0]], 'Nativa · 1920 × 1080 · 16:9')
+        # Plain sizes, as a PC game shows them: the same in every language.
+        self.assertEqual(launcher.RESOLUTION_CHOICES[0][1][0], '1920 × 1080')
 
 
 
@@ -50,7 +51,8 @@ class SpanishTest(PortugueseTest):
         self.pt = gow3_lang.table('es')
 
     def test_resolution_labels(self):
-        self.assertEqual(self.pt[launcher.RESOLUTION_CHOICES[0][1][0]], 'Nativa · 1920 × 1080 · 16:9')
+        # Plain sizes, as a PC game shows them: the same in every language.
+        self.assertEqual(launcher.RESOLUTION_CHOICES[0][1][0], '1920 × 1080')
 
 if __name__ == '__main__':
     unittest.main()

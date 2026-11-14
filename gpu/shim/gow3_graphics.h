@@ -61,37 +61,6 @@ inline std::vector<std::string> ResolutionNames() {
         if (std::find(names.begin(), names.end(), name) == names.end()) names.emplace_back(name);
     return names;
 }
-/// The menu label of a resolution name (as the launcher, graphics_options.resolution_label: name, exact
-/// size, aspect ratio); a mod's "<width>x<height>" is its own label. By name, never by position:
-/// GOW3_ALLOWED_RESOLUTIONS makes ResolutionNames shorter than Resolutions.
-inline constexpr std::array<std::string_view, 24> ResolutionLabels = {
-    "Native · 1920 × 1080 · 16:9", "480p · 854 × 480 · 16:9",
-    "720p · 1280 × 720 · 16:9", "900p · 1600 × 900 · 16:9",
-    "1440p · 2560 × 1440 · 16:9",
-    "1800p · 3200 × 1800 · 16:9", "4K · 3840 × 2160 · 16:9",
-    "2560 × 1080 · 21:9 (beta)", "3440 × 1440 · 21:9 (beta)",
-    "3840 × 1600 · 21:9 (beta)", "5120 × 1440 · 32:9 (beta)",
-    "1920 × 1200 · 16:10 (beta)", "2560 × 1600 · 16:10 (beta)",
-    "1280 × 800 · 16:10", "1440 × 900 · 16:10",
-    "1360 × 768 · 16:9",
-    "1280 × 960 · 4:3", "1440 × 1080 · 4:3 (beta)", "1920 × 1440 · 4:3 (beta)",
-    "2048 × 1536 · 4:3 (beta)", "2560 × 1920 · 4:3 (beta)", "5120 × 2160 · 21:9 (beta)",
-    "5120 × 2880 · 16:9 (beta)", "7680 × 4320 · 16:9 (beta)"};
-inline const char* ResolutionLabel(const std::string& name) {
-    if (name == "display") {
-        // "Display · 3440 × 1440": run.py says the monitor's size in GOW3_DISPLAY_SIZE at every start.
-        static const std::string label = [] {
-            int w = 0, h = 0;
-            const char* text = std::getenv("GOW3_DISPLAY_SIZE");
-            if (text && std::sscanf(text, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
-                return "Display · " + std::to_string(w) + " × " + std::to_string(h);
-            return std::string("Display");
-        }();
-        return label.c_str();
-    }
-    const auto it = std::find(Resolutions.begin(), Resolutions.end(), name);
-    return it != Resolutions.end() ? ResolutionLabels[it - Resolutions.begin()].data() : name.c_str();
-}
 /// The size in pixels of a resolution name: the built-in ones (as scripts/graphics_options.py SIZES)
 /// or a mod's "<width>x<height>"; anything else is native.
 inline constexpr std::array<std::pair<std::string_view, std::pair<int, int>>, 7> ResolutionSizes = {{
@@ -108,6 +77,34 @@ inline std::pair<int, int> ResolutionSize(std::string_view name) {
         if (w > 0 && h > 0) return {w, h};
     }
     return ResolutionSizes[0].second;
+}
+/// One row of the in-game Resolution list: the position in ResolutionNames() and what the row says.
+struct ResolutionChoice {
+    int index;
+    std::string label;
+};
+/// The in-game Resolution list, as the launcher shows it: run.py's GOW3_RESOLUTION_LIST
+/// ("<name>=<label>;..." in order, from graphics_options.resolution_choices, which decides the order, the
+/// labels and what is left out). `current` is always listed. Without the list: every name, as it is.
+inline std::vector<ResolutionChoice> ResolutionChoices(const std::vector<std::string>& names, int current) {
+    std::vector<ResolutionChoice> choices;
+    const char* list = std::getenv("GOW3_RESOLUTION_LIST");
+    for (std::string_view rest = list ? list : ""; !rest.empty();) {
+        const std::size_t end = rest.find(';');
+        const std::string_view entry = rest.substr(0, end);
+        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+        const std::size_t eq = entry.find('=');
+        const auto found = std::find(names.begin(), names.end(), entry.substr(0, eq));
+        if (eq != std::string_view::npos && found != names.end())
+            choices.push_back({int(found - names.begin()), std::string(entry.substr(eq + 1))});
+    }
+    if (choices.empty())
+        for (int i = 0; i < int(names.size()); ++i) choices.push_back({i, names[i]});
+    const auto listed = [&](int i) {
+        return std::any_of(choices.begin(), choices.end(), [i](const ResolutionChoice& c) { return c.index == i; });
+    };
+    if (current >= 0 && current < int(names.size()) && !listed(current)) choices.push_back({current, names[current]});
+    return choices;
 }
 /// Engine frame rate ceilings: 60 is the game's own, 100 (for 100 Hz displays), 120 and 240 are frame rate patches.
 inline constexpr std::array<int, 4> EngineFps = {60, 100, 120, 240};
@@ -133,6 +130,20 @@ inline std::pair<int, int> SessionRenderSize(std::string_view startup_name) {
 inline constexpr std::array<int, 3> RenderScales = {100, 150, 200};
 inline int ParseRenderScale(int value) {
     return IndexOf(RenderScales, value, -1) >= 0 ? value : 100;
+}
+/// The scales the in-game Resolution scale row offers: run.py's GOW3_RENDER_SCALES ("100;150;200", those
+/// that fit this session's resolution; 100 alone for a game without a render scale). Without it: 100.
+inline std::vector<int> RenderScaleChoices() {
+    std::vector<int> scales;
+    const char* list = std::getenv("GOW3_RENDER_SCALES");
+    for (const char* text = list ? list : ""; *text;) {
+        const int value = std::atoi(text);
+        if (IndexOf(RenderScales, value, -1) >= 0) scales.push_back(value);
+        while (*text && *text != ';') ++text;
+        if (*text) ++text;
+    }
+    if (scales.empty()) scales.push_back(100);
+    return scales;
 }
 inline int ParseDisplayMode(std::string_view text) {
     return IndexOf(DisplayModeKeys, text, Windowed);

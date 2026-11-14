@@ -166,22 +166,44 @@ class GraphicsOptionsTest(unittest.TestCase):
             ],
         )
 
-    def test_resolution_labels_show_the_size_and_aspect_ratio(self):
-        self.assertEqual(g.resolution_label('native'), 'Native · 1920 × 1080 · 16:9')
-        self.assertEqual(g.resolution_label('480p'), '480p · 854 × 480 · 16:9')
-        self.assertEqual(g.resolution_label('900p'), '900p · 1600 × 900 · 16:9')
-        self.assertEqual(g.resolution_label('3440x1440'), '3440 × 1440 · 21:9 (beta)')
-        self.assertEqual(g.resolution_label('5120x1440'), '5120 × 1440 · 32:9 (beta)')
-        self.assertEqual(g.resolution_label('2560x1600'), '2560 × 1600 · 16:10 (beta)')
-        self.assertEqual(g.resolution_label('1280x800'), '1280 × 800 · 16:10')  # the Steam Deck's screen, tested
-        self.assertEqual(g.resolution_label('1280x960'), '1280 × 960 · 4:3')
-        self.assertEqual(g.resolution_label('1920x1440'), '1920 × 1440 · 4:3 (beta)')
-        self.assertEqual(g.resolution_label('3840x1080'), '3840 × 1080 · 32:9')  # a mod's size, not beta
-        self.assertEqual(g.resolution_label('1600x1200'), '1600 × 1200 · 4:3')
+    def test_resolution_labels_are_plain_sizes(self):
+        # As a PC game lists them: no names, aspect ratios or marks.
+        self.assertEqual(g.resolution_label('native'), '1920 × 1080')
+        self.assertEqual(g.resolution_label('480p'), '854 × 480')
+        self.assertEqual(g.resolution_label('1440p'), '2560 × 1440')
+        self.assertEqual(g.resolution_label('3440x1440'), '3440 × 1440')
+        self.assertEqual(g.resolution_label('3840x1080'), '3840 × 1080')  # a mod's size
         self.assertEqual(g.resolution_label('custom'), 'custom')
-        # Every ultrawide and 16:10 size is beta; the 16:9 ones are not.
-        self.assertEqual([r for r in g.RESOLUTIONS if g.resolution_label(r).endswith('(beta)')],
-                         list(g.BETA_RESOLUTIONS))
+
+    def test_the_resolution_list_is_a_pc_games(self):
+        names = ['display', 'native', '720p', '1440p', '4K', '3440x1440', '2560x1080', '5120x2880']
+        values = lambda choices: [n for n, _l in choices]
+        choices = g.resolution_choices(names, (3440, 1440))
+        self.assertEqual(choices[0], ('display', '3440 × 1440'))
+        # Largest first; the monitor's own size and larger ones are left out.
+        self.assertEqual(values(choices), ['display', '1440p', '2560x1080', 'native', '720p'])
+        self.assertEqual(values(g.resolution_choices(names, (3440, 1440), keep=('4K',)))[:2], ['display', '4K'])
+        self.assertEqual(g.resolution_choices(names, (3441, 1441))[0], ('display', '3440 × 1440'))  # even
+        # An unknown monitor: every size, "Display" first.
+        unknown = g.resolution_choices(names, None)
+        self.assertEqual(unknown[0], ('display', 'Display'))
+        self.assertEqual(values(unknown)[1:4], ['5120x2880', '4K', '3440x1440'])
+        # A monitor smaller than the game's own size: "display" is that size and says so.
+        deck = g.resolution_choices(names, (1280, 800))
+        self.assertEqual(deck[0], ('display', '1920 × 1080'))
+        self.assertEqual(values(deck), ['display', '720p'])
+        # A saved size the list lacks is added; anything that is no size is not.
+        self.assertIn(('3000x1700', '3000 × 1700'), g.resolution_choices(names, (3440, 1440), keep=('3000x1700',)))
+        self.assertEqual(len(g.resolution_choices(names, (3440, 1440), keep=('bogus',))), 5)
+        # A game without "display" (God of War III): every size, largest first.
+        self.assertEqual(values(g.resolution_choices(['native', '720p', '4K'], (2560, 1440))), ['4K', 'native', '720p'])
+
+    def test_resolution_scale_list_stays_within_8k(self):
+        self.assertEqual(g.render_scale_choices((2560, 1440)), [('100', '100 %'), ('150', '150 %'), ('200', '200 %')])
+        self.assertEqual([p for p, _l in g.render_scale_choices((5120, 2880))], ['100', '150'])
+        self.assertEqual([p for p, _l in g.render_scale_choices((7680, 4320))], ['100'])
+        self.assertEqual(len(g.render_scale_choices(None)), 3)
+        self.assertEqual(g.render_scale_choices((2560, 1440), offered=False), [('100', '100 %')])
 
     def test_every_built_in_resolution_has_a_patch(self):
         import patches
@@ -360,9 +382,8 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertIsNone(display_info.xrandr_primary_size(''))
 
     def test_display_has_a_short_label(self):
-        self.assertEqual(g.display_label((3440, 1440)), 'Display · 3440 × 1440')
+        self.assertEqual(g.display_label((3440, 1440)), '3440 × 1440')
         self.assertEqual(g.display_label(None), 'Display')
-        self.assertTrue(g.resolution_label('display').startswith('Display'))
 
 
 class WindowSizeTest(unittest.TestCase):
@@ -401,10 +422,6 @@ class AspectRatioTest(unittest.TestCase):
         self.assertEqual(g.closest_resolution('16:9', '1280x800', g.RESOLUTIONS), '1360x768')
         self.assertEqual(g.closest_resolution('16:10', '1440x900', g.RESOLUTIONS), '1440x900')  # already of it
 
-    def test_labels_without_the_aspect_ratio_for_the_filtered_list(self):
-        self.assertEqual(g.resolution_label('1800p', aspect=False), '1800p · 3200 × 1800')
-        self.assertEqual(g.resolution_label('3440x1440', aspect=False), '3440 × 1440 (beta)')
-        self.assertEqual(g.resolution_label('1800p'), '1800p · 3200 × 1800 · 16:9')  # elsewhere it stays
 
 if __name__ == '__main__':
     unittest.main()

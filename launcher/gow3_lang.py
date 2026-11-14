@@ -963,7 +963,7 @@ EXTRA = {
         'DLAA needs gow3_dlss.dll and nvngx_dlss.dll next to gow3-probe.exe.': 'O DLAA precisa de gow3_dlss.dll e nvngx_dlss.dll ao lado de gow3-probe.exe.',
         'DLAA preset': 'Predefinição do DLAA',
         'F10 switches the anti-aliasing (off, FSR 3.1, DLAA)': 'F10 alterna o antisserrilhamento (desligado, FSR 3.1, DLAA)',
-        'For comparing them in the same scene. Needs Graphics > Temporal anti-aliasing on; DLAA only where the game found DLSS working.': 'Para compará-los na mesma cena. Precisa de Gráficos > Antisserrilhamento temporal ligado; DLAA só onde o jogo encontrou o DLSS funcionando.',
+        'For comparing them in the same scene. Needs Graphics > Anti-aliasing on FSR 3.1 or DLSS; DLAA only where the game found DLSS working.': 'Para compará-los na mesma cena. Precisa de Gráficos > Antisserrilhamento em FSR 3.1 ou DLSS; DLAA só onde o jogo encontrou o DLSS funcionando.',
         "K is the driver's default for DLAA. M and L are the newer second-generation models; L costs a few percent more.": 'K é o padrão do driver para o DLAA. M e L são os modelos mais novos, de segunda geração; L custa alguns por cento a mais.',
         'Method': 'Método',
         "Off (default): the game's own image. On: FSR 3.1 or DLAA smooth edges at the render resolution (DLAA), from the game's own motion vectors. To compare them in the game: Advanced > Diagnostics > F10.": 'Desligado (padrão): a imagem do próprio jogo. Ligado: FSR 3.1 ou DLAA suavizam as bordas na resolução de renderização, com os vetores de movimento do próprio jogo. Para compará-los no jogo: Avançado > Diagnóstico > F10.',
@@ -1100,6 +1100,19 @@ EXTRA = {
         'Absolute': 'Absoluto',
         'Grab': 'Agarrar',
         'Dodge': 'Esquiva',
+        'Above 100 % draws a larger picture and scales it down to the screen: sharper, slower.': 'Acima de 100 % desenha uma imagem maior e a reduz para a tela: mais nítido, mais lento.',
+        'Anti-aliasing': 'Antisserrilhamento',
+        "Below 1920 × 1080: the size of the game's picture (the Steam Deck uses 1280 × 720). From 1920 × 1080 up it follows Graphics > Resolution.": 'Abaixo de 1920 × 1080: o tamanho da imagem do jogo (o Steam Deck usa 1280 × 720). De 1920 × 1080 para cima segue Gráficos > Resolução.',
+        'DLSS preset': 'Predefinição do DLSS',
+        'Draws the race smaller and scales it up with FSR 3.1 or DLSS: more FPS, a softer picture. The HUD and menus stay sharp.': 'Desenha a corrida menor e a amplia com FSR 3.1 ou DLSS: mais FPS, imagem mais suave. O HUD e os menus continuam nítidos.',
+        "FSR 3.1 and DLSS smooth edges over time, from the game's own motion vectors, in place of its multisampling. Also in the game: Insert > Image.": 'FSR 3.1 e DLSS suavizam as bordas ao longo do tempo, com os vetores de movimento do próprio jogo, no lugar do multisampling dele. Também no jogo: Insert > Imagem.',
+        'Image quality': 'Qualidade de imagem',
+        "K is the driver's default. M and L are the newer second-generation models; L costs a few percent more.": 'K é o padrão do driver. M e L são os modelos mais novos da segunda geração; L custa alguns por cento a mais.',
+        'PS4 Pro mode': 'Modo PS4 Pro',
+        'Resolution scale': 'Escala de resolução',
+        "The first size is your monitor's and follows it. Wider than 16:9 keeps the HUD at 16:9.": 'O primeiro tamanho é o do seu monitor e o acompanha. Mais largo que 16:9 mantém o HUD em 16:9.',
+        'Game default (MSAA)': 'Padrão do jogo (MSAA)',
+        'DLSS (NVIDIA RTX)': 'DLSS (NVIDIA RTX)',
     },
     'es': {
         'Adaptive ship reflections': 'Reflejos adaptativos de la nave',
@@ -1371,7 +1384,7 @@ EXTRA = {
         'DLAA needs gow3_dlss.dll and nvngx_dlss.dll next to gow3-probe.exe.': 'DLAA necesita gow3_dlss.dll y nvngx_dlss.dll junto a gow3-probe.exe.',
         'DLAA preset': 'Preajuste de DLAA',
         'F10 switches the anti-aliasing (off, FSR 3.1, DLAA)': 'F10 cambia el antialiasing (desactivado, FSR 3.1, DLAA)',
-        'For comparing them in the same scene. Needs Graphics > Temporal anti-aliasing on; DLAA only where the game found DLSS working.': 'Para compararlos en la misma escena. Necesita Gráficos > Antialiasing temporal activado; DLAA solo donde el juego encontró DLSS funcionando.',
+        'For comparing them in the same scene. Needs Graphics > Anti-aliasing on FSR 3.1 or DLSS; DLAA only where the game found DLSS working.': 'Para compararlos en la misma escena. Necesita Gráficos > Antialiasing en FSR 3.1 o DLSS; DLAA solo donde el juego encontró DLSS funcionando.',
         "K is the driver's default for DLAA. M and L are the newer second-generation models; L costs a few percent more.": 'K es el predeterminado del controlador para DLAA. M y L son los modelos más nuevos, de segunda generación; L cuesta un poco más.',
         'Method': 'Método',
         "Off (default): the game's own image. On: FSR 3.1 or DLAA smooth edges at the render resolution (DLAA), from the game's own motion vectors. To compare them in the game: Advanced > Diagnostics > F10.": 'Desactivado (predeterminado): la imagen del propio juego. Activado: FSR 3.1 o DLAA suavizan los bordes a la resolución de render, con los vectores de movimiento del propio juego. Para compararlos en el juego: Avanzado > Diagnóstico > F10.',
@@ -1473,6 +1486,19 @@ EXTRA = {
         'Absolute': 'Absoluto',
         'Grab': 'Agarrar',
         'Dodge': 'Esquivar',
+        'Above 100 % draws a larger picture and scales it down to the screen: sharper, slower.': 'Por encima del 100 % dibuja una imagen mayor y la reduce a la pantalla: más nítido, más lento.',
+        'Anti-aliasing': 'Antialiasing',
+        "Below 1920 × 1080: the size of the game's picture (the Steam Deck uses 1280 × 720). From 1920 × 1080 up it follows Graphics > Resolution.": 'Por debajo de 1920 × 1080: el tamaño de la imagen del juego (el Steam Deck usa 1280 × 720). Desde 1920 × 1080 sigue a Gráficos > Resolución.',
+        'DLSS preset': 'Preajuste de DLSS',
+        'Draws the race smaller and scales it up with FSR 3.1 or DLSS: more FPS, a softer picture. The HUD and menus stay sharp.': 'Dibuja la carrera más pequeña y la escala con FSR 3.1 o DLSS: más FPS, una imagen más suave. El HUD y los menús siguen nítidos.',
+        "FSR 3.1 and DLSS smooth edges over time, from the game's own motion vectors, in place of its multisampling. Also in the game: Insert > Image.": 'FSR 3.1 y DLSS suavizan los bordes con el tiempo, con los vectores de movimiento del propio juego, en lugar de su multisampling. También en el juego: Insert > Imagen.',
+        'Image quality': 'Calidad de imagen',
+        "K is the driver's default. M and L are the newer second-generation models; L costs a few percent more.": 'K es el predeterminado del driver. M y L son los modelos más nuevos de segunda generación; L cuesta un poco más.',
+        'PS4 Pro mode': 'Modo PS4 Pro',
+        'Resolution scale': 'Escala de resolución',
+        "The first size is your monitor's and follows it. Wider than 16:9 keeps the HUD at 16:9.": 'El primer tamaño es el de tu monitor y lo sigue. Más ancho que 16:9 mantiene el HUD en 16:9.',
+        'Game default (MSAA)': 'Predeterminado del juego (MSAA)',
+        'DLSS (NVIDIA RTX)': 'DLSS (NVIDIA RTX)',
     },
 }
 
@@ -1643,8 +1669,8 @@ EXTRA['pt'].update({
     'Not in this build.': 'Não incluído nesta versão.',
     'No NVIDIA RTX graphics card found.': 'Nenhuma placa de vídeo NVIDIA RTX encontrada.',
     'Could not download NVIDIA DLSS: {}': 'Não foi possível baixar o NVIDIA DLSS: {}',
-    'NVIDIA DLSS is installed. Temporal anti-aliasing is on with DLAA: click Save, then PLAY.':
-        'NVIDIA DLSS instalado. O anti-aliasing temporal está ligado com DLAA: clique em Salvar e depois em JOGAR.',
+    'NVIDIA DLSS is installed. Anti-aliasing is set to DLSS: click Save, then PLAY.':
+        'NVIDIA DLSS instalado. O antisserrilhamento está em DLSS: clique em Salvar e depois em JOGAR.',
     "DLAA needs NVIDIA's DLSS file, nvngx_dlss.dll. The launcher downloads it from NVIDIA's own GitHub (DLSS {}) "
     'and checks it before using it. Needs an NVIDIA RTX graphics card.':
         'O DLAA precisa do arquivo DLSS da NVIDIA, nvngx_dlss.dll. O launcher o baixa do próprio GitHub da NVIDIA '
@@ -1669,8 +1695,8 @@ EXTRA['es'].update({
     'Not in this build.': 'No incluido en esta versión.',
     'No NVIDIA RTX graphics card found.': 'No se encontró ninguna tarjeta gráfica NVIDIA RTX.',
     'Could not download NVIDIA DLSS: {}': 'No se pudo descargar NVIDIA DLSS: {}',
-    'NVIDIA DLSS is installed. Temporal anti-aliasing is on with DLAA: click Save, then PLAY.':
-        'NVIDIA DLSS está instalado. El antialiasing temporal está activado con DLAA: pulsa Guardar y luego JUGAR.',
+    'NVIDIA DLSS is installed. Anti-aliasing is set to DLSS: click Save, then PLAY.':
+        'NVIDIA DLSS está instalado. El antialiasing está en DLSS: pulsa Guardar y luego JUGAR.',
     "DLAA needs NVIDIA's DLSS file, nvngx_dlss.dll. The launcher downloads it from NVIDIA's own GitHub (DLSS {}) "
     'and checks it before using it. Needs an NVIDIA RTX graphics card.':
         'DLAA necesita el archivo DLSS de NVIDIA, nvngx_dlss.dll. El launcher lo descarga del propio GitHub de '

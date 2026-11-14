@@ -2,8 +2,7 @@
 
 **English** | [Português (Brasil)](#português-brasil)
 
-The ultrawide sizes are **built in**: choose one in **Render resolution** (launcher or in-game menu); they are
-marked "(beta)". Before that they were a **mod**, still available for older versions: the folder
+The ultrawide sizes are **built in**: choose one in **Resolution** (launcher or in-game menu). Before that they were a **mod**, still available for older versions: the folder
 [`extras/mods/Ultrawide`](../extras/mods/Ultrawide)
 (install steps in its README). It uses the patch support of mods: a mod folder can carry game patches
 (XML files with signatures, in its `patches/` folder), applied while the mod is ticked on the Mods
@@ -46,9 +45,8 @@ They come from the game, which is built for 16:9, and are already known; they wi
 
 ## Using it
 
-Choose a size in **Render resolution** (launcher, **Home** and **Performance**) or in the in-game menu (Insert or
-R3+L2 → Performance → Render resolution). Each one shows its exact size and aspect ratio, for example
-`3440 × 1440 · 21:9 (beta)`. Pick one and **PLAY** (in the game menu: "Apply and restart"). The **Engine frame
+Choose a size in **Resolution** (launcher, **Graphics**) or in the in-game menu (Insert or
+R3+L2 → Performance → Resolution). Each one shows its exact size, for example `3440 × 1440`. Pick one and **PLAY** (in the game menu: "Apply and restart"). The **Engine frame
 rate** (60, 100, 120 or 240) is a separate choice that works with any resolution.
 
 **Older versions (before 2.4.0):** put `Ultrawide.zip` (made with `python tools/zip_mod.py extras/mods/Ultrawide`)
@@ -117,9 +115,14 @@ Two keys of `gow3.ini` use it; `run.py` works the size out at every start and lo
 
 | Key | Values | Meaning |
 |---|---|---|
-| `render_resolution` | `display` | The primary monitor's desktop size, read at every start, so it follows a new monitor or a DSR/DLDSR desktop. Listed as `Display · 3440 × 1440` in the launcher and the in-game menu |
+| `render_resolution` | `display` (default) | The primary monitor's desktop size, read at every start, so it follows a new monitor or a DSR/DLDSR desktop |
 | `render_resolution` | any even `<width>x<height>` | That size, generated when no hand-made entry or mod has it |
 | `render_scale` | `100` (default), `150`, `200` | Percent of the render resolution the game renders at. Above 100 is supersampling: a larger picture shown at the window's size |
+
+In the launcher (**Graphics**) and the in-game menu they are **Resolution** and **Resolution scale**, listed as a PC
+game lists them: plain sizes, the monitor's own size first (`display`), then the others largest first. Sizes
+equal to the monitor's or larger are left out, since Resolution scale goes above the monitor. A saved size stays
+listed. A new install starts at `display`; God of War III has no `display` and starts at its own 1920 × 1080.
 
 - A size with a hand-made entry uses that entry (a 2560 × 1440 monitor runs "Resolution Patch - 1440p").
 - Sizes run from 1920 × 1080 to 7680 × 4320. A smaller monitor (the Steam Deck's 1280 × 800) renders at the

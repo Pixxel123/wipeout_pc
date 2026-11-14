@@ -190,6 +190,9 @@ Values& Get() {
 
 void Load() {
     auto& v = Get();
+    // A gow3.ini without render_resolution: the monitor's size where the game lists it (WipEout), as
+    // run.py does (graphics_options.DEFAULTS), else the game's own size.
+    v.render_resolution = Gow3Graphics::ParseResolution("display");
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
         while (std::fgets(line, sizeof(line), file)) {
@@ -235,6 +238,7 @@ void Load() {
     v.startup_output_res = v.output_res;
     v.startup_live_resolution = v.live_resolution;
     v.startup_render_resolution = v.render_resolution;
+    v.startup_render_scale = v.render_scale;
     v.startup_engine_fps = v.engine_fps;
     const char* applied = std::getenv("GOW3_ENGINE_FPS");
     v.applied_engine_fps = applied && applied[0] ? Gow3Graphics::ParseEngineFps(std::atoi(applied))
@@ -247,6 +251,7 @@ void Load() {
 bool GraphicsNeedRestart() {
     const auto& v = Get();
     return v.render_resolution != v.startup_render_resolution ||
+           v.render_scale != v.startup_render_scale ||
            v.engine_fps != v.startup_engine_fps ||
            v.deferred_readback != v.startup_deferred_readback ||
            v.stale_readback != v.startup_stale_readback ||

@@ -201,6 +201,18 @@ def session_render_size(ini, extra, display, title_id=None):
     return size
 
 
+def menu_lists(own_sizes, extra, display, resolution, scaled):
+    """(GOW3_RESOLUTION_LIST, GOW3_RENDER_SCALES): the in-game Resolution and Resolution scale lists, the
+    same as the launcher's. `own_sizes`/`extra`: the game's names as the game builds them (gow3_graphics.h
+    ResolutionNames); `resolution`: this start's render resolution; `scaled`: run.py applies a render scale."""
+    import graphics_options as g
+    names = ([s for s in own_sizes if s in g.RESOLUTIONS] or list(g.RESOLUTIONS)) + list(extra)
+    choices = g.resolution_choices(names, display, keep=(resolution,))
+    base = (g.display_render_size(display) if display else None) if resolution == g.DISPLAY else g.resolution_size(resolution)
+    scales = g.render_scale_choices(base, scaled)
+    return ';'.join(f'{name}={label}' for name, label in choices), ';'.join(percent for percent, _label in scales)
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
@@ -242,13 +254,10 @@ def main():
                                            if s and s not in graphics_options.RESOLUTIONS))
     launch = graphics_options.launch_ini(env['GOW3_CONFIG'], out / 'graphics_state.json')
     mod_sizes = patches.resolution_names(mod_patch_files)
-    # The monitor's size, asked once: for "display" and its name in the in-game list.
+    # The monitor's size, asked once: for "display" and the lists of the in-game menu.
     display = None
     if not title_id or title_id in graphics_options.GENERATED_TITLES:
         display = display_info.display_size(env)
-        if display and not env.get(display_info.DISPLAY_SIZE_ENV):
-            env[display_info.DISPLAY_SIZE_ENV] = f'{display[0]}x{display[1]}'
-            derived.append(display_info.DISPLAY_SIZE_ENV)
     # A size in gow3.ini that nobody provides is a resolution of this start: the options and the game keep it.
     custom = custom_resolution(launch, mod_sizes, own, title_id)
     if custom:
@@ -269,6 +278,10 @@ def main():
     if reverted:
         print('Graphics: the last restart never reached the game; previous options restored', flush=True)
     env.update(graphics_options.environment(graphics))
+    env['GOW3_RESOLUTION_LIST'], env['GOW3_RENDER_SCALES'] = menu_lists(
+        own, extra_resolutions, display, graphics['render_resolution'],
+        not title_id or title_id in graphics_options.GENERATED_TITLES)
+    derived += ['GOW3_RESOLUTION_LIST', 'GOW3_RENDER_SCALES']
     if not env.get('GOW3_FSR411_DIR') and not (PORT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
         env['GOW3_FSR411_DIR'] = str(data / 'fsr4_411')
 

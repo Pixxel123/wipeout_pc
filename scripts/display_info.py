@@ -35,7 +35,8 @@ def display_size(env=None):
 
 
 @functools.lru_cache(maxsize=1)
-def _this_display():
+def this_display():
+    """display_size(), asked once per process (the launcher's lists ask often)."""
     return display_size()
 
 
