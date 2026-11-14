@@ -125,6 +125,20 @@ static int preferred_gamepad(int count) {
     if (!wanted) { const char *env=getenv("GOW3_GAMEPAD"); wanted=env && atoi(env)>0 ? atoi(env) : 1; }
     return wanted<=count ? wanted-1 : 0;
 }
+/* What SDL sees of a gamepad's motion sensors, for the log: a pad without a
+ * gyro leaves the game's Motion control option without input. Steam Input hides the real
+ * controller and shows a virtual Xbox pad in its place, which has no sensors. */
+static void describe_motion(const char *prefix, SDL_Gamepad *g) {
+    const bool gyro=SDL_GamepadHasSensor(g,SDL_SENSOR_GYRO), accel=SDL_GamepadHasSensor(g,SDL_SENSOR_ACCEL);
+    const bool steam=SDL_GetGamepadSteamHandle(g)!=0;
+    const char *type=SDL_GetGamepadStringForType(SDL_GetRealGamepadType(g));
+    printf("%s: gyro=%s accelerometer=%s device=%04x:%04x type=%s steam_input=%s\n",prefix,
+           gyro ? "yes" : "no",accel ? "yes" : "no",SDL_GetGamepadVendor(g),SDL_GetGamepadProduct(g),
+           type ? type : "unknown",steam ? "yes" : "no");
+    if (!gyro && steam)
+        printf("%s: Steam Input replaces this controller with a virtual gamepad without motion sensors; "
+               "turn Steam Input off for the game's shortcut (Properties > Controller) to use its gyro\n",prefix);
+}
 /* Opens player 1's gamepad (preferred_gamepad); called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
@@ -135,7 +149,10 @@ static SDL_Gamepad *current_gamepad(void) {
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
         if (ids && count>0) {
             gamepad=SDL_OpenGamepad(ids[preferred_gamepad(count)]);
-            if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
+            if (gamepad) {
+                ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
+                describe_motion("Runtime: gamepad motion",gamepad);
+            }
         }
         SDL_free(ids);
     }
@@ -151,7 +168,10 @@ static SDL_Gamepad *second_gamepad(void) {
         for (int i=0;ids && i<count && !gamepad2;++i) {
             if (ids[i]==SDL_GetGamepadID(first)) continue;
             gamepad2=SDL_OpenGamepad(ids[i]);
-            if (gamepad2) printf("Runtime: gamepad connected for player 2: %s\n",SDL_GetGamepadName(gamepad2));
+            if (gamepad2) {
+                printf("Runtime: gamepad connected for player 2: %s\n",SDL_GetGamepadName(gamepad2));
+                describe_motion("Runtime: gamepad motion for player 2",gamepad2);
+            }
         }
         SDL_free(ids);
     }
@@ -560,14 +580,17 @@ static Injected injected={.stick={-1,-1,-1,-1}}, injected2={.stick={-1,-1,-1,-1}
 static int injected2_seen;
 /* Motion sensors (#18): the gamepad's gyro (rad/s) and accelerometer (in g), and the orientation
  * integrated from the gyro as shadPS4 does it; scePadResetOrientation starts it over. The game's
- * own Motion control option steers with them. One per player; called under lock. */
-typedef struct { SDL_Gamepad *g; float q[4]; uint64_t last; } Motion;
+ * own Motion control option steers with them. One per player; called under lock. The sensors are
+ * switched on once per connection: its joystick id, since a pad that reconnects can be opened at
+ * the address of the closed one. */
+typedef struct { SDL_JoystickID id; float q[4]; uint64_t last; } Motion;
 static Motion motions[2]={{.q={0,0,0,1}},{.q={0,0,0,1}}};
 static void read_motion(Motion *m, SDL_Gamepad *g, const Injected *in, PadData *d) {
     float gyro[3]={0,0,0}, accel[3]={0,0,0};
     int have=0;
-    if (g && g!=m->g) {
-        m->g=g;
+    const SDL_JoystickID id=g ? SDL_GetGamepadID(g) : 0;
+    if (id && id!=m->id) {
+        m->id=id;
         SDL_SetGamepadSensorEnabled(g,SDL_SENSOR_GYRO,true);
         SDL_SetGamepadSensorEnabled(g,SDL_SENSOR_ACCEL,true);
     }
@@ -950,7 +973,8 @@ uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,
 void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
 
 /* probe --gamepad: runs before any game state exists, so it uses its own SDL gamepad and leaves
- * the lock and statics above alone. run.py parses this line; keep the format. */
+ * the lock and statics above alone. run.py parses this line; keep the format (fields, then
+ * name= last). */
 static const char *label_name(SDL_GamepadButtonLabel label) {
     switch (label) {
     case SDL_GAMEPAD_BUTTON_LABEL_A: return "a";
@@ -980,12 +1004,13 @@ int runtime_pad_describe(void) {
     else {
         const char *type=SDL_GetGamepadStringForType(SDL_GetGamepadType(g));
         const char *name=SDL_GetGamepadName(g);
-        printf("Gamepad: type=%s south=%s east=%s west=%s north=%s name=%s\n",
+        printf("Gamepad: type=%s south=%s east=%s west=%s north=%s gyro=%s steam_input=%s name=%s\n",
                type ? type : "unknown",
                label_name(SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_SOUTH)),
                label_name(SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_EAST)),
                label_name(SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_WEST)),
                label_name(SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_NORTH)),
+               SDL_GamepadHasSensor(g,SDL_SENSOR_GYRO) ? "yes" : "no",SDL_GetGamepadSteamHandle(g) ? "yes" : "no",
                name ? name : "unknown");
         SDL_CloseGamepad(g);
     }
