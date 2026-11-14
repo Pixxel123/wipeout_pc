@@ -27,7 +27,7 @@ static bool StartSize(s32& width, s32& height) {
     constexpr int title_room = 48;
     const std::vector<std::string> names = Gow3Graphics::ResolutionNames();
     const int index = std::clamp(Gow3Settings::Get().render_resolution.load(), 0, int(names.size()) - 1);
-    const auto [w, h] = Gow3Graphics::ResolutionSize(names[index]);
+    const auto [w, h] = Gow3Graphics::SessionRenderSize(names[index]);
     double scale = 1.0;
     SDL_Rect usable{};
     if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) && usable.w > 0 && usable.h > title_room) {

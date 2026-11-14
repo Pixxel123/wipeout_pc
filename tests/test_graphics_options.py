@@ -28,6 +28,7 @@ class GraphicsOptionsTest(unittest.TestCase):
             options,
             {
                 'render_resolution': 'native',
+                'render_scale': '100',
                 'engine_fps': '120',
                 'deferred_readback': '1',
                 'stale_readback': '1',
@@ -115,6 +116,24 @@ class GraphicsOptionsTest(unittest.TestCase):
             json.loads(self.state.read_text())['last_good']['engine_fps'],
             '240',
         )
+
+    def test_launch_ini_is_what_prepare_will_use(self):
+        config, state = self.ini, self.state
+        config.write_text('render_resolution=4K\nrestart_unconfirmed=1\n', encoding='utf-8')
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K')  # no state
+        for broken in ('{broken', '[1]'):
+            state.write_text(broken, encoding='utf-8')
+            self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K', broken)
+        state.write_text(json.dumps({'attempt': False, 'last_good': {'render_resolution': '2256x1504'}}),
+                         encoding='utf-8')
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K')  # first try
+        state.write_text(json.dumps({'attempt': True, 'last_good': {'render_resolution': '2256x1504'}}),
+                         encoding='utf-8')
+        before = (config.read_bytes(), state.read_bytes())
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '2256x1504')
+        self.assertEqual((config.read_bytes(), state.read_bytes()), before)
+        config.write_text('render_resolution=4K\n', encoding='utf-8')  # confirmed: the ini wins
+        self.assertEqual(g.launch_ini(config, state)['render_resolution'], '4K')
 
     def test_patch_names(self):
         launcher = [
@@ -241,6 +260,107 @@ class GraphicsOptionsTest(unittest.TestCase):
                 'GOW3_ASYNC_SHADERS': '1',
             },
         )
+
+
+    def test_generated_resolution_is_an_even_size_nobody_provides(self):
+        known = g.RESOLUTIONS + ('3840x1080',)
+        self.assertEqual(g.generated_resolution('2256x1504', known), (2256, 1504))
+        self.assertEqual(g.generated_resolution('1800p', ('720p',)), (3200, 1800))
+        for value in ('1440p', '3440x1440', '3840x1080', '1365x768', 'native', 'abc', '0x0', '1366x', None):
+            self.assertIsNone(g.generated_resolution(value, known), value)
+
+    def test_generated_resolution_stops_at_the_largest_size(self):
+        self.assertEqual(g.generated_resolution('7680x4320', ()), (7680, 4320))
+        for value in ('10240x5760', '7682x4320', '7680x4322', '70000x2000'):
+            self.assertIsNone(g.generated_resolution(value, ()), value)
+
+    def test_a_size_name_is_digits_x_digits(self):
+        self.assertEqual(g.resolution_size('2256x1504'), (2256, 1504))
+        for value in ('+2256x1504', '2_256x1504', '01920x1200', ' 1920x1200', '1920x1200 ', '1920x1200x3',
+                      '1920X1200', 'x', '', '0x0', '1٩20x1200', '100000x2000'):
+            self.assertIsNone(g.resolution_size(value), repr(value))
+        for name in g.RESOLUTIONS:
+            self.assertIsNotNone(g.resolution_size(name), name)
+
+    def test_a_size_that_is_no_string_has_no_size(self):
+        # A hand-edited state file can hold "render_resolution": 5 or a list.
+        for value in (5, None, ['x'], {'x': 1}):
+            self.assertIsNone(g.resolution_size(value), repr(value))
+            self.assertIsNone(g.generated_resolution(value, ()), repr(value))
+
+    def test_generated_resolution_starts_at_the_games_own_size(self):
+        for value in ('1280x800', '1366x768', '1680x1050', '1920x1000', '1800x1200'):
+            self.assertIsNone(g.generated_resolution(value, ()), value)
+        self.assertEqual(g.generated_resolution('1920x1200', ()), (1920, 1200))
+        self.assertEqual(g.generated_resolution('2256x1504', ()), (2256, 1504))
+
+    def test_size_name_prefers_a_built_in_name(self):
+        self.assertEqual(g.size_name(2560, 1440), '1440p')
+        self.assertEqual(g.size_name(1920, 1080), 'native')
+        self.assertEqual(g.size_name(3200, 1800), '1800p')
+        self.assertEqual(g.size_name(3840, 2160), '4K')
+        self.assertEqual(g.size_name(2256, 1504), '2256x1504')
+
+    def test_scaled_size_is_even(self):
+        self.assertEqual(g.scaled_size((2560, 1440), 100), (2560, 1440))
+        self.assertEqual(g.scaled_size((2560, 1440), 150), (3840, 2160))
+        self.assertEqual(g.scaled_size((2256, 1504), 150), (3384, 2256))
+        for size in ((2560, 1440), (2256, 1504), (1366, 768), (3440, 1440)):
+            for percent in g.RENDER_SCALES:
+                width, height = g.scaled_size(size, percent)
+                self.assertEqual((width % 2, height % 2), (0, 0), (size, percent))
+
+    def options(self, resolution, scale='100'):
+        return g.startup_options({'render_resolution': resolution, 'render_scale': scale}, ['display'])
+
+    def test_display_renders_at_the_monitors_size(self):
+        self.assertEqual(g.render_size(self.options('display'), (3440, 1440)), (3440, 1440))
+        self.assertEqual(g.render_size(self.options('display'), (2561, 1441)), (2562, 1442))  # even
+        self.assertEqual(g.render_size(self.options('display'), (5160, 2160)), (5160, 2160))  # a DLDSR desktop
+
+    def test_display_never_goes_below_the_games_own_size(self):
+        self.assertEqual(g.render_size(self.options('display'), (1280, 800)), (1920, 1080))  # Steam Deck
+        self.assertEqual(g.render_size(self.options('display'), (1920, 1000)), (1920, 1080))
+        self.assertEqual(g.render_size(self.options('display'), None), (1920, 1080))  # unknown monitor
+
+    def test_a_named_size_at_100_percent_is_left_alone(self):
+        self.assertIsNone(g.render_size(self.options('1440p'), (3440, 1440)))
+        self.assertIsNone(g.render_size(self.options('native'), None))
+
+    def test_render_scale_multiplies_any_resolution(self):
+        self.assertEqual(g.render_size(self.options('display', '150'), (3440, 1440)), (5160, 2160))
+        self.assertEqual(g.render_size(self.options('display', '200'), (1920, 1080)), (3840, 2160))
+        self.assertEqual(g.render_size(self.options('1440p', '150'), None), (3840, 2160))
+        self.assertEqual(g.render_size(self.options('native', '200'), None), (3840, 2160))
+
+    def test_a_scale_past_the_cap_is_left_out(self):
+        self.assertEqual(g.render_size(self.options('display', '200'), (5120, 2880)), (5120, 2880))
+        self.assertEqual(g.render_size(self.options('display', '150'), (5120, 2880)), (7680, 4320))
+        self.assertEqual(g.render_size(self.options('display'), (10240, 4320)), (1920, 1080))
+
+    def test_render_scale_is_one_of_the_listed(self):
+        self.assertEqual(self.options('display', '125')['render_scale'], '100')
+        self.assertEqual(self.options('display', '')['render_scale'], '100')
+        self.assertEqual(g.startup_options({})['render_scale'], '100')
+
+    def test_display_needs_a_game_that_lists_it(self):
+        self.assertEqual(g.startup_options({'render_resolution': 'display'})['render_resolution'], 'native')
+        self.assertEqual(self.options('display')['render_resolution'], 'display')
+
+    def test_display_size_is_said_or_asked(self):
+        self.assertEqual(g.display_size({'GOW3_DISPLAY_SIZE': '3440x1440'}), (3440, 1440))
+        xrandr = ('Screen 0: minimum 320 x 200, current 6000 x 1440, maximum 16384 x 16384\n'
+                  'DP-1 connected 2560x1440+3440+0 (normal left inverted right x axis y axis) 597mm x 336mm\n'
+                  'DP-2 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 800mm x 335mm\n'
+                  'HDMI-1 disconnected (normal left inverted right x axis y axis)\n')
+        self.assertEqual(g.xrandr_primary_size(xrandr), (3440, 1440))
+        self.assertEqual(g.xrandr_primary_size(xrandr.replace(' primary', '')), (2560, 1440))
+        self.assertIsNone(g.xrandr_primary_size(''))
+
+    def test_display_has_a_short_label(self):
+        self.assertEqual(g.display_label((3440, 1440)), 'Display · 3440 × 1440')
+        self.assertEqual(g.display_label(None), 'Display')
+        self.assertTrue(g.resolution_label('display').startswith('Display'))
 
 
 class WindowSizeTest(unittest.TestCase):

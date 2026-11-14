@@ -34,6 +34,10 @@
      single race (Vineta K). 3840x2160 ran out of video memory there (8 GB) while loading the race.
      5120x1440 (32:9): the same sites; its menus checked on an RTX 4070 Laptop, where a race ran out of
      video memory (8 GB) while loading, with or without multisampling. Not tested in a race.
+
+     Any other even size: generated at start by scripts/graphics_options.py (resolution_patch_lines) from these
+     sites; tests/test_resolution_patch.py keeps the generator equal to these entries byte for byte.
+
      Not tested: CUSA05670 (EU), split screen, replays, every event type. -->
 <Patch>
     <TitleID>

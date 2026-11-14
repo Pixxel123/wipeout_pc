@@ -159,6 +159,39 @@ def pause_menu_args(game, out, mounts):
     return [part for path in made.values() for part in ('--pause-menu', str(path))]
 
 
+def generated_resolution_files(ini, mod_sizes, own_sizes, out, title_id=None):
+    """A WipEout render resolution nobody provides (an even size in gow3.ini) gets a generated patch
+    file: ([file], [size]) to feed the mod-patch path, or ([], []). A game's own list replaces the shared one."""
+    import graphics_options
+    if title_id and title_id not in graphics_options.GENERATED_TITLES:
+        return [], []
+    known = (tuple(s for s in own_sizes if s) or graphics_options.RESOLUTIONS) + tuple(mod_sizes)
+    value = ini.get('render_resolution')
+    size = graphics_options.generated_resolution(value, known)
+    if not size:
+        return [], []
+    path = graphics_options.resolution_patch_xml(*size, Path(out) / 'generated-resolution.xml', name=value)
+    print(f'Patches: render resolution {value} generated ({path.name})', flush=True)
+    return [path], [value]
+
+
+def session_render_size(ini, extra, env, title_id=None):
+    """(width, height) this start renders at when gow3.ini asks for the monitor's size (render_resolution=
+    display) or a render scale, else None. WipEout only: its patch can be generated for any size."""
+    import graphics_options
+    if title_id and title_id not in graphics_options.GENERATED_TITLES:
+        return None
+    options = graphics_options.startup_options(ini, extra)
+    asks_display = options['render_resolution'] == graphics_options.DISPLAY
+    display = graphics_options.display_size(env) if asks_display else None
+    size = graphics_options.render_size(options, display)
+    if size:
+        source = (f'display {display[0]}x{display[1]}' if display else 'display unknown') if asks_display \
+            else options['render_resolution']
+        print(f'Render resolution: {source} at {options["render_scale"]} % -> {size[0]}x{size[1]}', flush=True)
+    return size
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
@@ -192,10 +225,31 @@ def main():
                                                env.get('GOW3_GAME_DIR', PORT.parent / 'CUSA01623'))
     # A game's own sizes beyond the shared list (WipEout's 2880x1800, #110) come from its profile.
     import game_profiles
-    own = game_profiles.PROFILES.get(patches.game_title_id(env.get('GOW3_GAME_DIR', PORT.parent / 'CUSA01623')), {})
+    title_id = patches.game_title_id(env.get('GOW3_GAME_DIR', PORT.parent / 'CUSA01623'))
+    own = game_profiles.PROFILES.get(title_id, {})
     own = own.get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS', '').split(';')
     extra_resolutions = list(dict.fromkeys(s for s in [*patches.resolution_names(mod_patch_files), *own]
                                            if s and s not in graphics_options.RESOLUTIONS))
+    launch = graphics_options.launch_ini(env['GOW3_CONFIG'], out / 'graphics_state.json')
+    # The monitor's size, for "display" and its name in the in-game list ("Display · 3440 × 1440").
+    if (not title_id or title_id in graphics_options.GENERATED_TITLES) and not env.get(graphics_options.DISPLAY_SIZE_ENV):
+        display = graphics_options.display_size(env)
+        if display:
+            env[graphics_options.DISPLAY_SIZE_ENV] = f'{display[0]}x{display[1]}'
+            derived.append(graphics_options.DISPLAY_SIZE_ENV)
+    # "display" (the monitor's size) and a render scale come to a size here, at every start; gow3.ini keeps
+    # the choice. That size runs as the resolution of its name: a hand-made one, else generated below.
+    render_size = session_render_size(launch, extra_resolutions, env, title_id)
+    applied = graphics_options.size_name(*render_size) if render_size else None
+    generated_files, generated = generated_resolution_files(
+        {'render_resolution': applied} if applied else launch,
+        patches.resolution_names(mod_patch_files), own, out, title_id)
+    mod_patch_files += generated_files
+    if render_size:
+        env['GOW3_RENDER_SIZE'] = f'{render_size[0]}x{render_size[1]}'
+        derived.append('GOW3_RENDER_SIZE')
+    else:
+        extra_resolutions += generated
     env['GOW3_EXTRA_RESOLUTIONS'] = ';'.join(extra_resolutions)
     derived.append('GOW3_EXTRA_RESOLUTIONS')
     graphics, reverted = graphics_options.prepare(env['GOW3_CONFIG'], out / 'graphics_state.json', extra_resolutions)
@@ -307,7 +361,7 @@ def main():
             # A mod's patches that are on by default (isEnabled) stay on when the launcher chose the list.
             names += [n for n in patches.default_enabled(mod_patch_files, profile[2]) if n not in names]
             # gow3.ini decides the resolution and frame rate patches (in-game menu, launcher).
-            names = graphics_options.patch_names(names, graphics)
+            names = graphics_options.patch_names(names, {**graphics, 'render_resolution': applied} if applied else graphics)
             names = graphics_options.restrict_to_available(names, patches.available_patches(patch_xml, profile[2]))
             env['GOW3_PATCHES'] = ';'.join(names)
             env['GOW3_PATCHES_ONLY'] = '1'
