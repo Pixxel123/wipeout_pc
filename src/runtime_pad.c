@@ -134,7 +134,7 @@ static int preferred_gamepad(int count) {
  * Sony's controllers (Steam Deck, Steam Controller, DualSense, DualShock 4) from that list to
  * GOW3_STEAM_HIDDEN_PADS: SDL then sees those real controllers too, but they never play. Buttons
  * and sticks still come from the virtual gamepad, so the player's Steam Input layout applies as in
- * any PC game; only the gyro and accelerometer come from the real controller used with it
+ * any PC game; only the gyro and accelerometer come from the real controller with its device id
  * (player_real), with no Steam Input setting to change. Other makers' controllers stay hidden as
  * Steam asked (reading them beside Steam is untested), and so does an entry that is not a device
  * id. GOW3_STEAM_HIDDEN_PADS=none leaves Steam's list as it is.
@@ -189,6 +189,8 @@ static int steam_listed(unsigned vendor, unsigned product) {
     for (int i=0;i<hidden_count;++i) if (hidden_ids[i].vendor==vendor && hidden_ids[i].product==product) return 1;
     return 0;
 }
+/* The Steam handle of a gamepad: non-zero for Steam's virtual gamepads (tests stand in for it). */
+static Uint64 (*steam_handle)(SDL_Gamepad *)=SDL_GetGamepadSteamHandle;
 /* A real controller Steam Input hides: one on its list that is not Steam's virtual gamepad, which
  * can report the id of the controller it stands in for and is told apart by its Steam handle (known
  * once opened). Remembered per joystick; called under lock. */
@@ -201,7 +203,7 @@ static int steam_hidden(SDL_JoystickID id) {
     if (hidden) {
         SDL_Gamepad *g=SDL_OpenGamepad(id);
         if (!g) return 0;
-        hidden=!SDL_GetGamepadSteamHandle(g);
+        hidden=!steam_handle(g);
         SDL_CloseGamepad(g);
     }
     known[next].id=id; known[next].hidden=hidden;
@@ -235,14 +237,13 @@ int runtime_pad_motion_only(uint32_t id) {
  * controller and shows a virtual Xbox pad in its place, which has no sensors. */
 static void describe_motion(const char *prefix, SDL_Gamepad *g) {
     const bool gyro=SDL_GamepadHasSensor(g,SDL_SENSOR_GYRO), accel=SDL_GamepadHasSensor(g,SDL_SENSOR_ACCEL);
-    const bool steam=SDL_GetGamepadSteamHandle(g)!=0;
+    const bool steam=steam_handle(g)!=0;
     const char *type=SDL_GetGamepadStringForType(SDL_GetRealGamepadType(g));
     printf("%s: gyro=%s accelerometer=%s device=%04x:%04x type=%s steam_input=%s\n",prefix,
            gyro ? "yes" : "no",accel ? "yes" : "no",SDL_GetGamepadVendor(g),SDL_GetGamepadProduct(g),
            type ? type : "unknown",steam ? "yes" : "no");
     if (!gyro && steam && steam_reals)
-        printf("%s: motion comes from the real controller behind this virtual gamepad if Steam Input hides "
-               "one with a gyro, from the first button pressed on it\n",prefix);
+        printf("%s: motion comes from the real controller with this device id, if it has a gyro\n",prefix);
     else if (!gyro && steam)
         printf("%s: Steam Input replaces this controller with a virtual gamepad without motion sensors; "
                "turn Steam Input off for the game's shortcut (Properties > Controller) to use its gyro\n",prefix);
@@ -744,28 +745,40 @@ static void update_reals(uint64_t now) {
         if (s!=reals[k].state) { reals[k].state=s; reals[k].used=now; }
     }
 }
-/* The real controller behind player's gamepad g: the one used at the same time as g (Steam passes
- * its input on within a frame or two), so motion starts with the first button pressed. The link
- * stays while that controller is the one in use: another player's press in the same moment does
- * not take it over. */
+/* Whether the real controller r has the device id of the gamepad g. */
+static int same_device(const Real *r, SDL_Gamepad *g) {
+    return SDL_GetGamepadVendor(r->g)==SDL_GetGamepadVendor(g) && SDL_GetGamepadProduct(r->g)==SDL_GetGamepadProduct(g);
+}
+/* The real controller behind player's gamepad g. Steam's virtual gamepad reports the device id of
+ * the controller it stands in for, so it is the real controller with that id, from the start. Of
+ * several with the same id (two players with the same model), it is the one used at the same time
+ * as g (Steam passes its input on within a frame or two), so motion starts with the first button
+ * pressed. The link stays while that controller is the one in use: another player's press in the
+ * same moment does not take it over. */
 static SDL_Gamepad *player_real(Motion *m, int player, SDL_Gamepad *g, uint64_t now) {
     update_reals(now);
-    Real *mine=NULL;
-    for (int k=0;k<REALS_MAX;++k) if (reals[k].g && reals[k].player==player) mine=&reals[k];
-    const uint64_t s=g ? pad_state(g) : 0;
-    if (s!=m->state) {
-        m->state=s;
-        Real *best=NULL;
-        for (int k=0;k<REALS_MAX;++k)
-            if (reals[k].gyro && reals[k].used && now-reals[k].used<=REAL_LINK_US && (!best || reals[k].used>best->used))
-                best=&reals[k];
-        const int mine_used=mine && mine->used && now-mine->used<=REAL_LINK_US;
-        if (best && best!=mine && !mine_used) {
-            if (mine) mine->player=-1;
-            best->player=player;
-            mine=best;
-            printf("Runtime: player %d motion from %s\n",player+1,SDL_GetGamepadName(best->g));
-        }
+    const uint64_t s=pad_state(g);
+    const int pressed=s!=m->state;
+    m->state=s;
+    Real *mine=NULL, *only=NULL, *best=NULL;
+    int same=0;
+    for (int k=0;k<REALS_MAX;++k) {
+        Real *r=&reals[k];
+        if (!r->g) continue;
+        const int match=r->gyro && same_device(r,g);
+        if (r->player==player && !match) r->player=-1; /* the player's gamepad changed */
+        if (!match) continue;
+        ++same; only=r;
+        if (r->player==player) mine=r;
+        if (pressed && r->used && now-r->used<=REAL_LINK_US && (!best || r->used>best->used)) best=r;
+    }
+    if (same==1) best=only;
+    else if (mine && mine->used && now-mine->used<=REAL_LINK_US) best=NULL; /* still the one in use */
+    if (best && best!=mine) {
+        if (mine) mine->player=-1;
+        best->player=player;
+        mine=best;
+        printf("Runtime: player %d motion from %s\n",player+1,SDL_GetGamepadName(best->g));
     }
     return mine ? mine->g : NULL;
 }
