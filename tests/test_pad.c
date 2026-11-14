@@ -18,6 +18,10 @@ static bool SDLCALL record_rumble(void *userdata, uint16_t low, uint16_t high) {
     rumble_high=high;
     return true;
 }
+static bool SDLCALL sensors_enabled(void *userdata, bool enabled) {
+    (void)userdata; (void)enabled;
+    return true;
+}
 void runtime_user_events(void) {}
 int gow3gpu_stick_deadzone_percent(void) { return 0; }
 void gow3gpu_request_screenshot(void) {}
@@ -238,8 +242,9 @@ int main(void) {
     assert(!runtime_pad_second_user());
     assert(pad_close(2)==0 && pad_read_state(2,&second)==ERR_INVALID_HANDLE);
 
-    /* Steam Input (#18): Valve's real controllers are visible beside the virtual gamepads, but
-     * player 1 stays on the virtual gamepad and a real one never becomes player 2. */
+    /* Steam Input (#18): the real controllers it hides are read for their gyro only. Player 1
+     * stays on the virtual gamepad, a real one never becomes player 2, and the gyro of the real
+     * controller used with player 1's gamepad reaches the game. */
 #ifndef _WIN32
     setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES","0x28de/0x1205,0x054c/0x0df2,0x28DE/0x1304",1);
     setenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD","1",1);
@@ -251,22 +256,78 @@ int main(void) {
     runtime_pad_steam_input();
 #endif
     assert(steam_reals);
+    SDL_VirtualJoystickSensorDesc gyro_sensor={.type=SDL_SENSOR_GYRO,.rate=250.0f};
     SDL_VirtualJoystickDesc real_desc=desc;
     real_desc.name="gow3 test real controller";
     real_desc.vendor_id=0x28de;
     real_desc.product_id=0x1304;
     real_desc.ntouchpads=0;
     real_desc.touchpads=NULL;
+    real_desc.nsensors=1;
+    real_desc.sensors=&gyro_sensor;
     real_desc.Rumble=NULL;
+    real_desc.SetSensorsEnabled=sensors_enabled;
     SDL_JoystickID real_id=SDL_AttachVirtualJoystick(&real_desc);
     assert(real_id!=0);
     SDL_Joystick *real=SDL_OpenJoystick(real_id);
     assert(real);
     pump();
-    data=read_pad();
+    usleep(REAL_SCAN_US+10000);
+    data=read_pad(); /* opens the real controller */
     assert(SDL_GetGamepadID(gamepad)==id);
     assert(runtime_pad_motion_only(real_id) && !runtime_pad_motion_only(id));
     assert(!runtime_pad_second_user());
+    const float turn[3]={1.0f,-2.0f,0.5f};
+    assert(SDL_SendJoystickVirtualSensorData(real,SDL_SENSOR_GYRO,SDL_GetTicksNS(),turn,3));
+    pump();
+    data=read_pad(); /* nothing pressed yet: the real controller is nobody's */
+    assert(data.angular_velocity[0]==0.0f && data.angular_velocity[1]==0.0f && data.angular_velocity[2]==0.0f);
+    /* The real controller pressed together with player 1's gamepad is player 1's. */
+    assert(SDL_SetJoystickVirtualButton(real,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    pump();
+    data=read_pad();
+    assert(data.buttons & BTN_CROSS);
+    assert(SDL_SendJoystickVirtualSensorData(real,SDL_SENSOR_GYRO,SDL_GetTicksNS(),turn,3));
+    pump();
+    data=read_pad();
+    assert(data.angular_velocity[0]==1.0f && data.angular_velocity[1]==-2.0f && data.angular_velocity[2]==0.5f);
+    assert(SDL_SetJoystickVirtualButton(real,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    pump();
+    data=read_pad();
+    /* With two, player 1 moves to the other one once that is the one pressed with the gamepad. */
+    real_desc.name="gow3 test real controller 2";
+    SDL_JoystickID real2_id=SDL_AttachVirtualJoystick(&real_desc);
+    assert(real2_id!=0);
+    SDL_Joystick *real2=SDL_OpenJoystick(real2_id);
+    assert(real2);
+    pump();
+    usleep(REAL_SCAN_US+10000);
+    data=read_pad();
+    assert(!runtime_pad_second_user());
+    assert(SDL_SetJoystickVirtualButton(real2,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    pump();
+    data=read_pad();
+    assert(data.buttons & BTN_CROSS);
+    const float other[3]={0.25f,0.25f,0.25f}, turn2[3]={3.0f,0.0f,-1.0f};
+    assert(SDL_SendJoystickVirtualSensorData(real,SDL_SENSOR_GYRO,SDL_GetTicksNS(),other,3));
+    assert(SDL_SendJoystickVirtualSensorData(real2,SDL_SENSOR_GYRO,SDL_GetTicksNS(),turn2,3));
+    pump();
+    data=read_pad();
+    assert(data.angular_velocity[0]==3.0f && data.angular_velocity[1]==0.0f && data.angular_velocity[2]==-1.0f);
+    /* Both real controllers used in the same moment (two players): player 1 keeps its own. */
+    assert(SDL_SetJoystickVirtualButton(real,SDL_GAMEPAD_BUTTON_EAST,true));
+    assert(SDL_SetJoystickVirtualButton(real2,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    pump();
+    data=read_pad();
+    assert(!(data.buttons & BTN_CROSS));
+    assert(data.angular_velocity[0]==3.0f && data.angular_velocity[1]==0.0f && data.angular_velocity[2]==-1.0f);
+    assert(SDL_SetJoystickVirtualButton(real,SDL_GAMEPAD_BUTTON_EAST,false));
+    SDL_CloseJoystick(real2);
+    assert(SDL_DetachVirtualJoystick(real2_id));
     SDL_CloseJoystick(real);
     assert(SDL_DetachVirtualJoystick(real_id));
     SDL_CloseJoystick(joystick);
@@ -275,5 +336,5 @@ int main(void) {
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture, player 2, real controllers behind Steam Input");
+    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture, player 2, gyro behind Steam Input");
 }

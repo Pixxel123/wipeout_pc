@@ -134,7 +134,8 @@ static int preferred_gamepad(int count) {
  * cannot be turned off in a non-Steam game, so runtime_pad_steam_input (main, before SDL starts)
  * moves their entries of that list to GOW3_STEAM_HIDDEN_PADS: SDL then sees those real
  * controllers too, but they never play. Buttons and sticks still come from the virtual gamepad,
- * so the player's Steam Input layout applies as in any PC game. Other controllers stay hidden as
+ * so the player's Steam Input layout applies as in any PC game; only the gyro and accelerometer
+ * come from the real controller used with it (player_real). Other controllers stay hidden as
  * Steam asked. GOW3_STEAM_HIDDEN_PADS=none leaves Steam's list as it is.
  * Not on Windows: the list is left alone there (untested), and the game behaves as before. */
 enum { VALVE=0x28de };
@@ -164,8 +165,8 @@ void runtime_pad_steam_input(void) {
     const char *moved=getenv("GOW3_STEAM_HIDDEN_PADS");
     steam_reals=moved && *moved && strcmp(moved,"none");
     if (steam_reals)
-        printf("Runtime: Steam Input: Valve's real controllers are visible beside Steam's virtual gamepads "
-               "(GOW3_STEAM_HIDDEN_PADS=none turns this off)\n");
+        printf("Runtime: Steam Input: the motion sensors of Valve's controllers are read beside Steam's "
+               "virtual gamepads (GOW3_STEAM_HIDDEN_PADS=none turns this off)\n");
 }
 /* A real controller Steam Input hides: one of Valve's that is not Steam's virtual gamepad, which
  * reports the id of the controller it stands in for and is told apart by its Steam handle (known
@@ -197,8 +198,9 @@ static SDL_JoystickID *player_gamepads(int *count) {
     SDL_free(ids);
     return SDL_GetGamepads(count);
 }
-/* A hidden controller that no player plays with: its button events are not for the overlay or
- * the text dialog either (window.cpp), they come again from Steam's virtual gamepad. */
+/* A controller only read for its motion sensors (a hidden one that no player plays with): its
+ * button events are not for the overlay or the text dialog either (window.cpp), they come again
+ * from Steam's virtual gamepad. */
 int runtime_pad_motion_only(uint32_t id) {
     if (!steam_reals) return 0;
     pthread_mutex_lock(&lock);
@@ -217,7 +219,11 @@ static void describe_motion(const char *prefix, SDL_Gamepad *g) {
     printf("%s: gyro=%s accelerometer=%s device=%04x:%04x type=%s steam_input=%s\n",prefix,
            gyro ? "yes" : "no",accel ? "yes" : "no",SDL_GetGamepadVendor(g),SDL_GetGamepadProduct(g),
            type ? type : "unknown",steam ? "yes" : "no");
-    if (!gyro && steam)
+    /* The virtual gamepad reports the device id of the controller it stands in for. */
+    if (!gyro && steam && steam_reals && SDL_GetGamepadVendor(g)==VALVE)
+        printf("%s: motion comes from the real controller behind this virtual gamepad, from the first "
+               "button pressed on it\n",prefix);
+    else if (!gyro && steam)
         printf("%s: Steam Input replaces this controller with a virtual gamepad without motion sensors; "
                "turn Steam Input off for the game's shortcut (Properties > Controller) to use its gyro\n",prefix);
 }
@@ -665,11 +671,91 @@ static int injected2_seen;
  * own Motion control option steers with them. One per player; called under lock. The sensors are
  * switched on once per connection: its joystick id, since a pad that reconnects can be opened at
  * the address of the closed one. */
-typedef struct { SDL_JoystickID id; float q[4]; uint64_t last; } Motion;
+typedef struct { SDL_JoystickID id; float q[4]; uint64_t last, state; } Motion;
 static Motion motions[2]={{.q={0,0,0,1}},{.q={0,0,0,1}}};
-static void read_motion(Motion *m, SDL_Gamepad *g, const Injected *in, PadData *d) {
+/* Buttons and sticks (each at rest, pushed one way or the other), to tell when a pad is used. */
+static uint64_t pad_state(SDL_Gamepad *g) {
+    uint64_t s=0;
+    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT && b<32;++b) if (SDL_GetGamepadButton(g,(SDL_GamepadButton)b)) s|=1ull<<b;
+    for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT && a<16;++a) {
+        const int v=SDL_GetGamepadAxis(g,(SDL_GamepadAxis)a);
+        s|=(uint64_t)(v<-16000 ? 1 : v>16000 ? 2 : 0)<<(32+2*a);
+    }
+    return s;
+}
+/* The real controllers behind Steam's virtual gamepads (runtime_pad_steam_input), opened for
+ * their motion sensors only; player: the one whose virtual gamepad they move with, or -1. */
+enum { REALS_MAX=4, REAL_SCAN_US=250000, REAL_LINK_US=100000 };
+typedef struct { SDL_Gamepad *g; uint64_t state, used; int player, gyro; } Real;
+static Real reals[REALS_MAX];
+static uint64_t reals_scanned;
+static void update_reals(uint64_t now) {
+    if (now-reals_scanned>=REAL_SCAN_US) {
+        reals_scanned=now;
+        for (int k=0;k<REALS_MAX;++k) if (reals[k].g && !SDL_GamepadConnected(reals[k].g)) {
+            SDL_CloseGamepad(reals[k].g);
+            reals[k]=(Real){.player=-1};
+        }
+        int count=0;
+        SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        for (int i=0;ids && i<count;++i) {
+            if (!steam_hidden(ids[i])) continue;
+            int known=0, slot=-1;
+            for (int k=0;k<REALS_MAX;++k) {
+                if (reals[k].g && SDL_GetGamepadID(reals[k].g)==ids[i]) known=1;
+                else if (!reals[k].g && slot<0) slot=k;
+            }
+            if (known || slot<0) continue;
+            SDL_Gamepad *g=SDL_OpenGamepad(ids[i]);
+            if (!g) continue;
+            const int gyro=SDL_GamepadHasSensor(g,SDL_SENSOR_GYRO);
+            if (gyro) {
+                SDL_SetGamepadSensorEnabled(g,SDL_SENSOR_GYRO,true);
+                SDL_SetGamepadSensorEnabled(g,SDL_SENSOR_ACCEL,true);
+            }
+            reals[slot]=(Real){g,pad_state(g),0,-1,gyro};
+            printf("Runtime: %s behind Steam Input (device %04x:%04x): gyro=%s, read for motion only\n",
+                   SDL_GetGamepadName(g),SDL_GetGamepadVendor(g),SDL_GetGamepadProduct(g),gyro ? "yes" : "no");
+        }
+        SDL_free(ids);
+    }
+    for (int k=0;k<REALS_MAX;++k) if (reals[k].g) {
+        const uint64_t s=pad_state(reals[k].g);
+        if (s!=reals[k].state) { reals[k].state=s; reals[k].used=now; }
+    }
+}
+/* The real controller behind player's gamepad g: the one used at the same time as g (Steam passes
+ * its input on within a frame or two), so motion starts with the first button pressed. The link
+ * stays while that controller is the one in use: another player's press in the same moment does
+ * not take it over. */
+static SDL_Gamepad *player_real(Motion *m, int player, SDL_Gamepad *g, uint64_t now) {
+    update_reals(now);
+    Real *mine=NULL;
+    for (int k=0;k<REALS_MAX;++k) if (reals[k].g && reals[k].player==player) mine=&reals[k];
+    const uint64_t s=g ? pad_state(g) : 0;
+    if (s!=m->state) {
+        m->state=s;
+        Real *best=NULL;
+        for (int k=0;k<REALS_MAX;++k)
+            if (reals[k].gyro && reals[k].used && now-reals[k].used<=REAL_LINK_US && (!best || reals[k].used>best->used))
+                best=&reals[k];
+        const int mine_used=mine && mine->used && now-mine->used<=REAL_LINK_US;
+        if (best && best!=mine && !mine_used) {
+            if (mine) mine->player=-1;
+            best->player=player;
+            mine=best;
+            printf("Runtime: player %d motion from %s\n",player+1,SDL_GetGamepadName(best->g));
+        }
+    }
+    return mine ? mine->g : NULL;
+}
+static void read_motion(Motion *m, int player, SDL_Gamepad *g, const Injected *in, PadData *d) {
     float gyro[3]={0,0,0}, accel[3]={0,0,0};
     int have=0;
+    if (steam_reals && g && !SDL_GamepadHasSensor(g,SDL_SENSOR_GYRO)) {
+        SDL_Gamepad *real=player_real(m,player,g,now_us());
+        if (real) g=real;
+    }
     const SDL_JoystickID id=g ? SDL_GetGamepadID(g) : 0;
     if (id && id!=m->id) {
         m->id=id;
@@ -917,7 +1003,7 @@ static void sample(PadData *d) {
     record_sample(d); /* the click sources as they are: a replay plays them again */
     read_inject();
     replay_sample(d);
-    read_motion(&motions[0],gamepad,&injected,d);
+    read_motion(&motions[0],0,gamepad,&injected,d);
     d->buttons|=injected.buttons;
     if (injected.buttons & BTN_L2) d->l2=255;
     if (injected.buttons & BTN_R2) d->r2=255;
@@ -943,7 +1029,7 @@ static void sample_second(PadData *d) {
     if (gow3gpu_overlay_captures_input()) return;
     load_button_maps();
     read_gamepad(g,d);
-    read_motion(&motions[1],g,&injected2,d);
+    read_motion(&motions[1],1,g,&injected2,d);
     d->buttons|=injected2.buttons;
     if (d->buttons & (CLICK_LEFT|CLICK_RIGHT)) d->buttons|=BTN_TOUCHPAD; /* no touch surface to aim */
     d->buttons&=~(CLICK_LEFT|CLICK_RIGHT|DODGE|RAGE|GRAB);

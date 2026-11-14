@@ -11,7 +11,7 @@
 #include "gow3_graphics.h"
 #include "gow3_settings.h"
 
-// runtime_pad.c: a real controller behind Steam Input that no player plays with.
+// runtime_pad.c: a real controller behind Steam Input, read for its motion sensors only.
 extern "C" int runtime_pad_motion_only(uint32_t joystick_id);
 
 namespace Frontend {
@@ -164,7 +164,7 @@ bool WindowSDL::PollEvents() {
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-        // A real controller behind Steam Input does not play: its buttons arrive
+        // A real controller behind Steam Input is read for its gyro only: its buttons arrive
         // again from Steam's virtual gamepad, and twice would move the menus two steps.
         if ((event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP ||
              event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) &&
