@@ -20,6 +20,9 @@
 #include <math.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <strings.h>
+#endif
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -125,6 +128,85 @@ static int preferred_gamepad(int count) {
     if (!wanted) { const char *env=getenv("GOW3_GAMEPAD"); wanted=env && atoi(env)>0 ? atoi(env) : 1; }
     return wanted<=count ? wanted-1 : 0;
 }
+/* Steam Input (#18): a game Steam starts gets SDL_GAMECONTROLLER_IGNORE_DEVICES, which hides the
+ * real controllers so that only Steam's virtual gamepads are seen, and those have no motion
+ * sensors. For Valve's own controllers (Steam Controller, Steam Deck; vendor 28de) Steam Input
+ * cannot be turned off in a non-Steam game, so runtime_pad_steam_input (main, before SDL starts)
+ * moves their entries of that list to GOW3_STEAM_HIDDEN_PADS: SDL then sees those real
+ * controllers too, but they never play. Buttons and sticks still come from the virtual gamepad,
+ * so the player's Steam Input layout applies as in any PC game. Other controllers stay hidden as
+ * Steam asked. GOW3_STEAM_HIDDEN_PADS=none leaves Steam's list as it is.
+ * Not on Windows: the list is left alone there (untested), and the game behaves as before. */
+enum { VALVE=0x28de };
+static int steam_reals; /* Valve's real controllers are visible beside Steam's virtual gamepads */
+void runtime_pad_steam_input(void) {
+#ifndef _WIN32
+    const char *list=getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES");
+    const char *steam=getenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD");
+    const char *mine=getenv("GOW3_STEAM_HIDDEN_PADS"); /* set already in a restarted game */
+    if (list && *list && steam && !strcmp(steam,"1") && !(mine && *mine)) {
+        const size_t size=strlen(list)+1;
+        char *valve=calloc(1,size), *rest=calloc(1,size);
+        for (const char *s=list; valve && rest && *s;) { /* 0xVVVV/0xPPPP,... */
+            const size_t length=strcspn(s,",");
+            char *to=!strncasecmp(s,"0x28de/",7) ? valve : rest;
+            if (length) { if (*to) strcat(to,","); strncat(to,s,length); }
+            s+=length;
+            if (*s==',') ++s;
+        }
+        if (valve && rest && *valve) {
+            setenv("GOW3_STEAM_HIDDEN_PADS",valve,1);
+            setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES",rest,1);
+        }
+        free(valve); free(rest);
+    }
+#endif
+    const char *moved=getenv("GOW3_STEAM_HIDDEN_PADS");
+    steam_reals=moved && *moved && strcmp(moved,"none");
+    if (steam_reals)
+        printf("Runtime: Steam Input: Valve's real controllers are visible beside Steam's virtual gamepads "
+               "(GOW3_STEAM_HIDDEN_PADS=none turns this off)\n");
+}
+/* A real controller Steam Input hides: one of Valve's that is not Steam's virtual gamepad, which
+ * reports the id of the controller it stands in for and is told apart by its Steam handle (known
+ * once opened). Remembered per joystick; called under lock. */
+static int steam_hidden(SDL_JoystickID id) {
+    static struct { SDL_JoystickID id; int hidden; } known[16];
+    static int next;
+    if (!steam_reals) return 0;
+    for (int i=0;i<16;++i) if (known[i].id==id) return known[i].hidden;
+    int hidden=SDL_GetGamepadVendorForID(id)==VALVE;
+    if (hidden) {
+        SDL_Gamepad *g=SDL_OpenGamepad(id);
+        if (!g) return 0;
+        hidden=!SDL_GetGamepadSteamHandle(g);
+        SDL_CloseGamepad(g);
+    }
+    known[next].id=id; known[next].hidden=hidden;
+    next=(next+1)%16;
+    return hidden;
+}
+/* The gamepads that can play: all but the ones Steam Input hides, unless only those are connected
+ * (Steam's virtual gamepads off). The caller frees the list. */
+static SDL_JoystickID *player_gamepads(int *count) {
+    SDL_JoystickID *ids=SDL_GetGamepads(count);
+    if (!ids || !steam_reals) return ids;
+    int kept=0;
+    for (int i=0;i<*count;++i) if (!steam_hidden(ids[i])) ids[kept++]=ids[i];
+    if (kept) { *count=kept; return ids; }
+    SDL_free(ids);
+    return SDL_GetGamepads(count);
+}
+/* A hidden controller that no player plays with: its button events are not for the overlay or
+ * the text dialog either (window.cpp), they come again from Steam's virtual gamepad. */
+int runtime_pad_motion_only(uint32_t id) {
+    if (!steam_reals) return 0;
+    pthread_mutex_lock(&lock);
+    const int only=steam_hidden(id) && !(gamepad && SDL_GetGamepadID(gamepad)==id) &&
+                   !(gamepad2 && SDL_GetGamepadID(gamepad2)==id);
+    pthread_mutex_unlock(&lock);
+    return only;
+}
 /* What SDL sees of a gamepad's motion sensors, for the log: a pad without a
  * gyro leaves the game's Motion control option without input. Steam Input hides the real
  * controller and shows a virtual Xbox pad in its place, which has no sensors. */
@@ -146,7 +228,7 @@ static SDL_Gamepad *current_gamepad(void) {
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
     if (!gamepad) {
         int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        SDL_JoystickID *ids=player_gamepads(&count);
         if (ids && count>0) {
             gamepad=SDL_OpenGamepad(ids[preferred_gamepad(count)]);
             if (gamepad) {
@@ -164,7 +246,7 @@ static SDL_Gamepad *second_gamepad(void) {
     if (gamepad2 && !SDL_GamepadConnected(gamepad2)) { SDL_CloseGamepad(gamepad2); gamepad2=NULL; }
     if (!gamepad2 && first) {
         int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        SDL_JoystickID *ids=player_gamepads(&count);
         for (int i=0;ids && i<count && !gamepad2;++i) {
             if (ids[i]==SDL_GetGamepadID(first)) continue;
             gamepad2=SDL_OpenGamepad(ids[i]);
@@ -995,7 +1077,7 @@ int runtime_pad_describe(void) {
     for (int waited=0; ready && !g && waited<30; ++waited) {
         SDL_PumpEvents();
         int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        SDL_JoystickID *ids=player_gamepads(&count);
         if (ids && count>0) g=SDL_OpenGamepad(ids[0]);
         SDL_free(ids);
         if (!g) SDL_Delay(10);

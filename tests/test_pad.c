@@ -58,7 +58,7 @@ int main(void) {
     setenv("GOW3_PAD_FILE",path,1);
     setenv("SDL_VIDEODRIVER","dummy",1);
     /* Only the virtual test controller is a gamepad, whatever is plugged in. */
-    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189,0x28de/0x1304");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
 
@@ -237,11 +237,43 @@ int main(void) {
     assert(pad_read_state(2,&second)==0 && !second.connected && second.buttons==0);
     assert(!runtime_pad_second_user());
     assert(pad_close(2)==0 && pad_read_state(2,&second)==ERR_INVALID_HANDLE);
+
+    /* Steam Input (#18): Valve's real controllers are visible beside the virtual gamepads, but
+     * player 1 stays on the virtual gamepad and a real one never becomes player 2. */
+#ifndef _WIN32
+    setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES","0x28de/0x1205,0x054c/0x0df2,0x28DE/0x1304",1);
+    setenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD","1",1);
+    runtime_pad_steam_input();
+    assert(!strcmp(getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"),"0x054c/0x0df2")); /* others stay hidden */
+    assert(!strcmp(getenv("GOW3_STEAM_HIDDEN_PADS"),"0x28de/0x1205,0x28DE/0x1304"));
+#else
+    setenv("GOW3_STEAM_HIDDEN_PADS","0x28de/0x1205,0x28de/0x1304",1);
+    runtime_pad_steam_input();
+#endif
+    assert(steam_reals);
+    SDL_VirtualJoystickDesc real_desc=desc;
+    real_desc.name="gow3 test real controller";
+    real_desc.vendor_id=0x28de;
+    real_desc.product_id=0x1304;
+    real_desc.ntouchpads=0;
+    real_desc.touchpads=NULL;
+    real_desc.Rumble=NULL;
+    SDL_JoystickID real_id=SDL_AttachVirtualJoystick(&real_desc);
+    assert(real_id!=0);
+    SDL_Joystick *real=SDL_OpenJoystick(real_id);
+    assert(real);
+    pump();
+    data=read_pad();
+    assert(SDL_GetGamepadID(gamepad)==id);
+    assert(runtime_pad_motion_only(real_id) && !runtime_pad_motion_only(id));
+    assert(!runtime_pad_second_user());
+    SDL_CloseJoystick(real);
+    assert(SDL_DetachVirtualJoystick(real_id));
     SDL_CloseJoystick(joystick);
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture, player 2");
+    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture, player 2, real controllers behind Steam Input");
 }

@@ -1135,6 +1135,8 @@ int main(int argc, char **argv) {
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
+    /* Before SDL starts and before any thread: it changes the environment. */
+    runtime_pad_steam_input();
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
     char missing[128];
     if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {

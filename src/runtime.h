@@ -100,6 +100,8 @@ void runtime_pad_report(void);
 extern volatile int runtime_pad_opened; /* the game opened a pad (start watch, #113) */
 /* probe --gamepad: prints one "Gamepad:" line for the first pad found (returns 1) or none (0). */
 int runtime_pad_describe(void);
+void runtime_pad_steam_input(void); /* main, before SDL starts: see runtime_pad.c */
+int runtime_pad_motion_only(uint32_t joystick_id);
 int runtime_pad_second_user(void);
 void runtime_user_events(void);
 uintptr_t runtime_rtc_resolve(const char *name);

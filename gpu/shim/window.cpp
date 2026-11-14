@@ -11,6 +11,9 @@
 #include "gow3_graphics.h"
 #include "gow3_settings.h"
 
+// runtime_pad.c: a real controller behind Steam Input that no player plays with.
+extern "C" int runtime_pad_motion_only(uint32_t joystick_id);
+
 namespace Frontend {
 
 // gow3: set by the pause key (any thread), cleared by it or a click in the window.
@@ -161,6 +164,14 @@ bool WindowSDL::PollEvents() {
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // A real controller behind Steam Input does not play: its buttons arrive
+        // again from Steam's virtual gamepad, and twice would move the menus two steps.
+        if ((event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP ||
+             event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) &&
+            runtime_pad_motion_only(event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION ? event.gaxis.which
+                                                                               : event.gbutton.which)) {
+            continue;
+        }
         if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
             std::scoped_lock lock{text_mutex};
             if (event.type == SDL_EVENT_TEXT_INPUT) {
