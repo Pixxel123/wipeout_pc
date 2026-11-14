@@ -66,8 +66,10 @@ int main(void) {
     close(fd);
     setenv("GOW3_PAD_FILE",path,1);
     setenv("SDL_VIDEODRIVER","dummy",1);
-    /* Only the virtual test controller is a gamepad, whatever is plugged in. */
-    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189,0x28de/0x1304");
+    /* Only the virtual test controllers are gamepads, whatever is plugged in (the real controls of
+     * a Steam Deck have the id of one of them; SDL's HID drivers off keeps those out). */
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189,0x28de/0x1205");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI,"0");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
 
@@ -247,115 +249,76 @@ int main(void) {
     assert(!runtime_pad_second_user());
     assert(pad_close(2)==0 && pad_read_state(2,&second)==ERR_INVALID_HANDLE);
 
-    /* Steam Input (#18): the real controllers it hides (Valve's and Sony's) are read for their gyro only. Player 1
-     * stays on the virtual gamepad, a real one never becomes player 2, and the gyro of the real
-     * controller behind player 1's gamepad reaches the game. */
+    /* Steam Input (#18): of the controllers it hides, the Steam Deck's own controls are read for
+     * their gyro only. They never play, and their gyro goes to the player on Steam's virtual
+     * gamepad for the Deck, which reports the Deck's id. */
 #ifndef _WIN32
+    unsetenv("GOW3_STEAM_HIDDEN_PADS"); /* a shell the game started has it */
     setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES","0x28de/0x1205,0x054c/0x0df2,0x057e/0x2009,@list,0x28DE/0x1304",1);
     setenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD","1",1);
     runtime_pad_steam_input();
-    /* Valve's and Sony's are read; a Switch Pro and what is not a device id stay hidden. */
-    assert(!strcmp(getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"),"0x057e/0x2009,@list"));
-    assert(!strcmp(getenv("GOW3_STEAM_HIDDEN_PADS"),"0x28de/0x1205,0x054c/0x0df2,0x28DE/0x1304"));
-    assert(hidden_count==3 && steam_listed(0x28de,0x1304) && steam_listed(0x054c,0x0df2) && !steam_listed(0x057e,0x2009));
-#endif
-    /* The test's gamepad stands in for Steam's virtual one: it has a Steam handle, and the real
-     * controllers behind it report its device id. */
-    setenv("GOW3_STEAM_HIDDEN_PADS","0x1d50/0x6189,0x28de/0x1304",1);
+    /* Only the Deck's own controls are shown; every other controller stays hidden. */
+    assert(!strcmp(getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"),"0x054c/0x0df2,0x057e/0x2009,@list,0x28DE/0x1304"));
+    assert(!strcmp(getenv("GOW3_STEAM_HIDDEN_PADS"),"0x28de/0x1205"));
+#else
+    setenv("GOW3_STEAM_HIDDEN_PADS","0x28de/0x1205",1);
     runtime_pad_steam_input();
-    assert(steam_reals && hidden_count==2);
-    test_virtual_id=id;
-    steam_handle=test_steam_handle;
+#endif
+    assert(steam_reals);
     SDL_VirtualJoystickSensorDesc gyro_sensor={.type=SDL_SENSOR_GYRO,.rate=250.0f};
-    SDL_VirtualJoystickDesc real_desc=desc;
-    real_desc.ntouchpads=0;
-    real_desc.touchpads=NULL;
-    real_desc.nsensors=1;
-    real_desc.sensors=&gyro_sensor;
-    real_desc.Rumble=NULL;
-    real_desc.SetSensorsEnabled=sensors_enabled;
-    /* A real controller with another device id (a Steam Controller's receiver beside a Steam Deck)
-     * is never this player's, even pressed in the same moment as its gamepad. */
-    real_desc.name="gow3 test other controller";
-    real_desc.vendor_id=0x28de;
-    real_desc.product_id=0x1304;
-    SDL_JoystickID other_id=SDL_AttachVirtualJoystick(&real_desc);
-    assert(other_id!=0);
-    SDL_Joystick *other=SDL_OpenJoystick(other_id);
-    assert(other);
-    pump();
-    usleep(REAL_SCAN_US+10000);
-    data=read_pad(); /* opens the real controller */
-    assert(SDL_GetGamepadID(gamepad)==id);
-    assert(runtime_pad_motion_only(other_id) && !runtime_pad_motion_only(id));
-    assert(!runtime_pad_second_user());
-    const float turn[3]={1.0f,-2.0f,0.5f};
-    assert(SDL_SetJoystickVirtualButton(other,SDL_GAMEPAD_BUTTON_SOUTH,true));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
-    pump();
-    data=read_pad();
-    assert(data.buttons & BTN_CROSS);
-    assert(SDL_SendJoystickVirtualSensorData(other,SDL_SENSOR_GYRO,SDL_GetTicksNS(),turn,3));
-    pump();
-    data=read_pad();
-    assert(data.angular_velocity[0]==0.0f && data.angular_velocity[1]==0.0f && data.angular_velocity[2]==0.0f);
-    assert(SDL_SetJoystickVirtualButton(other,SDL_GAMEPAD_BUTTON_SOUTH,false));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
-    pump();
-    data=read_pad();
-    /* The one real controller with the gamepad's device id is the player's, before any press. */
-    real_desc.name="gow3 test real controller";
-    real_desc.vendor_id=desc.vendor_id;
-    real_desc.product_id=desc.product_id;
-    SDL_JoystickID real_id=SDL_AttachVirtualJoystick(&real_desc);
+    SDL_VirtualJoystickDesc deck_desc=desc;
+    deck_desc.name="gow3 test Steam Deck";
+    deck_desc.vendor_id=0x28de;
+    deck_desc.product_id=0x1205;
+    deck_desc.ntouchpads=0;
+    deck_desc.touchpads=NULL;
+    deck_desc.nsensors=1;
+    deck_desc.sensors=&gyro_sensor;
+    deck_desc.Rumble=NULL;
+    deck_desc.SetSensorsEnabled=sensors_enabled;
+    SDL_JoystickID real_id=SDL_AttachVirtualJoystick(&deck_desc);
     assert(real_id!=0);
     SDL_Joystick *real=SDL_OpenJoystick(real_id);
     assert(real);
+    /* Steam's virtual gamepad for the Deck: the same id, no sensors, a Steam handle. */
+    deck_desc.name="gow3 test Steam virtual gamepad";
+    deck_desc.nsensors=0;
+    deck_desc.sensors=NULL;
+    deck_desc.SetSensorsEnabled=NULL;
+    SDL_JoystickID virtual_id=SDL_AttachVirtualJoystick(&deck_desc);
+    assert(virtual_id!=0);
+    test_virtual_id=virtual_id;
+    steam_handle=test_steam_handle;
     pump();
-    usleep(REAL_SCAN_US+10000);
-    data=read_pad(); /* opens the real controller */
-    assert(runtime_pad_motion_only(real_id));
-    assert(!runtime_pad_second_user());
+    SDL_Gamepad *steam_pad=SDL_OpenGamepad(virtual_id);
+    assert(steam_pad);
+    /* The real controls never play, whatever order they come in. */
+    int count=0;
+    SDL_JoystickID *players=player_gamepads(&count);
+    assert(players && count==2);
+    for (int i=0;i<count;++i) assert(players[i]!=real_id);
+    SDL_free(players);
+    assert(runtime_pad_motion_only(real_id) && !runtime_pad_motion_only(virtual_id) && !runtime_pad_motion_only(id));
+    /* Player 1's gamepad is another device: no motion from the Deck. */
+    const float turn[3]={1.0f,-2.0f,0.5f};
+    data=read_pad();
+    assert(SDL_GetGamepadID(gamepad)==id);
     assert(SDL_SendJoystickVirtualSensorData(real,SDL_SENSOR_GYRO,SDL_GetTicksNS(),turn,3));
     pump();
     data=read_pad();
-    assert(data.angular_velocity[0]==1.0f && data.angular_velocity[1]==-2.0f && data.angular_velocity[2]==0.5f);
-    /* With two of that id, player 1 moves to the other one once that is the one pressed with the gamepad. */
-    real_desc.name="gow3 test real controller 2";
-    SDL_JoystickID real2_id=SDL_AttachVirtualJoystick(&real_desc);
-    assert(real2_id!=0);
-    SDL_Joystick *real2=SDL_OpenJoystick(real2_id);
-    assert(real2);
+    assert(data.angular_velocity[0]==0.0f && data.angular_velocity[1]==0.0f && data.angular_velocity[2]==0.0f);
+    /* The player on Steam's virtual gamepad for the Deck gets the Deck's gyro, from the start. */
+    const Injected none={.stick={-1,-1,-1,-1}};
+    PadData deck_data={0};
+    read_motion(&motions[1],steam_pad,&none,&deck_data); /* opens the real controls */
+    assert(SDL_SendJoystickVirtualSensorData(real,SDL_SENSOR_GYRO,SDL_GetTicksNS(),turn,3));
     pump();
-    usleep(REAL_SCAN_US+10000);
-    data=read_pad();
-    assert(!runtime_pad_second_user());
-    assert(SDL_SetJoystickVirtualButton(real2,SDL_GAMEPAD_BUTTON_SOUTH,true));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
-    pump();
-    data=read_pad();
-    assert(data.buttons & BTN_CROSS);
-    const float again[3]={0.25f,0.25f,0.25f}, turn2[3]={3.0f,0.0f,-1.0f};
-    assert(SDL_SendJoystickVirtualSensorData(real,SDL_SENSOR_GYRO,SDL_GetTicksNS(),again,3));
-    assert(SDL_SendJoystickVirtualSensorData(real2,SDL_SENSOR_GYRO,SDL_GetTicksNS(),turn2,3));
-    pump();
-    data=read_pad();
-    assert(data.angular_velocity[0]==3.0f && data.angular_velocity[1]==0.0f && data.angular_velocity[2]==-1.0f);
-    /* Both real controllers used in the same moment (two players): player 1 keeps its own. */
-    assert(SDL_SetJoystickVirtualButton(real,SDL_GAMEPAD_BUTTON_EAST,true));
-    assert(SDL_SetJoystickVirtualButton(real2,SDL_GAMEPAD_BUTTON_SOUTH,false));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
-    pump();
-    data=read_pad();
-    assert(!(data.buttons & BTN_CROSS));
-    assert(data.angular_velocity[0]==3.0f && data.angular_velocity[1]==0.0f && data.angular_velocity[2]==-1.0f);
-    assert(SDL_SetJoystickVirtualButton(real,SDL_GAMEPAD_BUTTON_EAST,false));
-    SDL_CloseJoystick(real2);
-    assert(SDL_DetachVirtualJoystick(real2_id));
+    read_motion(&motions[1],steam_pad,&none,&deck_data);
+    assert(deck_data.angular_velocity[0]==1.0f && deck_data.angular_velocity[1]==-2.0f && deck_data.angular_velocity[2]==0.5f);
+    SDL_CloseGamepad(steam_pad);
+    assert(SDL_DetachVirtualJoystick(virtual_id));
     SDL_CloseJoystick(real);
     assert(SDL_DetachVirtualJoystick(real_id));
-    SDL_CloseJoystick(other);
-    assert(SDL_DetachVirtualJoystick(other_id));
     steam_handle=SDL_GetGamepadSteamHandle;
     SDL_CloseJoystick(joystick);
     if (gamepad) SDL_CloseGamepad(gamepad);
