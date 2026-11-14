@@ -62,7 +62,7 @@ int main(void) {
     setenv("GOW3_PAD_FILE",path,1);
     setenv("SDL_VIDEODRIVER","dummy",1);
     /* Only the virtual test controller is a gamepad, whatever is plugged in. */
-    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189,0x28de/0x1304");
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189,0x28de/0x1304,0x054c/0x0df2");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
 
@@ -242,17 +242,19 @@ int main(void) {
     assert(!runtime_pad_second_user());
     assert(pad_close(2)==0 && pad_read_state(2,&second)==ERR_INVALID_HANDLE);
 
-    /* Steam Input (#18): the real controllers it hides are read for their gyro only. Player 1
+    /* Steam Input (#18): the real controllers it hides (Valve's and Sony's) are read for their gyro only. Player 1
      * stays on the virtual gamepad, a real one never becomes player 2, and the gyro of the real
      * controller used with player 1's gamepad reaches the game. */
 #ifndef _WIN32
-    setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES","0x28de/0x1205,0x054c/0x0df2,0x28DE/0x1304",1);
+    setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES","0x28de/0x1205,0x054c/0x0df2,0x057e/0x2009,@list,0x28DE/0x1304",1);
     setenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD","1",1);
     runtime_pad_steam_input();
-    assert(!strcmp(getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"),"0x054c/0x0df2")); /* others stay hidden */
-    assert(!strcmp(getenv("GOW3_STEAM_HIDDEN_PADS"),"0x28de/0x1205,0x28DE/0x1304"));
+    /* Valve's and Sony's are read; a Switch Pro and what is not a device id stay hidden. */
+    assert(!strcmp(getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"),"0x057e/0x2009,@list"));
+    assert(!strcmp(getenv("GOW3_STEAM_HIDDEN_PADS"),"0x28de/0x1205,0x054c/0x0df2,0x28DE/0x1304"));
+    assert(hidden_count==3 && steam_listed(0x28de,0x1304) && steam_listed(0x054c,0x0df2) && !steam_listed(0x057e,0x2009));
 #else
-    setenv("GOW3_STEAM_HIDDEN_PADS","0x28de/0x1205,0x28de/0x1304",1);
+    setenv("GOW3_STEAM_HIDDEN_PADS","0x28de/0x1205,0x054c/0x0df2,0x28de/0x1304",1);
     runtime_pad_steam_input();
 #endif
     assert(steam_reals);
@@ -296,8 +298,11 @@ int main(void) {
     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
     pump();
     data=read_pad();
-    /* With two, player 1 moves to the other one once that is the one pressed with the gamepad. */
+    /* With two, player 1 moves to the other one once that is the one pressed with the gamepad.
+     * That one is a DualSense Edge: not only Valve's controllers are read behind Steam Input. */
     real_desc.name="gow3 test real controller 2";
+    real_desc.vendor_id=0x054c;
+    real_desc.product_id=0x0df2;
     SDL_JoystickID real2_id=SDL_AttachVirtualJoystick(&real_desc);
     assert(real2_id!=0);
     SDL_Joystick *real2=SDL_OpenJoystick(real2_id);

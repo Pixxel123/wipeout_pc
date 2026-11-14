@@ -130,16 +130,20 @@ static int preferred_gamepad(int count) {
 }
 /* Steam Input (#18): a game Steam starts gets SDL_GAMECONTROLLER_IGNORE_DEVICES, which hides the
  * real controllers so that only Steam's virtual gamepads are seen, and those have no motion
- * sensors. For Valve's own controllers (Steam Controller, Steam Deck; vendor 28de) Steam Input
- * cannot be turned off in a non-Steam game, so runtime_pad_steam_input (main, before SDL starts)
- * moves their entries of that list to GOW3_STEAM_HIDDEN_PADS: SDL then sees those real
- * controllers too, but they never play. Buttons and sticks still come from the virtual gamepad,
- * so the player's Steam Input layout applies as in any PC game; only the gyro and accelerometer
- * come from the real controller used with it (player_real). Other controllers stay hidden as
- * Steam asked. GOW3_STEAM_HIDDEN_PADS=none leaves Steam's list as it is.
+ * sensors. runtime_pad_steam_input (main, before SDL starts) moves the entries of Valve's and
+ * Sony's controllers (Steam Deck, Steam Controller, DualSense, DualShock 4) from that list to
+ * GOW3_STEAM_HIDDEN_PADS: SDL then sees those real controllers too, but they never play. Buttons
+ * and sticks still come from the virtual gamepad, so the player's Steam Input layout applies as in
+ * any PC game; only the gyro and accelerometer come from the real controller used with it
+ * (player_real), with no Steam Input setting to change. Other makers' controllers stay hidden as
+ * Steam asked (reading them beside Steam is untested), and so does an entry that is not a device
+ * id. GOW3_STEAM_HIDDEN_PADS=none leaves Steam's list as it is.
  * Not on Windows: the list is left alone there (untested), and the game behaves as before. */
-enum { VALVE=0x28de };
-static int steam_reals; /* Valve's real controllers are visible beside Steam's virtual gamepads */
+enum { VALVE=0x28de, SONY=0x054c, HIDDEN_MAX=32 };
+static int steam_reals; /* real controllers are visible beside Steam's virtual gamepads */
+typedef struct { unsigned vendor, product; } DeviceId;
+static DeviceId hidden_ids[HIDDEN_MAX]; /* GOW3_STEAM_HIDDEN_PADS */
+static int hidden_count;
 void runtime_pad_steam_input(void) {
 #ifndef _WIN32
     const char *list=getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES");
@@ -147,36 +151,53 @@ void runtime_pad_steam_input(void) {
     const char *mine=getenv("GOW3_STEAM_HIDDEN_PADS"); /* set already in a restarted game */
     if (list && *list && steam && !strcmp(steam,"1") && !(mine && *mine)) {
         const size_t size=strlen(list)+1;
-        char *valve=calloc(1,size), *rest=calloc(1,size);
-        for (const char *s=list; valve && rest && *s;) { /* 0xVVVV/0xPPPP,... */
+        char *shown=calloc(1,size), *rest=calloc(1,size);
+        int moved=0;
+        for (const char *s=list; shown && rest && *s;) { /* 0xVVVV/0xPPPP,... */
             const size_t length=strcspn(s,",");
-            char *to=!strncasecmp(s,"0x28de/",7) ? valve : rest;
+            unsigned vendor=0, product=0;
+            const int reveal=sscanf(s,"%x/%x",&vendor,&product)==2 && (vendor==VALVE || vendor==SONY) &&
+                             moved<HIDDEN_MAX;
+            char *to=reveal ? shown : rest;
+            if (reveal) ++moved;
             if (length) { if (*to) strcat(to,","); strncat(to,s,length); }
             s+=length;
             if (*s==',') ++s;
         }
-        if (valve && rest && *valve) {
-            setenv("GOW3_STEAM_HIDDEN_PADS",valve,1);
+        if (shown && rest && *shown) {
+            setenv("GOW3_STEAM_HIDDEN_PADS",shown,1);
             setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES",rest,1);
         }
-        free(valve); free(rest);
+        free(shown); free(rest);
     }
 #endif
     const char *moved=getenv("GOW3_STEAM_HIDDEN_PADS");
-    steam_reals=moved && *moved && strcmp(moved,"none");
+    hidden_count=0;
+    for (const char *s=moved && strcmp(moved,"none") ? moved : ""; *s && hidden_count<HIDDEN_MAX;) {
+        unsigned vendor, product;
+        if (sscanf(s,"%x/%x",&vendor,&product)==2) hidden_ids[hidden_count++]=(DeviceId){vendor,product};
+        s+=strcspn(s,",");
+        if (*s==',') ++s;
+    }
+    steam_reals=hidden_count>0;
     if (steam_reals)
-        printf("Runtime: Steam Input: the motion sensors of Valve's controllers are read beside Steam's "
-               "virtual gamepads (GOW3_STEAM_HIDDEN_PADS=none turns this off)\n");
+        printf("Runtime: Steam Input: the motion sensors of the controllers behind Steam's virtual gamepads "
+               "are read (%s; GOW3_STEAM_HIDDEN_PADS=none turns this off)\n",moved);
 }
-/* A real controller Steam Input hides: one of Valve's that is not Steam's virtual gamepad, which
- * reports the id of the controller it stands in for and is told apart by its Steam handle (known
+/* A device id Steam Input hid (GOW3_STEAM_HIDDEN_PADS). */
+static int steam_listed(unsigned vendor, unsigned product) {
+    for (int i=0;i<hidden_count;++i) if (hidden_ids[i].vendor==vendor && hidden_ids[i].product==product) return 1;
+    return 0;
+}
+/* A real controller Steam Input hides: one on its list that is not Steam's virtual gamepad, which
+ * can report the id of the controller it stands in for and is told apart by its Steam handle (known
  * once opened). Remembered per joystick; called under lock. */
 static int steam_hidden(SDL_JoystickID id) {
     static struct { SDL_JoystickID id; int hidden; } known[16];
     static int next;
     if (!steam_reals) return 0;
     for (int i=0;i<16;++i) if (known[i].id==id) return known[i].hidden;
-    int hidden=SDL_GetGamepadVendorForID(id)==VALVE;
+    int hidden=steam_listed(SDL_GetGamepadVendorForID(id),SDL_GetGamepadProductForID(id));
     if (hidden) {
         SDL_Gamepad *g=SDL_OpenGamepad(id);
         if (!g) return 0;
@@ -219,10 +240,9 @@ static void describe_motion(const char *prefix, SDL_Gamepad *g) {
     printf("%s: gyro=%s accelerometer=%s device=%04x:%04x type=%s steam_input=%s\n",prefix,
            gyro ? "yes" : "no",accel ? "yes" : "no",SDL_GetGamepadVendor(g),SDL_GetGamepadProduct(g),
            type ? type : "unknown",steam ? "yes" : "no");
-    /* The virtual gamepad reports the device id of the controller it stands in for. */
-    if (!gyro && steam && steam_reals && SDL_GetGamepadVendor(g)==VALVE)
-        printf("%s: motion comes from the real controller behind this virtual gamepad, from the first "
-               "button pressed on it\n",prefix);
+    if (!gyro && steam && steam_reals)
+        printf("%s: motion comes from the real controller behind this virtual gamepad if Steam Input hides "
+               "one with a gyro, from the first button pressed on it\n",prefix);
     else if (!gyro && steam)
         printf("%s: Steam Input replaces this controller with a virtual gamepad without motion sensors; "
                "turn Steam Input off for the game's shortcut (Properties > Controller) to use its gyro\n",prefix);
@@ -685,7 +705,7 @@ static uint64_t pad_state(SDL_Gamepad *g) {
 }
 /* The real controllers behind Steam's virtual gamepads (runtime_pad_steam_input), opened for
  * their motion sensors only; player: the one whose virtual gamepad they move with, or -1. */
-enum { REALS_MAX=4, REAL_SCAN_US=250000, REAL_LINK_US=100000 };
+enum { REALS_MAX=8, REAL_SCAN_US=250000, REAL_LINK_US=100000 };
 typedef struct { SDL_Gamepad *g; uint64_t state, used; int player, gyro; } Real;
 static Real reals[REALS_MAX];
 static uint64_t reals_scanned;
