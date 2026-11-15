@@ -1899,6 +1899,10 @@ class Launcher:
         show()
         return holder
 
+    def gap(self, parent, height=16):
+        """Space between groups of rows on a page that needs no headings."""
+        self.tk.Frame(parent, bg=PANEL, height=self.px(height)).grid(row=self.next_row(parent), column=0, columnspan=2)
+
     def section(self, parent, title, top=20):
         """A section heading with a line under it."""
         r = self.next_row(parent)
@@ -1923,14 +1927,15 @@ class Launcher:
             var.trace_add('write', lambda *_a: on_change())
         return self.row(parent, title, holder, hint)
 
-    def scrolled_page(self, name, title, subtitle):
-        """A settings page: a heading and content that scrolls vertically."""
+    def scrolled_page(self, name, title, subtitle=None):
+        """A settings page: a heading, an optional line under it, and content that scrolls vertically."""
         tk, ttk = self.tk, self.ttk
         outer = ttk.Frame(self.content)
         head = ttk.Frame(outer, padding=self.px((28, 22, 28, 6)))
         head.pack(fill='x')
         ttk.Label(head, text=title.upper(), background=PANEL, foreground=TEXT, font=self.heading_font(20)).pack(anchor='w')
-        ttk.Label(head, text=subtitle, style='Muted.TLabel').pack(anchor='w')
+        if subtitle:
+            ttk.Label(head, text=subtitle, style='Muted.TLabel').pack(anchor='w')
         canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0, bd=0)
         bar = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
         inner = ttk.Frame(canvas, padding=self.px((28, 0, 28, 24)))
@@ -2187,12 +2192,11 @@ class Launcher:
             return self.banner_image.subsample(factor) if factor > 1 else self.banner_image
 
     def build_graphics(self):
-        """The Graphics page in a PC game's order: display, upscaling, image quality. Each row's note shows
+        """The Graphics page in a PC game's order, one list: display, upscaling, image quality. Each row's note shows
         in the status bar while the pointer or the focus is on it, as a game's help line; only a warning
         stays on the page."""
-        f = self.scrolled_page('graphics', _('Graphics', 'Графика'),
-                               _('Point at a setting, or move to it with the keyboard or gamepad, to see what it does.'))
-        self.section(f, _('Display'), top=4)
+        f = self.scrolled_page('graphics', _('Graphics', 'Графика'))
+        self.gap(f, 4)
         self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
                  _('Borderless covers the screen without changing the display mode.'), hover=True)
         self.row(f, _('Resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options),
@@ -2231,8 +2235,9 @@ class Launcher:
         self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'), hover=True)
         self.check(f, 'hdr', 'app', _('HDR'), _('When HDR is on in Windows and the display supports it.'), hover=True)
         # Upscaling, then image quality, as PC games with FSR and DLSS lay them out: the upscaler and its
-        # quality mode in one place, anti-aliasing for the game's own image when no upscaler runs.
-        self.section(f, _('Upscaling'))
+        # quality mode together, anti-aliasing for the game's own image when no upscaler runs. One list, a
+        # gap between the groups, no headings: the rows say what they are.
+        self.gap(f)
         upscaler = self.upscaler_var()
         self.row(f, _('Upscaling'), self.choice(f, None, None, self.upscaler_options, var=upscaler),
                  _('FSR 3.1 and DLSS draw the race smaller and scale it up, smoothing edges from the game\'s own '
@@ -2253,7 +2258,7 @@ class Launcher:
         self.row(f, _('Sharpening'), self.choice(f, None, None, SHARPENING, var=self.sharpening_var()),
                  _("Sharpens the final image (AMD RCAS). No effect while the game's picture is scaled to a window "
                    'of another size. Also in the game: Insert > Image.'), hover=True)
-        self.section(f, _('Image quality'))
+        self.gap(f)
         aa = self.anti_aliasing_var()
         anti_aliasing = self.row(f, _('Anti-aliasing'), self.choice(f, None, None, self.anti_aliasing_options, var=aa),
                                  _('The game\'s own multisampling, or none. With FSR 3.1 or DLSS on, they smooth the '
