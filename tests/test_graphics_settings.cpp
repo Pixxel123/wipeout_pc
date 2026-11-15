@@ -56,6 +56,9 @@ int main() {
         _putenv_s("GOW3_RESOLUTION_LIST", "display=3440 × 1440;1440p=2560 × 1440;gone=1 × 1;native=1920 × 1080");
         assert(rows(0) == "4:3440 × 1440|2:2560 × 1440|0:1920 × 1080|");  // an unknown name is skipped
         assert(rows(3) == "4:3440 × 1440|2:2560 × 1440|0:1920 × 1080|3:4K|");  // the current one stays
+        // A current size equal to the monitor's entry is not added a second time (run.py left it out).
+        _putenv_s("GOW3_RESOLUTION_LIST", "display=1920 × 1080;720p=1280 × 720");
+        assert(rows(0) == "4:1920 × 1080|1:1280 × 720|");
         _putenv_s("GOW3_RESOLUTION_LIST", "");
         _putenv_s("GOW3_RENDER_SCALES", "");
         assert((G::RenderScaleChoices() == std::vector<int>{100}));

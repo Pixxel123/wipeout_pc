@@ -771,8 +771,10 @@ UPSCALERS = [('fsr3', ('FSR 3.1 (every GPU)', 'FSR 3.1 (любая видеок�
              ('off', ('Off', 'Выключен'))]
 # WipEout's anti-aliasing (Graphics page): native size only, fed by the game's own motion vectors.
 # TAA reprojects with God of War III's camera and is left out.
-# The Graphics page's Anti-aliasing list (anti_aliasing_var): the game's own, none, or a temporal method.
-ANTI_ALIASING = [('msaa', ('Game default (MSAA)',)), ('off', ('Off',)), ('fsr3', ('FSR 3.1 (every GPU)',))]
+# The Graphics page's Upscaling list (upscaler_var; DLSS_CHOICE is added once installed), and its Anti-aliasing
+# list (anti_aliasing_var): the game's own multisampling or none, for when no upscaler runs.
+UPSCALING_CHOICES = [('off', ('Off',)), ('fsr3', ('FSR 3.1 (every GPU)',))]
+ANTI_ALIASING = [('msaa', ('Game default (MSAA)',)), ('off', ('Off',))]
 DLSS_CHOICE = ('dlss', ('DLSS (NVIDIA RTX)',))
 DLSS_PRESETS = [('0', ('Driver default (K)',)), ('11', ('K (transformer)',)),
                 ('13', ('M (transformer 2, DLSS 4.5)',)), ('12', ('L (transformer 2, cleanest, slowest)',)),
@@ -781,7 +783,7 @@ PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('B
            ('3', ('Performance (×2)',)), ('4', ('Ultra Performance (×3)',))]
 # The upscaling choice of the Anti-aliasing section (#51): the scene at 1/x of the render
 # resolution per axis, scaled up by FSR 3.1 or DLSS; the HUD stays at full size.
-UPSCALE_PRESETS = [('0', ('Off (full resolution)',)), ('1', ('Quality (scene at 1/1.5)',)),
+UPSCALE_PRESETS = [('0', ('Native AA (full resolution)',)), ('1', ('Quality (scene at 1/1.5)',)),
                    ('2', ('Balanced (scene at 1/1.7)',)), ('3', ('Performance (scene at 1/2)',))]
 OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
            ('2560x1440', ('2560 × 1440',)), ('3840x2160', ('3840 × 2160 (4K)',))]
@@ -1657,8 +1659,12 @@ class Launcher:
         s.map('TRadiobutton', background=[('active', PANEL)], indicatorcolor=[('selected', ACCENT)])
         s.configure('Warning.TLabel', background='#2a1414', foreground='#e0a0a0', padding=self.px((10, 6)))
         s.configure('TCombobox', arrowcolor=MUTED, foreground=TEXT, padding=self.px(4), arrowsize=self.px(14))
-        s.map('TCombobox', fieldbackground=[('readonly', CARD)], foreground=[('readonly', TEXT)],
-              selectbackground=[('readonly', CARD)], selectforeground=[('readonly', TEXT)])
+        # A disabled list (Quality without an upscaler) is greyed out, not drawn like an active one.
+        s.map('TCombobox', fieldbackground=[('disabled', PANEL), ('readonly', CARD)],
+              foreground=[('disabled', MUTED), ('readonly', TEXT)], arrowcolor=[('disabled', LINE)],
+              bordercolor=[('disabled', LINE)],
+              selectbackground=[('disabled', PANEL), ('readonly', CARD)],
+              selectforeground=[('disabled', MUTED), ('readonly', TEXT)])
         s.configure('TEntry', foreground=TEXT, insertcolor=TEXT, padding=self.px(4))
         s.configure('TSpinbox', foreground=TEXT, arrowcolor=MUTED, insertcolor=TEXT, padding=self.px(4),
                     arrowsize=self.px(10))
@@ -2147,37 +2153,46 @@ class Launcher:
         self.check(f, 'hdr', 'app', _('Allow HDR output', 'Разрешить HDR'),
                    _('When HDR is on in Windows and the display supports it.',
                      'Если HDR включён в Windows и монитор его поддерживает.'))
-        self.section(f, _('Image quality'))
-        aa = self.anti_aliasing_var()
-        self.row(f, _('Anti-aliasing'), self.choice(f, None, None, self.anti_aliasing_options, var=aa),
-                 _('FSR 3.1 and DLSS smooth edges over time, from the game\'s own motion vectors, in place of its '
-                   'multisampling. Also in the game: Insert > Image.'), restart=True)
+        # Upscaling, then image quality, as PC games with FSR and DLSS lay them out: the upscaler and its
+        # quality mode in one place, anti-aliasing for the game's own image when no upscaler runs.
+        self.section(f, _('Upscaling'))
+        upscaler = self.upscaler_var()
+        self.row(f, _('Upscaling'), self.choice(f, None, None, self.upscaler_options, var=upscaler),
+                 _('FSR 3.1 and DLSS draw the race smaller and scale it up, smoothing edges from the game\'s own '
+                   'motion vectors: more FPS. The HUD and menus stay sharp. Also in the game: Insert > Image.'),
+                 restart=True)
         if WINDOWS:
             self.build_dlss_row(f)
-        upscaling = self.row(f, _('Upscaling'), self.choice(f, 'preset', 'ini', UPSCALE_PRESETS),
-                             _('Draws the race smaller and scales it up with FSR 3.1 or DLSS: more FPS, a softer '
-                               'picture. The HUD and menus stay sharp.'))
-        # Only DLSS has presets. The row (title, box, note) hides with another method.
+        quality = self.row(f, _('Quality'), self.choice(f, 'preset', 'ini', UPSCALE_PRESETS),
+                           _('Native AA keeps the full resolution and only smooths edges. Quality, Balanced and '
+                             'Performance draw the race smaller for more FPS.'))
+        # Only DLSS has presets. The row (title, box, note) hides with another upscaler.
         first = self.next_row(f)
         self.row(f, _('DLSS preset'), self.choice(f, 'dlss_preset', 'ini', DLSS_PRESETS),
                  _('K is the driver\'s default. M and L are the newer second-generation models; L costs a few '
                    'percent more.'), restart=True)
         preset_widgets = [w for r in range(first, self.next_row(f)) for w in f.grid_slaves(row=r)]
+        self.section(f, _('Image quality'))
+        aa = self.anti_aliasing_var()
+        anti_aliasing = self.row(f, _('Anti-aliasing'), self.choice(f, None, None, self.anti_aliasing_options, var=aa),
+                                 _('The game\'s own multisampling, or none. With FSR 3.1 or DLSS on, they smooth the '
+                                   'edges instead.'), restart=True)
 
-        def follow_method(*_args):
-            temporal = aa.get() in ('fsr3', 'dlss')
-            upscaling.configure(state='readonly' if temporal else 'disabled')
+        def follow_upscaler(*_args):
+            on = upscaler.get() != 'off'
+            quality.configure(state='readonly' if on else 'disabled')
+            anti_aliasing.configure(state='disabled' if on else 'readonly')
             for widget in preset_widgets:
-                widget.grid() if aa.get() == 'dlss' and dlss_installed() else widget.grid_remove()
-        aa.trace_add('write', follow_method)
-        self.dlss_preset_visible = follow_method
-        follow_method()
-        self.row(f, _('Anisotropic filtering'), self.choice(f, 'anisotropy', 'ini', ANISOTROPY),
-                 _('Sharper floors and walls seen at an angle, at little cost on most graphics cards.'),
-                 restart=True)
+                widget.grid() if upscaler.get() == 'dlss' and dlss_installed() else widget.grid_remove()
+        upscaler.trace_add('write', follow_upscaler)
+        self.dlss_preset_visible = follow_upscaler
+        follow_upscaler()
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
                    'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)
+        self.row(f, _('Anisotropic filtering'), self.choice(f, 'anisotropy', 'ini', ANISOTROPY),
+                 _('Sharper floors and walls seen at an angle, at little cost on most graphics cards.'),
+                 restart=True)
         self.section(f, _('Experimental'))
         self.check(f, 'ps4_pro', 'app', _('PS4 Pro mode'),
                    _('The game runs as on a PS4 Pro, with its Pro graphics. Menus and a race start work; other events '
@@ -2195,34 +2210,73 @@ class Launcher:
                    _("Off: no colour flare over the ship and its exhaust in the game's photo mode."),
                    restart=True)
 
-    def anti_aliasing_options(self):
-        """The Anti-aliasing list; DLSS once NVIDIA's runtime is installed (asked again when it opens)."""
-        choices = ANTI_ALIASING + ([DLSS_CHOICE] if dlss_installed() else [])
+    def upscaler_options(self):
+        """The Upscaling list; DLSS once NVIDIA's runtime is installed (asked again when it opens)."""
+        choices = UPSCALING_CHOICES + ([DLSS_CHOICE] if dlss_installed() else [])
         # A saved method the list lacks (an older build's, DLSS without its file) is shown as it is.
         saved = self.var('upscaler', 'ini').get()
         if self.var('experimental_upscaler', 'app').get() and saved not in dict(choices):
             choices = choices + [(saved, (saved.upper(),))]
         return choices
 
-    def anti_aliasing_var(self):
-        """One choice over two settings, as a PC game shows it: the game's own multisampling is the
-        anti-aliasing switch off; Off, FSR 3.1 and DLSS turn it on with that method (gow3.ini upscaler).
-        Not saved itself: it follows the two settings and sets them."""
-        if getattr(self, 'anti_aliasing', None) is None:
-            switch, method = self.var('experimental_upscaler', 'app'), self.var('upscaler', 'ini')
-            shown = lambda: method.get() if switch.get() else 'msaa'
-            self.anti_aliasing = aa = self.tk.StringVar(value=shown())
+    def anti_aliasing_options(self):
+        """The Anti-aliasing list; while an upscaler runs, its name too (the row is greyed out then)."""
+        upscaler = self.upscaler_var().get()
+        return ANTI_ALIASING + ([(upscaler, dict(self.upscaler_options()).get(upscaler, (upscaler,)))]
+                                if upscaler != 'off' else [])
+
+    def temporal_vars(self):
+        """The two settings the Upscaling and Anti-aliasing rows show: the launcher's switch that lets the
+        game's temporal methods run (experimental_upscaler) and the method (gow3.ini upscaler)."""
+        return self.var('experimental_upscaler', 'app'), self.var('upscaler', 'ini')
+
+    def upscaler_var(self):
+        """Upscaling, not saved itself: FSR 3.1 or DLSS turns the switch on with that method; Off leaves
+        anti-aliasing to the Anti-aliasing row. It follows the two settings and sets them."""
+        if getattr(self, 'upscaler_choice', None) is None:
+            switch, method = self.temporal_vars()
+            shown = lambda: method.get() if switch.get() and method.get() != 'off' else 'off'
+            self.upscaler_choice = choice = self.tk.StringVar(value=shown())
 
             def chosen(*_a):
-                value = aa.get()
-                if value == 'msaa':
-                    if switch.get():
+                value = choice.get()
+                if value == 'off':
+                    if switch.get() and method.get() != 'off':
+                        # Back to the game's own anti-aliasing, as a PC game turns its upscaler off.
                         switch.set(False)
                     return
                 if not switch.get():
                     switch.set(True)
                 if method.get() != value:
                     method.set(value)
+
+            def followed(*_a):
+                if choice.get() != shown():
+                    choice.set(shown())
+            choice.trace_add('write', chosen)
+            switch.trace_add('write', followed)
+            method.trace_add('write', followed)
+        return self.upscaler_choice
+
+    def anti_aliasing_var(self):
+        """Anti-aliasing, not saved itself: the game's own multisampling (the switch off) or none (the switch
+        on with no method). While an upscaler runs it shows that upscaler and does nothing."""
+        if getattr(self, 'anti_aliasing', None) is None:
+            switch, method = self.temporal_vars()
+            shown = lambda: 'msaa' if not switch.get() else method.get()
+            self.anti_aliasing = aa = self.tk.StringVar(value=shown())
+
+            def chosen(*_a):
+                value = aa.get()
+                if switch.get() and method.get() != 'off':
+                    if value != method.get():
+                        aa.set(method.get())  # an upscaler runs: the row only shows it
+                    return
+                if value == 'msaa' and switch.get():
+                    switch.set(False)
+                elif value == 'off' and not switch.get():
+                    method.set('off')
+                    switch.set(True)
 
             def followed(*_a):
                 if aa.get() != shown():

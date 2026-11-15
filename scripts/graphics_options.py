@@ -142,15 +142,18 @@ def resolution_choices(names, monitor, keep=()):
     """[(name, label)] of the Resolution list as a PC game lists it: "display" first (when `names` has it),
     labelled with the size it renders at on this monitor, then the other sizes largest first. A size equal
     to that one or larger is left out (Resolution scale goes above the monitor). The `keep` names (the saved
-    one) are always listed, also a size `names` lacks. An unknown `monitor` (None) leaves every size in."""
+    one) are always listed, also a size `names` lacks, except a size equal to the monitor's entry: that
+    entry stands for it, so no size shows twice. An unknown `monitor` (None) leaves every size in."""
     shown = display_render_size(monitor) if monitor and DISPLAY in names else None
     names = [*names, *(k for k in keep if k and k not in names and resolution_size(k))]
 
     def listed(name):
         size = resolution_size(name)
-        if name in keep or not size or not shown:
+        if not size or not shown:
             return True
-        return size != shown and size[0] <= shown[0] and size[1] <= shown[1]
+        if size == shown:
+            return False  # the monitor's entry is that size: listed once, also when it is the saved one
+        return name in keep or (size[0] <= shown[0] and size[1] <= shown[1])
 
     def largest_first(name):
         size = resolution_size(name)

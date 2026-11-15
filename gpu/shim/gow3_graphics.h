@@ -103,7 +103,15 @@ inline std::vector<ResolutionChoice> ResolutionChoices(const std::vector<std::st
     const auto listed = [&](int i) {
         return std::any_of(choices.begin(), choices.end(), [i](const ResolutionChoice& c) { return c.index == i; });
     };
-    if (current >= 0 && current < int(names.size()) && !listed(current)) choices.push_back({current, names[current]});
+    if (current >= 0 && current < int(names.size()) && !listed(current)) {
+        // The current one is not on run.py's list: as a size, unless an entry already shows that size (the
+        // monitor's entry stands for a saved size equal to it), so no size shows twice.
+        const auto [w, h] = ResolutionSize(names[current]);
+        const std::string label = names[current] == "native" || names[current].find('x') != std::string::npos
+                                      ? std::to_string(w) + " × " + std::to_string(h) : names[current];
+        if (std::none_of(choices.begin(), choices.end(), [&](const ResolutionChoice& c) { return c.label == label; }))
+            choices.push_back({current, label});
+    }
     return choices;
 }
 /// Engine frame rate ceilings: 60 is the game's own, 100 (for 100 Hz displays), 120 and 240 are frame rate patches.

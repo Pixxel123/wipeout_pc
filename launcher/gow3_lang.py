@@ -1113,6 +1113,11 @@ EXTRA = {
         "The first size is your monitor's and follows it. Wider than 16:9 keeps the HUD at 16:9.": 'O primeiro tamanho é o do seu monitor e o acompanha. Mais largo que 16:9 mantém o HUD em 16:9.',
         'Game default (MSAA)': 'Padrão do jogo (MSAA)',
         'DLSS (NVIDIA RTX)': 'DLSS (NVIDIA RTX)',
+        "FSR 3.1 and DLSS draw the race smaller and scale it up, smoothing edges from the game's own motion vectors: more FPS. The HUD and menus stay sharp. Also in the game: Insert > Image.": 'FSR 3.1 e DLSS desenham a corrida menor e a ampliam, suavizando as bordas com os vetores de movimento do próprio jogo: mais FPS. O HUD e os menus continuam nítidos. Também no jogo: Insert > Imagem.',
+        'Native AA keeps the full resolution and only smooths edges. Quality, Balanced and Performance draw the race smaller for more FPS.': 'AA nativo mantém a resolução completa e só suaviza as bordas. Qualidade, Equilibrado e Desempenho desenham a corrida menor para mais FPS.',
+        'Quality': 'Qualidade',
+        "The game's own multisampling, or none. With FSR 3.1 or DLSS on, they smooth the edges instead.": 'O multisampling do próprio jogo, ou nenhum. Com FSR 3.1 ou DLSS ligado, eles suavizam as bordas no lugar.',
+        'Native AA (full resolution)': 'AA nativo (resolução completa)',
     },
     'es': {
         'Adaptive ship reflections': 'Reflejos adaptativos de la nave',
@@ -1499,6 +1504,11 @@ EXTRA = {
         "The first size is your monitor's and follows it. Wider than 16:9 keeps the HUD at 16:9.": 'El primer tamaño es el de tu monitor y lo sigue. Más ancho que 16:9 mantiene el HUD en 16:9.',
         'Game default (MSAA)': 'Predeterminado del juego (MSAA)',
         'DLSS (NVIDIA RTX)': 'DLSS (NVIDIA RTX)',
+        "FSR 3.1 and DLSS draw the race smaller and scale it up, smoothing edges from the game's own motion vectors: more FPS. The HUD and menus stay sharp. Also in the game: Insert > Image.": 'FSR 3.1 y DLSS dibujan la carrera más pequeña y la escalan, suavizando los bordes con los vectores de movimiento del propio juego: más FPS. El HUD y los menús siguen nítidos. También en el juego: Insert > Imagen.',
+        'Native AA keeps the full resolution and only smooths edges. Quality, Balanced and Performance draw the race smaller for more FPS.': 'AA nativo mantiene la resolución completa y solo suaviza los bordes. Calidad, Equilibrado y Rendimiento dibujan la carrera más pequeña para más FPS.',
+        'Quality': 'Calidad',
+        "The game's own multisampling, or none. With FSR 3.1 or DLSS on, they smooth the edges instead.": 'El multisampling del propio juego, o ninguno. Con FSR 3.1 o DLSS activado, ellos suavizan los bordes en su lugar.',
+        'Native AA (full resolution)': 'AA nativo (resolución completa)',
     },
 }
 

@@ -195,6 +195,12 @@ class GraphicsOptionsTest(unittest.TestCase):
         # A saved size the list lacks is added; anything that is no size is not.
         self.assertIn(('3000x1700', '3000 × 1700'), g.resolution_choices(names, (3440, 1440), keep=('3000x1700',)))
         self.assertEqual(len(g.resolution_choices(names, (3440, 1440), keep=('bogus',))), 5)
+        # A saved size equal to the monitor's entry is not listed twice: that entry stands for it.
+        for monitor in ((1920, 1080), (1280, 800)):  # a 1080p monitor; the Steam Deck (shown as 1920 × 1080)
+            twin = g.resolution_choices(names, monitor, keep=('native',))
+            self.assertEqual([label for _n, label in twin].count('1920 × 1080'), 1, monitor)
+            self.assertEqual(twin[0][0], 'display')
+            self.assertNotIn('native', values(twin))
         # A game without "display" (God of War III): every size, largest first.
         self.assertEqual(values(g.resolution_choices(['native', '720p', '4K'], (2560, 1440))), ['4K', 'native', '720p'])
 
