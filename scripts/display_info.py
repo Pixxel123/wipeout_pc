@@ -27,17 +27,24 @@ def display_size(env=None):
             ctypes.windll.user32.SetProcessDPIAware()  # pixels, not the scaled size
             size = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
             return size if all(size) else None
-        host = {k: v for k, v in env.items() if k not in ('LD_LIBRARY_PATH', 'PYTHONHOME', 'PYTHONPATH')}
-        text = subprocess.run(['xrandr', '--current'], capture_output=True, text=True, timeout=3, env=host).stdout
-    except (OSError, AttributeError, subprocess.SubprocessError):
+    except (OSError, AttributeError):
         return None
-    return xrandr_primary_size(text)
+    return xrandr_primary_size(_xrandr(env))
 
 
 @functools.lru_cache(maxsize=1)
 def this_display():
     """display_size(), asked once per process (the launcher's lists ask often)."""
     return display_size()
+
+
+def _xrandr(env):
+    """`xrandr --current` of the user's session ('' when it is missing or hangs), outside a bundle's libraries."""
+    host = {k: v for k, v in env.items() if k not in ('LD_LIBRARY_PATH', 'PYTHONHOME', 'PYTHONPATH')}
+    try:
+        return subprocess.run(['xrandr', '--current'], capture_output=True, text=True, timeout=3, env=host).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ''
 
 
 def display_refresh(env=None):
@@ -56,11 +63,9 @@ def display_refresh(env=None):
                 return None
             hz = ctypes.c_uint32.from_buffer(mode, 184).value  # dmDisplayFrequency
             return hz if hz > 1 else None
-        host = {k: v for k, v in env.items() if k not in ('LD_LIBRARY_PATH', 'PYTHONHOME', 'PYTHONPATH')}
-        text = subprocess.run(['xrandr', '--current'], capture_output=True, text=True, timeout=3, env=host).stdout
-    except (OSError, AttributeError, subprocess.SubprocessError):
+    except (OSError, AttributeError):
         return None
-    return xrandr_primary_refresh(text)
+    return xrandr_primary_refresh(_xrandr(env))
 
 
 def xrandr_primary_refresh(text):

@@ -139,6 +139,21 @@ listed. A new install starts at `display`; God of War III has no `display` and s
 - The upscaling presets render below any render resolution and upscale back to it.
 - Generated sizes are not tested in game one by one; above 3840 × 2160 they need a lot of video memory.
 
+### What `run.py` tells the game
+
+`gow3.ini` keeps the player's choice; `run.py` works out what it means at every start and passes it on. The
+game never works a size out itself.
+
+| Variable | Example | Meaning |
+|---|---|---|
+| `GOW3_DISPLAY_SIZE` | `3440x1440` | The monitor's size. Set it yourself to say it instead of asking the system |
+| `GOW3_DISPLAY_HZ` | `165` | The monitor's refresh rate, for the launcher's Frame rate limit list (set it to say it) |
+| `GOW3_RENDER_SIZE` | `5160x2160` | The size this start renders at, when `display` or a render scale decided it |
+| `GOW3_OUTPUT_SIZE` | `1280x720` | The size the race is drawn at below 1920 × 1080; `1920x1080` follows the render resolution |
+| `GOW3_EXTRA_RESOLUTIONS` | `display;2256x1504` | Names the game accepts beside its built-in ones |
+| `GOW3_RESOLUTION_LIST` | `display=3440 × 1440;1440p=2560 × 1440` | The in-game Resolution list, in order, as the launcher shows it |
+| `GOW3_RENDER_SCALES` | `100;150` | The scales the in-game Resolution scale row offers |
+
 ## Reference build addresses
 
 The `Address` attributes the tool writes are addresses in the `6e72…` build. The signatures are what is used.

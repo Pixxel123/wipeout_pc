@@ -208,8 +208,7 @@ def menu_lists(own_sizes, extra, display, resolution, scaled):
     import graphics_options as g
     names = ([s for s in own_sizes if s in g.RESOLUTIONS] or list(g.RESOLUTIONS)) + list(extra)
     choices = g.resolution_choices(names, display, keep=(resolution,))
-    base = (g.display_render_size(display) if display else None) if resolution == g.DISPLAY else g.resolution_size(resolution)
-    scales = g.render_scale_choices(base, scaled)
+    scales = g.render_scale_choices(g.shown_size(resolution, display), scaled)
     return ';'.join(f'{name}={label}' for name, label in choices), ';'.join(percent for percent, _label in scales)
 
 
@@ -252,7 +251,9 @@ def main():
     own = own.get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS', '').split(';')
     extra_resolutions = list(dict.fromkeys(s for s in [*patches.resolution_names(mod_patch_files), *own]
                                            if s and s not in graphics_options.RESOLUTIONS))
-    if not title_id or title_id in graphics_options.GENERATED_TITLES:
+    # WipEout (or no game told apart): its resolution patch can be generated and its output size set.
+    generates = not title_id or title_id in graphics_options.GENERATED_TITLES
+    if generates:
         # An older Deck's (or Output resolution row's) 1280 x 720 output stays: written as "720p" once, so
         # the launcher, this script and the in-game menu all read the same choice.
         saved = graphics_options.read_ini(env['GOW3_CONFIG'])
@@ -262,9 +263,7 @@ def main():
     launch = graphics_options.launch_ini(env['GOW3_CONFIG'], out / 'graphics_state.json')
     mod_sizes = patches.resolution_names(mod_patch_files)
     # The monitor's size, asked once: for "display" and the lists of the in-game menu.
-    display = None
-    if not title_id or title_id in graphics_options.GENERATED_TITLES:
-        display = display_info.display_size(env)
+    display = display_info.display_size(env) if generates else None
     # A size in gow3.ini that nobody provides is a resolution of this start: the options and the game keep it.
     custom = custom_resolution(launch, mod_sizes, own, title_id)
     if custom:
@@ -281,7 +280,7 @@ def main():
         derived.append('GOW3_RENDER_SIZE')
     # Below the game's own size the race is drawn at the output size (1280 x 720); otherwise the output
     # follows the render resolution. WipEout only: gow3.ini's output_res is not used there any more.
-    if not title_id or title_id in graphics_options.GENERATED_TITLES:
+    if generates:
         low = graphics_options.output_size(graphics_options.startup_options(launch, extra_resolutions), display)
         env['GOW3_OUTPUT_SIZE'] = f'{low[0]}x{low[1]}' if low else '1920x1080'
         derived.append('GOW3_OUTPUT_SIZE')
@@ -294,8 +293,7 @@ def main():
         print('Graphics: the last restart never reached the game; previous options restored', flush=True)
     env.update(graphics_options.environment(graphics))
     env['GOW3_RESOLUTION_LIST'], env['GOW3_RENDER_SCALES'] = menu_lists(
-        own, extra_resolutions, display, graphics['render_resolution'],
-        not title_id or title_id in graphics_options.GENERATED_TITLES)
+        own, extra_resolutions, display, graphics['render_resolution'], generates)
     derived += ['GOW3_RESOLUTION_LIST', 'GOW3_RENDER_SCALES']
     if not env.get('GOW3_FSR411_DIR') and not (PORT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
         env['GOW3_FSR411_DIR'] = str(data / 'fsr4_411')

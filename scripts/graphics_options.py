@@ -337,15 +337,30 @@ def display_label(size):
 LOW_OUTPUT = (1280, 720)  # the game's output size below its own 1920 x 1080 (gow3_settings.h OutputWidths)
 
 
+def base_size(name, display):
+    """The size a render resolution stands for before the scale: the monitor's, made even, for "display"
+    (None while it is unknown), else the size of the name."""
+    if name == DISPLAY:
+        return (display[0] & ~1, display[1] & ~1) if display else None
+    return resolution_size(name)
+
+
+def shown_size(name, display):
+    """The size the lists show for a render resolution, and the one Resolution scale multiplies: as
+    base_size, with "display" on a small screen at the size the race is drawn at (display_render_size)."""
+    if name == DISPLAY:
+        return display_render_size(display) if display else None
+    return resolution_size(name)
+
+
 def output_size(options, display):
     """LOW_OUTPUT when the options ask for less than the game's own 1920 x 1080 (720p, a Steam Deck's or a
     small laptop's screen), else None. A resolution patch cannot go below the game's own size (its buffers
     stay 1920 x 1080); its output size can: the race is drawn at 1280 x 720, the HUD and menus stay sharp."""
-    name, scale = options['render_resolution'], int(options['render_scale'])
-    base = ((display[0] & ~1, display[1] & ~1) if display else None) if name == DISPLAY else resolution_size(name)
+    base = base_size(options['render_resolution'], display)
     if not base:
         return None
-    width, height = scaled_size(base, scale)
+    width, height = scaled_size(base, int(options['render_scale']))
     return LOW_OUTPUT if width < MIN_GENERATED[0] or height < MIN_GENERATED[1] else None
 
 
@@ -369,8 +384,7 @@ def render_size(options, display):
         return SIZES['native']  # the game's own buffers; output_size draws the race smaller
     if name != DISPLAY and scale == 100:
         return None
-    base = ((display[0] & ~1, display[1] & ~1) if display else None) if name == DISPLAY else resolution_size(name)
-    base = base or SIZES['native']
+    base = base_size(name, display) or SIZES['native']
     fits = lambda size: size[0] <= MAX_GENERATED[0] and size[1] <= MAX_GENERATED[1]
     sizes = (scaled_size(base, p) for p in sorted(RENDER_SCALES, reverse=True) if p <= scale)
     size = next((s for s in sizes if fits(s)), SIZES['native'])

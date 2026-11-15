@@ -2316,42 +2316,43 @@ class Launcher:
         hz = str(display_info.this_refresh() or '')
         return [(value, (_('{} · refresh rate').format(text[0]),) if value == hz else text) for value, text in FPS_LIMITS]
 
+    def linked_var(self, name, shown, chosen, *sources):
+        """The variable of a list that is not a setting itself (kept as self.<name>, made once): it shows
+        `shown()` of the saved `sources` and follows them; choosing an entry calls `chosen(value)`, which
+        sets the sources. A choice the sources do not take is put back."""
+        if getattr(self, name, None) is None:
+            var = self.tk.StringVar(value=shown())
+
+            def follow(*_args):
+                if var.get() != shown():
+                    var.set(shown())
+
+            def choose(*_args):
+                chosen(var.get())
+                follow()
+            var.trace_add('write', choose)
+            for source in sources:
+                source.trace_add('write', follow)
+            setattr(self, name, var)
+        return getattr(self, name)
+
     def sharpening_var(self):
-        """Sharpening, not saved itself: Off is the game's RCAS switch off, a percent turns it on at that
-        strength. A strength the list lacks (set in the game) is shown as it is."""
-        if getattr(self, 'sharpening', None) is None:
-            on, strength = self.var('rcas', 'ini'), self.var('rcas_strength', 'ini')
-            shown = lambda: str(strength.get()) if on.get() else '0'
-            self.sharpening = choice = self.tk.StringVar(value=shown())
+        """Sharpening: Off is the game's RCAS switch off, a percent turns it on at that strength. A strength
+        the list lacks (set in the game) is shown as it is."""
+        on, strength = self.var('rcas', 'ini'), self.var('rcas_strength', 'ini')
 
-            def chosen(*_a):
-                value = choice.get()
-                if value == '0':
-                    if on.get():
-                        on.set(False)
-                    return
-                if not on.get():
-                    on.set(True)
-                if str(strength.get()) != value:
-                    strength.set(value)
-
-            def followed(*_a):
-                if choice.get() != shown():
-                    choice.set(shown())
-            choice.trace_add('write', chosen)
-            on.trace_add('write', followed)
-            strength.trace_add('write', followed)
-        return self.sharpening
+        def chosen(value):
+            if on.get() != (value != '0'):
+                on.set(value != '0')
+            if value != '0' and str(strength.get()) != value:
+                strength.set(value)
+        return self.linked_var('sharpening', lambda: str(strength.get()) if on.get() else '0', chosen, on, strength)
 
     def graphics_mode_var(self):
-        """The Graphics mode row over the ps4_pro switch (not saved itself)."""
-        if getattr(self, 'graphics_mode', None) is None:
-            pro = self.var('ps4_pro', 'app')
-            self.graphics_mode = mode = self.tk.StringVar(value='pro' if pro.get() else 'ps4')
-            mode.trace_add('write', lambda *_a: pro.get() == (mode.get() == 'pro') or pro.set(mode.get() == 'pro'))
-            pro.trace_add('write', lambda *_a: mode.get() == ('pro' if pro.get() else 'ps4') or
-                          mode.set('pro' if pro.get() else 'ps4'))
-        return self.graphics_mode
+        """The Graphics mode row over the ps4_pro switch."""
+        pro = self.var('ps4_pro', 'app')
+        return self.linked_var('graphics_mode', lambda: 'pro' if pro.get() else 'ps4',
+                               lambda value: pro.get() == (value == 'pro') or pro.set(value == 'pro'), pro)
 
     def upscaler_options(self):
         """The Upscaling list; DLSS once NVIDIA's runtime is installed (asked again when it opens)."""
@@ -2374,74 +2375,48 @@ class Launcher:
         return self.var('experimental_upscaler', 'app'), self.var('upscaler', 'ini')
 
     def upscaler_var(self):
-        """Upscaling, not saved itself: FSR 3.1 or DLSS turns the switch on with that method; Off leaves
-        anti-aliasing to the Anti-aliasing row. It follows the two settings and sets them."""
-        if getattr(self, 'upscaler_choice', None) is None:
-            switch, method = self.temporal_vars()
-            shown = lambda: method.get() if switch.get() and method.get() != 'off' else 'off'
-            self.upscaler_choice = choice = self.tk.StringVar(value=shown())
+        """Upscaling: FSR 3.1 or DLSS turns the switch on with that method; Off leaves anti-aliasing to the
+        Anti-aliasing row."""
+        switch, method = self.temporal_vars()
 
-            def chosen(*_a):
-                value = choice.get()
-                if value == 'off':
-                    if switch.get() and method.get() != 'off':
-                        # Back to the game's own anti-aliasing, as a PC game turns its upscaler off.
-                        switch.set(False)
-                    return
-                was_off = not switch.get() or method.get() == 'off'
-                if not switch.get():
-                    switch.set(True)
-                if method.get() != value:
-                    method.set(value)
-                preset = self.var('preset', 'ini')
-                if was_off and preset.get() == '0':
-                    # Turned on from Off: at Quality, as games turn DLSS and FSR on, for more FPS straight
-                    # away; Native AA stays a choice.
-                    preset.set('1')
-
-            def followed(*_a):
-                if choice.get() != shown():
-                    choice.set(shown())
-            choice.trace_add('write', chosen)
-            switch.trace_add('write', followed)
-            method.trace_add('write', followed)
-        return self.upscaler_choice
+        def chosen(value):
+            if value == 'off':
+                if switch.get() and method.get() != 'off':
+                    switch.set(False)  # back to the game's own anti-aliasing, as a PC game turns its upscaler off
+                return
+            was_off = not switch.get() or method.get() == 'off'
+            if not switch.get():
+                switch.set(True)
+            if method.get() != value:
+                method.set(value)
+            preset = self.var('preset', 'ini')
+            if was_off and preset.get() == '0':
+                # Turned on from Off: at Quality, as games turn DLSS and FSR on, for more FPS straight
+                # away; Native AA stays a choice.
+                preset.set('1')
+        return self.linked_var('upscaler_choice', lambda: method.get() if switch.get() and method.get() != 'off' else 'off',
+                               chosen, switch, method)
 
     def anti_aliasing_var(self):
-        """Anti-aliasing, not saved itself: the game's own multisampling (the switch off) or none (the switch
-        on with no method). While an upscaler runs it shows that upscaler and does nothing."""
-        if getattr(self, 'anti_aliasing', None) is None:
-            switch, method = self.temporal_vars()
-            shown = lambda: 'msaa' if not switch.get() else method.get()
-            self.anti_aliasing = aa = self.tk.StringVar(value=shown())
+        """Anti-aliasing: the game's own multisampling (the switch off) or none (the switch on with no
+        method). While an upscaler runs it shows that upscaler and a choice does nothing."""
+        switch, method = self.temporal_vars()
 
-            def chosen(*_a):
-                value = aa.get()
-                if switch.get() and method.get() != 'off':
-                    if value != method.get():
-                        aa.set(method.get())  # an upscaler runs: the row only shows it
-                    return
-                if value == 'msaa' and switch.get():
-                    switch.set(False)
-                elif value == 'off' and not switch.get():
-                    method.set('off')
-                    switch.set(True)
-
-            def followed(*_a):
-                if aa.get() != shown():
-                    aa.set(shown())
-            aa.trace_add('write', chosen)
-            switch.trace_add('write', followed)
-            method.trace_add('write', followed)
-        return self.anti_aliasing
+        def chosen(value):
+            if switch.get() and method.get() != 'off':
+                return  # an upscaler runs: the row only shows it
+            if value == 'msaa' and switch.get():
+                switch.set(False)
+            elif value == 'off' and not switch.get():
+                method.set('off')
+                switch.set(True)
+        return self.linked_var('anti_aliasing', lambda: method.get() if switch.get() else 'msaa', chosen, switch, method)
 
     def render_scale_options(self):
         """The Resolution scale list: 100, 150 and 200 % while the result stays within 7680 × 4320; 100 %
         alone for a game without "display" (run.py scales WipEout only)."""
         name = self.var('render_resolution', 'ini').get()
-        monitor = display_info.this_display()
-        base = (graphics_options.display_render_size(monitor) if monitor else None) \
-            if name == graphics_options.DISPLAY else graphics_options.resolution_size(name)
+        base = graphics_options.shown_size(name, display_info.this_display())
         offered = graphics_options.DISPLAY in self.game_resolution_names()
         return [(value, (label,)) for value, label in graphics_options.render_scale_choices(base, offered)]
 
