@@ -792,8 +792,6 @@ SHARPENING = [('0', ('Off',)), ('25', ('25 %',)), ('50', ('50 %',)), ('75', ('75
 GRAPHICS_INI_KEYS = ('display_mode', 'render_resolution', 'render_scale', 'fps_limit', 'vsync', 'upscaler', 'preset',
                      'dlss_preset', 'rcas', 'rcas_strength', 'anisotropy')
 GRAPHICS_APP_KEYS = ('hdr', 'experimental_upscaler', 'texture_limit', 'ps4_pro')
-OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
-           ('2560x1440', ('2560 × 1440',)), ('3840x2160', ('3840 × 2160 (4K)',))]
 LIVE = [('auto', ('Auto (by graphics card)', 'Авто (по видеокарте)')), ('0', ('Off (faster)', 'Выключена (быстрее)')),
         ('1', ('On (change without restarting)', 'Включена (без перезапуска)'))]
 # (PS4 system language ID, name, regions): the game's own table (eboot.bin 0x9B89A0) only takes a
@@ -3229,10 +3227,8 @@ class Launcher:
         ttk.Label(holder, text=f'v{VERSION}', style='Muted.TLabel').pack(side='left', padx=self.px(10))
         if not WINDOWS:
             self.build_linux_options(f)
-        self.gap(f)
-        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('Below 1920 × 1080: the size of the game\'s picture (the Steam Deck uses 1280 × 720). From '
-                   '1920 × 1080 up it follows Graphics > Resolution.'), restart=True)
+        # No Output resolution row: in WipEout every output from 1920 × 1080 up follows the Resolution, and
+        # the one that matters, 1280 × 720 on the Steam Deck, is set by itself (load_ini, write_deck_defaults).
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((6, 0)))
