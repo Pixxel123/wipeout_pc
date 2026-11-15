@@ -142,7 +142,8 @@ def resolution_choices(names, monitor, keep=()):
     """[(name, label)] of the Resolution list as a PC game lists it: "display" first (when `names` has it),
     labelled with the size it renders at on this monitor, then the other sizes largest first. A size equal
     to that one or larger is left out (Resolution scale goes above the monitor), except the game's own
-    1920 x 1080 ("native"), listed on a smaller screen too (a Steam Deck). The `keep` names (the saved
+    1920 x 1080 ("native"), listed on a smaller screen too (a Steam Deck); so is a size of another shape
+    than the monitor's, unless it is 16:9 (the game's own shape). The `keep` names (the saved
     one) are always listed, also a size `names` lacks, except a size equal to the monitor's entry: that
     entry stands for it, so no size shows twice. An unknown `monitor` (None) leaves every size in."""
     shown = display_render_size(monitor) if monitor and DISPLAY in names else None
@@ -154,7 +155,11 @@ def resolution_choices(names, monitor, keep=()):
             return True
         if size == shown:
             return False  # the monitor's entry is that size: listed once, also when it is the saved one
-        return name in keep or name == 'native' or (size[0] <= shown[0] and size[1] <= shown[1])
+        if name in keep or name == 'native':
+            return True
+        # As a PC game: sizes of the monitor's own shape and 16:9 ones (the game's own), not every shape.
+        fits = size[0] <= shown[0] and size[1] <= shown[1]
+        return fits and aspect_name(*size) in (aspect_name(*monitor), '16:9')
 
     def largest_first(name):
         size = resolution_size(name)

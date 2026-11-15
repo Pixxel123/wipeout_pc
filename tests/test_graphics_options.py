@@ -205,6 +205,19 @@ class GraphicsOptionsTest(unittest.TestCase):
         # A game without "display" (God of War III): every size, largest first.
         self.assertEqual(values(g.resolution_choices(['native', '720p', '4K'], (2560, 1440))), ['4K', 'native', '720p'])
 
+    def test_the_list_keeps_to_the_monitors_shape_and_16x9(self):
+        names = ['display', 'native', '720p', '1440p', '4K', '2560x1080', '3440x1440', '3840x1600', '1920x1200',
+                 '2560x1600', '1920x1440']
+        labels = lambda monitor, keep=(): [label for _n, label in g.resolution_choices(names, monitor, keep)]
+        # 16:9: no ultrawide, 16:10 or 4:3 sizes (they would show with bars).
+        self.assertEqual(labels((3840, 2160)), ['3840 × 2160', '2560 × 1440', '1920 × 1080', '1280 × 720'])
+        # Ultrawide: its own shape and 16:9.
+        self.assertEqual(labels((3440, 1440)), ['3440 × 1440', '2560 × 1440', '2560 × 1080', '1920 × 1080', '1280 × 720'])
+        # 16:10: its own shape and 16:9.
+        self.assertEqual(labels((2560, 1600)), ['2560 × 1600', '2560 × 1440', '1920 × 1200', '1920 × 1080', '1280 × 720'])
+        # A saved size of another shape stays.
+        self.assertIn('1920 × 1440', labels((3840, 2160), keep=('1920x1440',)))
+
     def test_resolution_scale_list_stays_within_8k(self):
         # Above 100 % the label says the size it renders at, marked past 3840 × 2160 (video memory).
         self.assertEqual(g.render_scale_choices((2560, 1440)),
