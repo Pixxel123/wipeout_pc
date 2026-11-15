@@ -205,7 +205,10 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertEqual(values(g.resolution_choices(['native', '720p', '4K'], (2560, 1440))), ['4K', 'native', '720p'])
 
     def test_resolution_scale_list_stays_within_8k(self):
-        self.assertEqual(g.render_scale_choices((2560, 1440)), [('100', '100 %'), ('150', '150 %'), ('200', '200 %')])
+        # Above 100 % the label says the size it renders at, marked past 3840 × 2160 (video memory).
+        self.assertEqual(g.render_scale_choices((2560, 1440)),
+                         [('100', '100 %'), ('150', '150 % · 3840 × 2160'), ('200', '200 % · 5120 × 2880  ⚠')])
+        self.assertEqual(g.render_scale_choices(None)[1], ('150', '150 %'))  # an unknown size: the percent
         self.assertEqual([p for p, _l in g.render_scale_choices((5120, 2880))], ['100', '150'])
         self.assertEqual([p for p, _l in g.render_scale_choices((7680, 4320))], ['100'])
         self.assertEqual(len(g.render_scale_choices(None)), 3)

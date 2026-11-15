@@ -163,16 +163,28 @@ def resolution_choices(names, monitor, keep=()):
     return [(n, display_label(shown) if n == DISPLAY else resolution_label(n)) for n in first + rest]
 
 
+HEAVY_ABOVE = (3840, 2160)  # a render size past this on either side needs more than 8 GB of video memory
+HEAVY_MARK = '  ⚠'
+
+
 def render_scale_choices(base, offered=True):
     """[(percent, label)] of the Resolution scale list: the RENDER_SCALES whose size for `base` (the
     resolution's size, None when unknown) stays within MAX_GENERATED; 100 % alone for a game that has no
-    render scale (`offered` False)."""
+    render scale (`offered` False). Above 100 % the label says the size it renders at, '150 % · 3840 × 2160',
+    and HEAVY_MARK past HEAVY_ABOVE."""
     def fits(percent):
         if not base:
             return True
         width, height = scaled_size(base, percent)
         return width <= MAX_GENERATED[0] and height <= MAX_GENERATED[1]
-    return [(str(p), f'{p} %') for p in RENDER_SCALES if p == 100 or (offered and fits(p))]
+
+    def label(percent):
+        if not base or percent == 100:
+            return f'{percent} %'
+        width, height = scaled_size(base, percent)
+        heavy = width > HEAVY_ABOVE[0] or height > HEAVY_ABOVE[1]
+        return f'{percent} % · {width} × {height}' + (HEAVY_MARK if heavy else '')
+    return [(str(p), label(p)) for p in RENDER_SCALES if p == 100 or (offered and fits(p))]
 
 
 def startup_options(ini, extra=()):
