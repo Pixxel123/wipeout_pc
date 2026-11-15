@@ -189,9 +189,9 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertEqual(unknown[0], ('display', 'Display'))
         self.assertEqual(values(unknown)[1:4], ['5120x2880', '4K', '3440x1440'])
         # A monitor smaller than the game's own size: "display" draws the race at 1280 × 720 (the output size)
-        # and says so; larger sizes are Resolution scale's (150 % is 1920 × 1080).
+        # and says so; the game's own 1920 × 1080 stays listed there, the larger sizes are Resolution scale's.
         deck = g.resolution_choices(names, (1280, 800))
-        self.assertEqual(deck, [('display', '1280 × 720')])
+        self.assertEqual(deck, [('display', '1280 × 720'), ('native', '1920 × 1080')])
         # A saved size the list lacks is added; anything that is no size is not.
         self.assertIn(('3000x1700', '3000 × 1700'), g.resolution_choices(names, (3440, 1440), keep=('3000x1700',)))
         self.assertEqual(len(g.resolution_choices(names, (3440, 1440), keep=('bogus',))), 5)

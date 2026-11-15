@@ -121,7 +121,8 @@ Two keys of `gow3.ini` use it; `run.py` works the size out at every start and lo
 
 In the launcher (**Graphics**) and the in-game menu they are **Resolution** and **Resolution scale**, listed as a PC
 game lists them: plain sizes, the monitor's own size first (`display`), then the others largest first. Sizes
-equal to the monitor's or larger are left out, since Resolution scale goes above the monitor. A saved size stays
+equal to the monitor's or larger are left out, since Resolution scale goes above the monitor, except the
+game's own 1920 × 1080, which a smaller screen (a Steam Deck) lists too. A saved size stays
 listed. A new install starts at `display`; God of War III has no `display` and starts at its own 1920 × 1080.
 
 - A size with a hand-made entry uses that entry (a 2560 × 1440 monitor runs "Resolution Patch - 1440p").

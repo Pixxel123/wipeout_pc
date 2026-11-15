@@ -206,9 +206,9 @@ class DisplayResolutionTest(unittest.TestCase):
         self.assertEqual(rows[:3], ['display=3440 × 1440', '1440p=2560 × 1440', '2560x1080=2560 × 1080'])
         self.assertNotIn('4K=3840 × 2160', rows)  # larger than the monitor
         self.assertEqual(scales, '100;150;200')
-        # The Steam Deck: "display" draws the race at 1280 × 720 there, and says so; 1080p is 150 %.
+        # The Steam Deck: "display" draws the race at 1280 × 720 there, and says so; the game's own size stays.
         resolutions, scales = run.menu_lists(OWN, self.EXTRA, (1280, 800), 'display', True)
-        self.assertEqual(resolutions.split(';'), ['display=1280 × 720'])
+        self.assertEqual(resolutions.split(';'), ['display=1280 × 720', 'native=1920 × 1080'])
         self.assertEqual(scales, '100;150;200')
         # A saved size above the monitor stays; its scales stop at 7680 × 4320.
         resolutions, scales = run.menu_lists(OWN, self.EXTRA, (3440, 1440), '5120x2880', True)
