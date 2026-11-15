@@ -225,5 +225,42 @@ class DisplayResolutionTest(unittest.TestCase):
             self.assertEqual((names, files), (['Resolution Patch - 4K'], []))
 
 
+class RenderPlanTest(unittest.TestCase):
+    """run.render_plan: what gow3.ini's render options come to at one start."""
+    EXTRA = [s for s in OWN if s not in g.RESOLUTIONS]
+
+    def plan(self, ini, display, title_id='CUSA07671'):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = run.render_plan(ini, self.EXTRA, [], OWN, display, Path(directory), title_id)
+            return plan._replace(patch_files=[f.name for f in plan.patch_files])
+
+    def test_a_named_size_is_left_to_gow3_ini(self):
+        plan = self.plan({'render_resolution': '1440p'}, (3440, 1440))
+        self.assertEqual(plan, run.RenderPlan([], [], None, {'GOW3_OUTPUT_SIZE': '1920x1080'}))
+
+    def test_display_with_a_hand_made_size(self):
+        plan = self.plan({'render_resolution': 'display'}, (3440, 1440))
+        self.assertEqual(plan, run.RenderPlan([], [], '3440x1440',
+                                              {'GOW3_RENDER_SIZE': '3440x1440', 'GOW3_OUTPUT_SIZE': '1920x1080'}))
+
+    def test_display_scaled_to_a_size_nobody_has(self):
+        plan = self.plan({'render_resolution': 'display', 'render_scale': '150'}, (3440, 1440))
+        self.assertEqual((plan.applied, plan.patch_files), ('5160x2160', ['generated-resolution.xml']))
+        self.assertEqual(plan.variables['GOW3_RENDER_SIZE'], '5160x2160')
+
+    def test_a_size_in_gow3_ini_nobody_provides(self):
+        plan = self.plan({'render_resolution': '2256x1504'}, None)
+        self.assertEqual((plan.names, plan.applied, plan.patch_files), (['2256x1504'], None, ['generated-resolution.xml']))
+
+    def test_a_steam_deck_draws_the_race_at_720p(self):
+        plan = self.plan({'render_resolution': 'display'}, (1280, 800))
+        self.assertEqual(plan, run.RenderPlan([], [], 'native',
+                                              {'GOW3_RENDER_SIZE': '1920x1080', 'GOW3_OUTPUT_SIZE': '1280x720'}))
+
+    def test_another_game_gets_nothing(self):
+        plan = self.plan({'render_resolution': 'display', 'render_scale': '150'}, None, title_id='CUSA01623')
+        self.assertEqual(plan, run.RenderPlan([], [], None, {}))
+
+
 if __name__ == '__main__':
     unittest.main()

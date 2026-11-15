@@ -7,6 +7,7 @@ GOW3_USER_DIR, ...). Extra arguments go to gow3-probe.
 The in-game "Apply and restart" runs this script again through GOW3_RESTART_COMMAND;
 `--after PID` waits for the previous game process to end first (its GPU device and memory).
 """
+import collections
 import os
 from pathlib import Path
 import shlex
@@ -174,11 +175,11 @@ def custom_resolution(ini, mod_sizes, own_sizes, title_id=None):
 def generated_resolution_files(ini, mod_sizes, own_sizes, out, title_id=None):
     """A custom_resolution gets a generated patch file: ([file], [size]) to feed the mod-patch path, or
     ([], [])."""
-    import resolution_patch
     custom = custom_resolution(ini, mod_sizes, own_sizes, title_id)
     if not custom:
         return [], []
     value, size = custom
+    import resolution_patch
     path = resolution_patch.resolution_patch_xml(*size, Path(out) / 'generated-resolution.xml', name=value)
     print(f'Patches: render resolution {value} generated ({path.name})', flush=True)
     return [path], [value]
@@ -199,6 +200,34 @@ def session_render_size(ini, extra, display, title_id=None):
             else options['render_resolution']
         print(f'Render resolution: {source} at {options["render_scale"]} % -> {size[0]}x{size[1]}', flush=True)
     return size
+
+
+RenderPlan = collections.namedtuple('RenderPlan', 'names patch_files applied variables')
+
+
+def render_plan(launch, extra, mod_sizes, own_sizes, display, out, title_id=None):
+    """What gow3.ini's render options (`launch`) come to at this start; gow3.ini keeps the choice.
+    names: a size in gow3.ini that nobody provides, for the options and the game to accept ([] or [name]).
+    patch_files: the generated resolution patch, when the size has no hand-made one ([] or [file]).
+    applied: the resolution name the patches follow instead of gow3.ini's, when "display" or a render scale
+    came to a size (a hand-made name, else "<width>x<height>"); None: gow3.ini's own.
+    variables: GOW3_RENDER_SIZE (with `applied`) and, for WipEout, GOW3_OUTPUT_SIZE: 1280x720 draws the race
+    below the game's own 1920x1080, where no resolution patch reaches; 1920x1080 follows the render resolution."""
+    import graphics_options
+    generates = not title_id or title_id in graphics_options.GENERATED_TITLES
+    custom = custom_resolution(launch, mod_sizes, own_sizes, title_id)
+    names = [custom[0]] if custom else []
+    size = session_render_size(launch, [*extra, *names], display, title_id)
+    applied = graphics_options.size_name(*size) if size else None
+    patch_files, _names = generated_resolution_files(
+        {'render_resolution': applied} if applied else launch, mod_sizes, own_sizes, out, title_id)
+    variables = {'GOW3_RENDER_SIZE': f'{size[0]}x{size[1]}'} if size else {}
+    if generates:
+        low = graphics_options.output_size(graphics_options.startup_options(launch, [*extra, *names]), display)
+        variables['GOW3_OUTPUT_SIZE'] = f'{low[0]}x{low[1]}' if low else '1920x1080'
+        if low:
+            print(f'Output: {low[0]}x{low[1]} (the race below the game\'s own 1920x1080)', flush=True)
+    return RenderPlan(names, patch_files, applied, variables)
 
 
 def menu_lists(own_sizes, extra, display, resolution, scaled):
@@ -261,31 +290,14 @@ def main():
             graphics_options.write_keys(env['GOW3_CONFIG'], {'render_resolution': '720p'})
             print('Graphics: the 1280x720 output is the 1280 x 720 resolution now', flush=True)
     launch = graphics_options.launch_ini(env['GOW3_CONFIG'], out / 'graphics_state.json')
-    mod_sizes = patches.resolution_names(mod_patch_files)
     # The monitor's size, asked once: for "display" and the lists of the in-game menu.
     display = display_info.display_size(env) if generates else None
-    # A size in gow3.ini that nobody provides is a resolution of this start: the options and the game keep it.
-    custom = custom_resolution(launch, mod_sizes, own, title_id)
-    if custom:
-        extra_resolutions.append(custom[0])
-    # "display" (the monitor's size) and a render scale come to a size here, at every start; gow3.ini keeps
-    # the choice. That size runs as the resolution of its name: a hand-made one, else generated below.
-    render_size = session_render_size(launch, extra_resolutions, display, title_id)
-    applied = graphics_options.size_name(*render_size) if render_size else None
-    generated_files, _names = generated_resolution_files(
-        {'render_resolution': applied} if applied else launch, mod_sizes, own, out, title_id)
-    mod_patch_files += generated_files
-    if render_size:
-        env['GOW3_RENDER_SIZE'] = f'{render_size[0]}x{render_size[1]}'
-        derived.append('GOW3_RENDER_SIZE')
-    # Below the game's own size the race is drawn at the output size (1280 x 720); otherwise the output
-    # follows the render resolution. WipEout only: gow3.ini's output_res is not used there any more.
-    if generates:
-        low = graphics_options.output_size(graphics_options.startup_options(launch, extra_resolutions), display)
-        env['GOW3_OUTPUT_SIZE'] = f'{low[0]}x{low[1]}' if low else '1920x1080'
-        derived.append('GOW3_OUTPUT_SIZE')
-        if low:
-            print(f'Output: {low[0]}x{low[1]} (the race below the game\'s own 1920x1080)', flush=True)
+    plan = render_plan(launch, extra_resolutions, patches.resolution_names(mod_patch_files), own, display, out, title_id)
+    extra_resolutions += plan.names
+    mod_patch_files += plan.patch_files
+    applied = plan.applied
+    env.update(plan.variables)
+    derived += list(plan.variables)
     env['GOW3_EXTRA_RESOLUTIONS'] = ';'.join(extra_resolutions)
     derived.append('GOW3_EXTRA_RESOLUTIONS')
     graphics, reverted = graphics_options.prepare(env['GOW3_CONFIG'], out / 'graphics_state.json', extra_resolutions)
