@@ -390,6 +390,18 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertEqual(display_info.xrandr_primary_size(xrandr.replace(' primary', '')), (2560, 1440))
         self.assertIsNone(display_info.xrandr_primary_size(''))
 
+    def test_display_refresh_is_said_or_read(self):
+        self.assertEqual(display_info.display_refresh({'GOW3_DISPLAY_HZ': '165'}), 165)
+        xrandr = ('Screen 0: minimum 320 x 200, current 6000 x 1440, maximum 16384 x 16384\n'
+                  'DP-1 connected 2560x1440+3440+0 (normal left inverted right x axis y axis) 597mm x 336mm\n'
+                  '   2560x1440     59.95*+  144.00\n'
+                  'DP-2 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 800mm x 335mm\n'
+                  '   3440x1440     59.97 +  164.90*   144.00\n'
+                  '   2560x1440     59.95\n')
+        self.assertEqual(display_info.xrandr_primary_refresh(xrandr), 165)
+        self.assertEqual(display_info.xrandr_primary_refresh(xrandr.replace(' primary', '')), 60)
+        self.assertIsNone(display_info.xrandr_primary_refresh(''))
+
     def test_display_has_a_short_label(self):
         self.assertEqual(g.display_label((3440, 1440)), '3440 × 1440')
         self.assertEqual(g.display_label(None), 'Display')

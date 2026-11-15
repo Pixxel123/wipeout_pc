@@ -40,6 +40,45 @@ def this_display():
     return display_size()
 
 
+def display_refresh(env=None):
+    """The primary monitor's refresh rate in whole Hz, or None when it cannot be told. GOW3_DISPLAY_HZ says
+    it instead."""
+    env = os.environ if env is None else env
+    said = env.get('GOW3_DISPLAY_HZ', '')
+    if said.isdigit() and int(said) > 0:
+        return int(said)
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            mode = ctypes.create_string_buffer(220)  # DEVMODEW
+            ctypes.c_uint16.from_buffer(mode, 68).value = 220  # dmSize
+            if not ctypes.windll.user32.EnumDisplaySettingsW(None, -1, mode):  # ENUM_CURRENT_SETTINGS
+                return None
+            hz = ctypes.c_uint32.from_buffer(mode, 184).value  # dmDisplayFrequency
+            return hz if hz > 1 else None
+        host = {k: v for k, v in env.items() if k not in ('LD_LIBRARY_PATH', 'PYTHONHOME', 'PYTHONPATH')}
+        text = subprocess.run(['xrandr', '--current'], capture_output=True, text=True, timeout=3, env=host).stdout
+    except (OSError, AttributeError, subprocess.SubprocessError):
+        return None
+    return xrandr_primary_refresh(text)
+
+
+def xrandr_primary_refresh(text):
+    """The current mode's rate (the one marked *) of the primary monitor in `xrandr --current` output, in
+    whole Hz (59.95 -> 60), or None."""
+    blocks = re.split(r'\n(?=\S)', text)
+    block = next((b for b in blocks if ' connected primary ' in b), None) or \
+        next((b for b in blocks if ' connected ' in b), None)
+    found = re.search(r'([0-9]+(?:\.[0-9]+)?)\*', block or '')
+    return round(float(found.group(1))) if found else None
+
+
+@functools.lru_cache(maxsize=1)
+def this_refresh():
+    """display_refresh(), asked once per process."""
+    return display_refresh()
+
+
 def xrandr_primary_size(text):
     """The primary monitor's size in `xrandr --current` output (the first connected one when none is
     primary), or None."""

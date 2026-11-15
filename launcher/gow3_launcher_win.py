@@ -421,9 +421,9 @@ def heading_font(size, fallback=None, every_language=False):
 # launcher's own settings.json (passed to run.py as environment variables).
 
 INI_FLAGS = {'cheat_double_jumps', 'cheat_very_hard', 'object_motion', 'show_fps', 'vsync', 'async_shaders', 'deferred_readback',
-             'stale_readback', 'music', 'music_shuffle', 'music_continue'}
+             'stale_readback', 'music', 'music_shuffle', 'music_continue', 'rcas'}
 # The graphics keys are also in the in-game menu (Insert / R3+L2); run.py reads the startup ones.
-INI_DEFAULTS = {'upscaler': 'fsr3', 'preset': '0', 'dlss_preset': '0',
+INI_DEFAULTS = {'upscaler': 'fsr3', 'preset': '0', 'dlss_preset': '0', 'rcas': '1', 'rcas_strength': '75',
                 'object_motion': '1', 'show_fps': '1', 'output_res': '1920x1080',
                 'live_resolution': 'auto', 'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
                 'async_shaders': '1', 'deferred_readback': '1', 'stale_readback': '1',
@@ -786,6 +786,12 @@ PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('B
 # The upscaling choice of the Anti-aliasing section (#51): the scene at 1/x of the render
 # resolution per axis, scaled up by FSR 3.1 or DLSS; the HUD stays at full size.
 UPSCALE_PRESETS = [('0', ('Native AA',)), ('1', ('Quality',)), ('2', ('Balanced',)), ('3', ('Performance',))]
+# The Sharpening row: the game's RCAS switch and strength as one choice (sharpening_var).
+SHARPENING = [('0', ('Off',)), ('25', ('25 %',)), ('50', ('50 %',)), ('75', ('75 % (default)',)), ('100', ('100 %',))]
+# What Restore defaults on the Graphics page puts back (applied on Save, like any change).
+GRAPHICS_INI_KEYS = ('display_mode', 'render_resolution', 'render_scale', 'fps_limit', 'vsync', 'upscaler', 'preset',
+                     'dlss_preset', 'rcas', 'rcas_strength', 'anisotropy')
+GRAPHICS_APP_KEYS = ('hdr', 'experimental_upscaler', 'texture_limit', 'ps4_pro')
 OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
            ('2560x1440', ('2560 × 1440',)), ('3840x2160', ('3840 × 2160 (4K)',))]
 LIVE = [('auto', ('Auto (by graphics card)', 'Авто (по видеокарте)')), ('0', ('Off (faster)', 'Выключена (быстрее)')),
@@ -1990,7 +1996,6 @@ class Launcher:
         bar.pack(fill='x', side='bottom')
         bar.pack_propagate(False)
         self.status = tk.Label(bar, text='', bg=BG, fg=MUTED, font=self.font(UI_FONT, 10), anchor='w', justify='left')
-        self.status.pack(side='left', padx=self.px(24))
         self.play_button = ttk.Button(bar, text=_('PLAY', 'ИГРАТЬ'), style='Play.TButton', command=self.play)
         self.play_button.pack(side='right', padx=(self.px(10), self.px(24)), pady=self.px(11))
         self.save_button = ttk.Button(bar, text=_('Save', 'Сохранить'), command=self.save, state='disabled')
@@ -1999,6 +2004,10 @@ class Launcher:
             ttk.Button(bar, text=_('Check for updates', 'Проверить обновления'),
                        command=lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
                        ).pack(side='right', padx=self.px((0, 6)), pady=self.px(11))
+        # Packed after the bar's buttons, the status takes the room they leave and wraps to it: a setting's
+        # help line (hover_hint) can be longer than one line of the bar.
+        self.status.pack(side='left', fill='x', expand=True, padx=self.px((24, 12)))
+        self.status.bind('<Configure>', lambda e: self.status.configure(wraplength=max(self.px(200), e.width - 4)))
         self.content = tk.Frame(right, bg=PANEL)
         self.content.pack(fill='both', expand=True)
 
@@ -2178,29 +2187,45 @@ class Launcher:
             return self.banner_image.subsample(factor) if factor > 1 else self.banner_image
 
     def build_graphics(self):
-        """The Graphics page in a PC game's order: display, upscaling, image quality. Only the choices whose
-        effect is not obvious keep their note on the page; the others show it in the status bar on hover."""
-        f = self.scrolled_page('graphics', _('Graphics', 'Графика'), _('How the game appears on your screen.'))
+        """The Graphics page in a PC game's order: display, upscaling, image quality. Each row's note shows
+        in the status bar while the pointer or the focus is on it, as a game's help line; only a warning
+        stays on the page."""
+        f = self.scrolled_page('graphics', _('Graphics', 'Графика'),
+                               _('Point at a setting, or move to it with the keyboard or gamepad, to see what it does.'))
         self.section(f, _('Display'), top=4)
         self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
                  _('Borderless covers the screen without changing the display mode.'), hover=True)
         self.row(f, _('Resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options),
                  _('The first size is your monitor\'s and follows it. Wider than 16:9 keeps the HUD at 16:9.'),
-                 restart=True)
+                 restart=True, hover=True)
         self.row(f, _('Resolution scale'), self.choice(f, 'render_scale', 'ini', self.render_scale_options),
-                 _('Above 100 % draws a larger picture and scales it down to the screen: sharper, slower. '
-                   '⚠ above 3840 × 2160: more than 8 GB of video memory.'), restart=True)
+                 _('Above 100 % draws a larger picture and scales it down to the screen: sharper, slower. With '
+                   'FSR 3.1 or DLSS on they draw below that size, as DLDSR with DLSS does.'), restart=True, hover=True)
         scale, resolution = self.var('render_scale', 'ini'), self.var('render_resolution', 'ini')
+        # The warning sits in a holder that keeps its grid row, so hiding it never lets the next row slide in.
+        holder = self.ttk.Frame(f)
+        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w')
+        heavy = self.ttk.Label(holder, text='', style='Warning.TLabel', wraplength=self.px(640), justify='left')
 
         def scale_fits(*_args):
             # A larger resolution can leave the chosen scale past 7680 × 4320: back to the largest that fits,
             # as run.py would render it, so the box never shows a scale the game does not use.
-            offered = [value for value, _text in self.render_scale_options()]
+            offered = dict(self.render_scale_options())
             if scale.get() not in offered:
-                scale.set(offered[-1])
+                scale.set(list(offered)[-1])
+                return
+            # The one note that stays on the page: a warning for a size past 3840 × 2160.
+            label = offered[scale.get()][0]
+            if label.endswith(graphics_options.HEAVY_MARK):
+                size = label.split(' · ')[-1].replace(graphics_options.HEAVY_MARK, '')
+                heavy.configure(text=_('⚠ {} needs more than 8 GB of video memory.').format(size))
+                heavy.pack(anchor='w', pady=self.px((4, 2)))
+            else:
+                heavy.pack_forget()
         resolution.trace_add('write', scale_fits)
         scale.trace_add('write', scale_fits)
-        self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', 'ini', FPS_LIMITS),
+        scale_fits()
+        self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', 'ini', self.frame_rate_options),
                  _("Unlimited: up to 240 FPS. With VSync on, your monitor's refresh rate is the highest it goes."),
                  hover=True)
         self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'), hover=True)
@@ -2212,19 +2237,22 @@ class Launcher:
         self.row(f, _('Upscaling'), self.choice(f, None, None, self.upscaler_options, var=upscaler),
                  _('FSR 3.1 and DLSS draw the race smaller and scale it up, smoothing edges from the game\'s own '
                    'motion vectors: more FPS. The HUD and menus stay sharp. Also in the game: Insert > Image.'),
-                 restart=True)
+                 restart=True, hover=True)
         if WINDOWS:
             self.build_dlss_row(f)
         preset = self.var('preset', 'ini')
-        quality = self.row(f, _('Quality'), self.choice(f, 'preset', 'ini', UPSCALE_PRESETS),
-                           _('Native AA keeps the full resolution and only smooths edges. Quality, Balanced and '
-                             'Performance draw the race at 67, 59 and 50 % of it for more FPS.'))
+        quality = self.row(f, _('Quality'), self.choice(f, 'preset', 'ini', self.quality_options),
+                           _('Native AA (DLAA with DLSS) keeps the full resolution and only smooths edges. Quality, '
+                             'Balanced and Performance draw the race at 67, 59 and 50 % of it for more FPS.'), hover=True)
         # Only DLSS has presets. The row (title, box) hides with another upscaler.
         first = self.next_row(f)
         self.row(f, _('DLSS preset'), self.choice(f, 'dlss_preset', 'ini', DLSS_PRESETS),
                  _('K is the driver\'s default. M and L are the newer second-generation models; L costs a few '
                    'percent more.'), restart=True, hover=True)
         preset_widgets = [w for r in range(first, self.next_row(f)) for w in f.grid_slaves(row=r)]
+        self.row(f, _('Sharpening'), self.choice(f, None, None, SHARPENING, var=self.sharpening_var()),
+                 _("Sharpens the final image (AMD RCAS). No effect while the game's picture is scaled to a window "
+                   'of another size. Also in the game: Insert > Image.'), hover=True)
         self.section(f, _('Image quality'))
         aa = self.anti_aliasing_var()
         anti_aliasing = self.row(f, _('Anti-aliasing'), self.choice(f, None, None, self.anti_aliasing_options, var=aa),
@@ -2235,7 +2263,7 @@ class Launcher:
             on = upscaler.get() != 'off'
             quality.configure(state='readonly' if on else 'disabled')
             if on:
-                preset.set(preset.get())  # the box shows the saved quality again
+                preset.set(preset.get())  # the box shows the saved quality again (DLAA or Native AA)
             else:
                 quality.set(_('Off'))  # as a game shows a quality setting that does not apply
             anti_aliasing.configure(state='disabled' if on else 'readonly')
@@ -2254,6 +2282,55 @@ class Launcher:
         self.row(f, _('Graphics mode'), self.choice(f, None, None, GRAPHICS_MODES, var=self.graphics_mode_var()),
                  _('PS4 Pro runs the game with its Pro graphics. Menus and a race start work; other events are not '
                    'tested yet. Switch back if something looks wrong.'), restart=True, hover=True)
+        restore = self.ttk.Button(f, text=_('Restore defaults'), command=self.restore_graphics_defaults)
+        restore.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((18, 4)))
+        self.hover_hint(_('Puts every setting on this page back to its default. Save keeps them.'), restore)
+
+    def restore_graphics_defaults(self):
+        """Restore defaults on the Graphics page: its settings back to their defaults, kept on Save."""
+        for key in GRAPHICS_INI_KEYS:
+            var = self.var(key, 'ini')
+            value = INI_DEFAULTS[key]
+            var.set(value == '1' if key in INI_FLAGS else value)
+        for key in GRAPHICS_APP_KEYS:
+            self.var(key, 'app').set(APP_DEFAULTS[key])
+
+    def quality_options(self):
+        """The Quality list: its first entry is DLAA with DLSS, Native AA with FSR 3.1, as the makers call it."""
+        dlss = getattr(self, 'upscaler_choice', None) is not None and self.upscaler_choice.get() == 'dlss'
+        return [('0', ('DLAA',))] + UPSCALE_PRESETS[1:] if dlss else UPSCALE_PRESETS
+
+    def frame_rate_options(self):
+        """The Frame rate limit list; the entry equal to the display's refresh rate says so."""
+        hz = str(display_info.this_refresh() or '')
+        return [(value, (_('{} · refresh rate').format(text[0]),) if value == hz else text) for value, text in FPS_LIMITS]
+
+    def sharpening_var(self):
+        """Sharpening, not saved itself: Off is the game's RCAS switch off, a percent turns it on at that
+        strength. A strength the list lacks (set in the game) is shown as it is."""
+        if getattr(self, 'sharpening', None) is None:
+            on, strength = self.var('rcas', 'ini'), self.var('rcas_strength', 'ini')
+            shown = lambda: str(strength.get()) if on.get() else '0'
+            self.sharpening = choice = self.tk.StringVar(value=shown())
+
+            def chosen(*_a):
+                value = choice.get()
+                if value == '0':
+                    if on.get():
+                        on.set(False)
+                    return
+                if not on.get():
+                    on.set(True)
+                if str(strength.get()) != value:
+                    strength.set(value)
+
+            def followed(*_a):
+                if choice.get() != shown():
+                    choice.set(shown())
+            choice.trace_add('write', chosen)
+            on.trace_add('write', followed)
+            strength.trace_add('write', followed)
+        return self.sharpening
 
     def graphics_mode_var(self):
         """The Graphics mode row over the ps4_pro switch (not saved itself)."""
@@ -2300,10 +2377,16 @@ class Launcher:
                         # Back to the game's own anti-aliasing, as a PC game turns its upscaler off.
                         switch.set(False)
                     return
+                was_off = not switch.get() or method.get() == 'off'
                 if not switch.get():
                     switch.set(True)
                 if method.get() != value:
                     method.set(value)
+                preset = self.var('preset', 'ini')
+                if was_off and preset.get() == '0':
+                    # Turned on from Off: at Quality, as games turn DLSS and FSR on, for more FPS straight
+                    # away; Native AA stays a choice.
+                    preset.set('1')
 
             def followed(*_a):
                 if choice.get() != shown():
@@ -3940,7 +4023,7 @@ class Launcher:
         self.row(f, _('NVIDIA DLSS'), holder,
                  _("DLAA needs NVIDIA's DLSS file, nvngx_dlss.dll. The launcher downloads it from NVIDIA's own "
                    'GitHub (DLSS {}) and checks it before using it. Needs an NVIDIA RTX graphics card.').format(
-                     DLSS_SDK_VERSION))
+                     DLSS_SDK_VERSION), hover=True)
         self.refresh_dlss_row()
 
     def refresh_dlss_row(self, busy=None):

@@ -724,6 +724,18 @@ int RestartChanges() {
            (s.anisotropy != s.startup_anisotropy);
 }
 
+// "Revert": the settings applied on restart back to what this launch started with, as a game's Revert.
+void RevertRestartChanges() {
+    auto& s = Gow3Settings::Get();
+    s.render_resolution = s.startup_render_resolution;
+    s.render_scale = s.startup_render_scale;
+    s.engine_fps = s.startup_engine_fps;
+    s.deferred_readback = s.startup_deferred_readback;
+    s.stale_readback = s.startup_stale_readback;
+    s.anisotropy = s.startup_anisotropy;
+    dirty = true;
+}
+
 void Menu() {
     auto& s = Gow3Settings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -804,6 +816,9 @@ void Menu() {
             runtime_restart();
         }
         ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Revert")) RevertRestartChanges();
+        Help("Puts these settings back to what this launch started with.");
     } else {
         ImGui::NewLine();
     }
