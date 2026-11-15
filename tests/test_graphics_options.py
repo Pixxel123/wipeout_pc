@@ -188,19 +188,20 @@ class GraphicsOptionsTest(unittest.TestCase):
         unknown = g.resolution_choices(names, None)
         self.assertEqual(unknown[0], ('display', 'Display'))
         self.assertEqual(values(unknown)[1:4], ['5120x2880', '4K', '3440x1440'])
-        # A monitor smaller than the game's own size: "display" is that size and says so.
+        # A monitor smaller than the game's own size: "display" draws the race at 1280 × 720 (the output size)
+        # and says so; larger sizes are Resolution scale's (150 % is 1920 × 1080).
         deck = g.resolution_choices(names, (1280, 800))
-        self.assertEqual(deck[0], ('display', '1920 × 1080'))
-        self.assertEqual(values(deck), ['display', '720p'])
+        self.assertEqual(deck, [('display', '1280 × 720')])
         # A saved size the list lacks is added; anything that is no size is not.
         self.assertIn(('3000x1700', '3000 × 1700'), g.resolution_choices(names, (3440, 1440), keep=('3000x1700',)))
         self.assertEqual(len(g.resolution_choices(names, (3440, 1440), keep=('bogus',))), 5)
         # A saved size equal to the monitor's entry is not listed twice: that entry stands for it.
-        for monitor in ((1920, 1080), (1280, 800)):  # a 1080p monitor; the Steam Deck (shown as 1920 × 1080)
-            twin = g.resolution_choices(names, monitor, keep=('native',))
-            self.assertEqual([label for _n, label in twin].count('1920 × 1080'), 1, monitor)
+        # A 1080p monitor with a saved 1920 × 1080; a Steam Deck with a saved 1280 × 720 (an older Deck's output).
+        for monitor, saved, label in (((1920, 1080), 'native', '1920 × 1080'), ((1280, 800), '720p', '1280 × 720')):
+            twin = g.resolution_choices(names, monitor, keep=(saved,))
+            self.assertEqual([text for _n, text in twin].count(label), 1, monitor)
             self.assertEqual(twin[0][0], 'display')
-            self.assertNotIn('native', values(twin))
+            self.assertNotIn(saved, values(twin))
         # A game without "display" (God of War III): every size, largest first.
         self.assertEqual(values(g.resolution_choices(['native', '720p', '4K'], (2560, 1440))), ['4K', 'native', '720p'])
 
@@ -401,6 +402,30 @@ class GraphicsOptionsTest(unittest.TestCase):
         self.assertEqual(display_info.xrandr_primary_refresh(xrandr), 165)
         self.assertEqual(display_info.xrandr_primary_refresh(xrandr.replace(' primary', '')), 60)
         self.assertIsNone(display_info.xrandr_primary_refresh(''))
+
+    def test_below_the_games_own_size_the_output_size_draws_the_race(self):
+        options = lambda name, scale='100': g.startup_options({'render_resolution': name, 'render_scale': scale},
+                                                              ['display'])
+        # 720p, a Steam Deck's or a small laptop's screen: the race at 1280 × 720, the game's own buffers, no patch.
+        for opts, monitor in ((options('720p'), None), (options('display'), (1280, 800)), (options('display'), (1366, 768))):
+            self.assertEqual(g.output_size(opts, monitor), (1280, 720))
+            self.assertEqual(g.render_size(opts, monitor), (1920, 1080))
+        # 1080p and up, or a scale that reaches it: the output follows the render resolution.
+        self.assertIsNone(g.output_size(options('native'), None))
+        self.assertIsNone(g.output_size(options('display'), (2560, 1440)))
+        self.assertIsNone(g.output_size(options('720p', '150'), None))
+        self.assertEqual(g.render_size(options('720p', '150'), None), (1920, 1080))
+        self.assertEqual(g.render_size(options('display', '200'), (1280, 800)), (2560, 1600))
+        self.assertEqual(g.display_render_size((1280, 800)), (1280, 720))
+        self.assertIsNone(g.output_size(options('display'), None))  # an unknown monitor: the game's own size
+
+    def test_an_older_1280x720_output_is_the_720p_resolution(self):
+        old_deck = {'render_resolution': 'native', 'output_res': '1280x720'}
+        self.assertEqual(g.legacy_low_output(old_deck)['render_resolution'], '720p')
+        self.assertEqual(g.legacy_low_output({'output_res': '1280x720'})['render_resolution'], '720p')
+        for kept in ({'render_resolution': 'native', 'output_res': '1920x1080'},
+                     {'render_resolution': '1440p', 'output_res': '1280x720'}, {}):
+            self.assertIs(g.legacy_low_output(kept), kept)
 
     def test_display_has_a_short_label(self):
         self.assertEqual(g.display_label((3440, 1440)), '3440 × 1440')

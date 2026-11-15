@@ -103,6 +103,25 @@ int main() {
     assert(!Gow3Settings::GraphicsNeedRestart());
     assert(v.applied_engine_fps == 240);  // no GOW3_ENGINE_FPS: the configured rate
     {
+        // run.py's output size (WipEout) over gow3.ini's output_res: 1280x720 below the game's own size.
+        const char* low = "graphics-settings-output.ini";
+        std::ofstream(low) << "output_res=1920x1080\n";
+        _putenv_s("GOW3_CONFIG", low);
+        _putenv_s("GOW3_OUTPUT_SIZE", "1280x720");
+        Gow3Settings::Load();
+        assert(Gow3Settings::OutputWidths[v.output_res] == 1280);
+        _putenv_s("GOW3_OUTPUT_SIZE", "1920x1080");
+        std::ofstream(low) << "output_res=1280x720\n";  // an older Deck's: run.py says 1920x1080 now
+        Gow3Settings::Load();
+        assert(Gow3Settings::OutputWidths[v.output_res] == 1920);
+        _putenv_s("GOW3_OUTPUT_SIZE", "");
+        Gow3Settings::Load();
+        assert(Gow3Settings::OutputWidths[v.output_res] == 1280);  // no run.py (God of War III): gow3.ini's
+        _putenv_s("GOW3_CONFIG", path);
+        Gow3Settings::Load();
+        std::remove(low);
+    }
+    {
         // No render_resolution saved: the monitor's size where the game lists it (WipEout), else native.
         const char* bare = "graphics-settings-bare.ini";
         std::ofstream(bare) << "vsync=1\nrender_scale=150\n";

@@ -252,6 +252,13 @@ def main():
     own = own.get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS', '').split(';')
     extra_resolutions = list(dict.fromkeys(s for s in [*patches.resolution_names(mod_patch_files), *own]
                                            if s and s not in graphics_options.RESOLUTIONS))
+    if not title_id or title_id in graphics_options.GENERATED_TITLES:
+        # An older Deck's (or Output resolution row's) 1280 x 720 output stays: written as "720p" once, so
+        # the launcher, this script and the in-game menu all read the same choice.
+        saved = graphics_options.read_ini(env['GOW3_CONFIG'])
+        if graphics_options.legacy_low_output(saved) is not saved:
+            graphics_options.write_keys(env['GOW3_CONFIG'], {'render_resolution': '720p'})
+            print('Graphics: the 1280x720 output is the 1280 x 720 resolution now', flush=True)
     launch = graphics_options.launch_ini(env['GOW3_CONFIG'], out / 'graphics_state.json')
     mod_sizes = patches.resolution_names(mod_patch_files)
     # The monitor's size, asked once: for "display" and the lists of the in-game menu.
@@ -272,6 +279,14 @@ def main():
     if render_size:
         env['GOW3_RENDER_SIZE'] = f'{render_size[0]}x{render_size[1]}'
         derived.append('GOW3_RENDER_SIZE')
+    # Below the game's own size the race is drawn at the output size (1280 x 720); otherwise the output
+    # follows the render resolution. WipEout only: gow3.ini's output_res is not used there any more.
+    if not title_id or title_id in graphics_options.GENERATED_TITLES:
+        low = graphics_options.output_size(graphics_options.startup_options(launch, extra_resolutions), display)
+        env['GOW3_OUTPUT_SIZE'] = f'{low[0]}x{low[1]}' if low else '1920x1080'
+        derived.append('GOW3_OUTPUT_SIZE')
+        if low:
+            print(f'Output: {low[0]}x{low[1]} (the race below the game\'s own 1920x1080)', flush=True)
     env['GOW3_EXTRA_RESOLUTIONS'] = ';'.join(extra_resolutions)
     derived.append('GOW3_EXTRA_RESOLUTIONS')
     graphics, reverted = graphics_options.prepare(env['GOW3_CONFIG'], out / 'graphics_state.json', extra_resolutions)

@@ -1495,6 +1495,12 @@ class Launcher:
         self.root = root
         self.app = {**APP_DEFAULTS, **migrate_controls(load_json(CONFIG_FILE, {}))}
         self.ini, self.ini_lines = load_ini()
+        from patches import game_title_id
+        title_id = game_title_id(self.app.get('game_dir')) if self.app.get('game_dir') else None
+        if not title_id or title_id in graphics_options.GENERATED_TITLES:
+            # An older Deck's (or Output resolution row's) 1280 x 720 output is the 1280 x 720 resolution,
+            # as run.py writes it into gow3.ini at the next start.
+            self.ini = graphics_options.legacy_low_output(self.ini)
         display_info.this_display()  # the monitor's size for the Resolution list, read once at start
         self.vars = {}
         self.process = self.job = None

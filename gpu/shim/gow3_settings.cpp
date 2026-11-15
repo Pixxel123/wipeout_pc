@@ -208,6 +208,14 @@ void Load() {
         std::printf("Settings: %s\n", Path());
     }
     // Environment overrides (scripts, A/B tests).
+    // run.py's output size (WipEout): 1280x720 below the game's own size (the Resolution list's 1280 x 720,
+    // a Steam Deck's screen), else 1920x1080, which follows the render resolution. Over gow3.ini's output_res.
+    if (const char* env = std::getenv("GOW3_OUTPUT_SIZE"); env && env[0]) {
+        for (int r = 0; r < OutputCount; ++r) {
+            if (std::string(env) == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r]))
+                v.output_res = r;
+        }
+    }
     if (const char* env = std::getenv("GOW3_UPSCALER")) {
         v.upscaler = UpscalerOff;
         for (int u = 0; u < UpscalerCount; ++u) {

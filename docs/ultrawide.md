@@ -125,9 +125,14 @@ equal to the monitor's or larger are left out, since Resolution scale goes above
 listed. A new install starts at `display`; God of War III has no `display` and starts at its own 1920 × 1080.
 
 - A size with a hand-made entry uses that entry (a 2560 × 1440 monitor runs "Resolution Patch - 1440p").
-- Sizes run from 1920 × 1080 to 7680 × 4320. A smaller monitor (the Steam Deck's 1280 × 800) renders at the
-  game's own 1920 × 1080: measured there with 720p, 900p and 1280 × 800, the game keeps its 1920 × 1080 buffers
-  below that. A scale that would pass 7680 × 4320 becomes the largest one that fits.
+- Sizes run from 1920 × 1080 to 7680 × 4320 as a resolution patch: below that the game keeps its 1920 × 1080
+  buffers (measured on the Steam Deck with 720p, 900p and 1280 × 800). Below it, WipEout uses its output size
+  instead: **1280 × 720** in the Resolution list, and `display` on a smaller screen (the Steam Deck's
+  1280 × 800, a 1366 × 768 laptop), draw the race at 1280 × 720 with the HUD and menus at the game's own size
+  (`run.py` passes `GOW3_OUTPUT_SIZE`; the Steam Deck's races went from 47-53 to 58-60 FPS with it, #148).
+  An older `gow3.ini` with `output_res=1280x720` and the game's own render resolution becomes `720p` at the
+  next start. 1600 × 900 is not offered: the game has no output size for it. A scale that would pass
+  7680 × 4320 becomes the largest one that fits.
 - The monitor's size comes from Windows, or from `xrandr` on Linux; when neither answers, `display` is
   1920 × 1080. `GOW3_DISPLAY_SIZE=<width>x<height>` says it instead.
 - The upscaling presets render below any render resolution and upscale back to it.

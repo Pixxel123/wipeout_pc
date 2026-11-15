@@ -316,9 +316,10 @@ def scaled_size(size, percent):
 
 
 def display_render_size(monitor):
-    """What "display" renders at, at 100 %, on a monitor of this size (None: unknown): the monitor's size,
-    never below the game's own."""
-    return render_size({'render_resolution': DISPLAY, 'render_scale': '100'}, monitor)
+    """What "display" draws the race at, at 100 %, on a monitor of this size (None: unknown): the monitor's
+    size; below the game's own size, LOW_OUTPUT (output_size)."""
+    options = {'render_resolution': DISPLAY, 'render_scale': '100'}
+    return output_size(options, monitor) or render_size(options, monitor)
 
 
 def display_label(size):
@@ -327,12 +328,39 @@ def display_label(size):
     return f'{size[0]} × {size[1]}' if size else 'Display'
 
 
+LOW_OUTPUT = (1280, 720)  # the game's output size below its own 1920 x 1080 (gow3_settings.h OutputWidths)
+
+
+def output_size(options, display):
+    """LOW_OUTPUT when the options ask for less than the game's own 1920 x 1080 (720p, a Steam Deck's or a
+    small laptop's screen), else None. A resolution patch cannot go below the game's own size (its buffers
+    stay 1920 x 1080); its output size can: the race is drawn at 1280 x 720, the HUD and menus stay sharp."""
+    name, scale = options['render_resolution'], int(options['render_scale'])
+    base = ((display[0] & ~1, display[1] & ~1) if display else None) if name == DISPLAY else resolution_size(name)
+    if not base:
+        return None
+    width, height = scaled_size(base, scale)
+    return LOW_OUTPUT if width < MIN_GENERATED[0] or height < MIN_GENERATED[1] else None
+
+
+def legacy_low_output(ini):
+    """A gow3.ini from before the 1280 x 720 Resolution entry drew the race at 1280 x 720 with the output
+    setting (the Steam Deck's default, the old Output resolution row) and the game's own render resolution:
+    that is "720p" now. Any other ini comes back as it is. WipEout only: God of War III's 720p patch is a
+    render resolution of its own."""
+    if ini.get('output_res') == f'{LOW_OUTPUT[0]}x{LOW_OUTPUT[1]}' and ini.get('render_resolution', 'native') == 'native':
+        return {**ini, 'render_resolution': '720p'}
+    return ini
+
+
 def render_size(options, display):
-    """(width, height) the game renders at when the options ask for the monitor's size or a render scale,
-    else None (the render resolution as it is named). An unknown monitor, or one smaller than the game's
-    own size, renders at the game's own size; an odd side of the monitor loses its last pixel; a scale that
+    """(width, height) the game renders at when the options ask for the monitor's size, a render scale or
+    less than the game's own size, else None (the render resolution as it is named). An unknown monitor,
+    or a size below the game's own, renders at the game's own size (output_size draws the race smaller); an odd side of the monitor loses its last pixel; a scale that
     passes MAX_GENERATED becomes the largest listed one that fits."""
     name, scale = options['render_resolution'], int(options['render_scale'])
+    if output_size(options, display):
+        return SIZES['native']  # the game's own buffers; output_size draws the race smaller
     if name != DISPLAY and scale == 100:
         return None
     base = ((display[0] & ~1, display[1] & ~1) if display else None) if name == DISPLAY else resolution_size(name)
