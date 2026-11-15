@@ -66,7 +66,8 @@ class DiagnosticsLayoutTest(unittest.TestCase):
             heading = launcher._('Log').upper()
             log = next(w for w in widgets if w.winfo_class() == 'TLabel' and w.cget('text') == heading)
             hint = launcher._('Shows where the frame waits for the GPU and which reads cause it. For performance tests.')
-            diagnostics_hint = next(w for w in widgets if w.winfo_class() == 'TLabel' and w.cget('text') == hint)
+            # The hint is its row's help line (status bar on hover); the row's title cell carries it.
+            diagnostics_hint = next(w for w in widgets if getattr(w, 'hint', None) == hint)
             body = diagnostics_hint.master
             self.assertFalse(body.winfo_ismapped())
             collapsed_y = log.winfo_rooty()

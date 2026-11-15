@@ -1845,14 +1845,15 @@ class Launcher:
             if mark.winfo_exists():
                 mark.pack(side='left', padx=self.px((8, 0))) if running else mark.pack_forget()
 
-    def row(self, parent, title, widget, hint=None, restart=False, hover=False):
-        """Name on the left, control on the right, an optional note below; with `hover` the note shows in
-        the status bar instead, while the pointer or the focus is on the row (as a game's help line)."""
+    def row(self, parent, title, widget, hint=None, restart=False, hover=True):
+        """Name on the left, control on the right. Its note shows in the status bar while the pointer or the
+        focus is on the row, as a game's help line; `hover=False` puts it under the row instead."""
         r = self.next_row(parent)
         cell = self.title_cell(parent, title, restart)
         cell.grid(row=r, column=0, sticky='w', padx=self.px((0, 18)), pady=self.px((8, 0)))
         widget.grid(row=r, column=1, sticky='w', pady=self.px((5, 0)))
         if hint and hover:
+            cell.hint = hint  # what the help line shows for this row
             self.hover_hint(hint, cell, widget)
         elif hint:
             self.ttk.Label(parent, text=hint, style='Muted.TLabel', wraplength=self.px(640), justify='left').grid(
@@ -1871,13 +1872,17 @@ class Launcher:
             if getattr(self, 'hinted', None) is not None and self.status['text'] == hint:
                 self.status.configure(text=self.hinted[0], fg=self.hinted[1])
             self.hinted = None
-        for widget in widgets:
+        def family(widget):  # a row's control can be a holder of several: each part shows the hint
+            yield widget
+            for child in widget.winfo_children():
+                yield from family(child)
+        for widget in [part for widget in widgets for part in family(widget)]:
             for event in ('<Enter>', '<FocusIn>'):
                 widget.bind(event, show, add='+')
             for event in ('<Leave>', '<FocusOut>'):
                 widget.bind(event, hide, add='+')
 
-    def check(self, parent, key, store, title, hint=None, var=None, restart=False, hover=False):
+    def check(self, parent, key, store, title, hint=None, var=None, restart=False, hover=True):
         box = self.ttk.Checkbutton(parent, variable=var if var is not None else self.var(key, store))
         return self.row(parent, title, box, hint, restart, hover)
 
@@ -1927,15 +1932,13 @@ class Launcher:
             var.trace_add('write', lambda *_a: on_change())
         return self.row(parent, title, holder, hint)
 
-    def scrolled_page(self, name, title, subtitle=None):
-        """A settings page: a heading, an optional line under it, and content that scrolls vertically."""
+    def scrolled_page(self, name, title):
+        """A settings page: its title and content that scrolls vertically."""
         tk, ttk = self.tk, self.ttk
         outer = ttk.Frame(self.content)
         head = ttk.Frame(outer, padding=self.px((28, 22, 28, 6)))
         head.pack(fill='x')
         ttk.Label(head, text=title.upper(), background=PANEL, foreground=TEXT, font=self.heading_font(20)).pack(anchor='w')
-        if subtitle:
-            ttk.Label(head, text=subtitle, style='Muted.TLabel').pack(anchor='w')
         canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0, bd=0)
         bar = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
         inner = ttk.Frame(canvas, padding=self.px((28, 0, 28, 24)))
@@ -2198,13 +2201,13 @@ class Launcher:
         f = self.scrolled_page('graphics', _('Graphics', 'Графика'))
         self.gap(f, 4)
         self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
-                 _('Borderless covers the screen without changing the display mode.'), hover=True)
+                 _('Borderless covers the screen without changing the display mode.'))
         self.row(f, _('Resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options),
                  _('The first size is your monitor\'s and follows it. Wider than 16:9 keeps the HUD at 16:9.'),
-                 restart=True, hover=True)
+                 restart=True)
         self.row(f, _('Resolution scale'), self.choice(f, 'render_scale', 'ini', self.render_scale_options),
                  _('Above 100 % draws a larger picture and scales it down to the screen: sharper, slower. With '
-                   'FSR 3.1 or DLSS on they draw below that size, as DLDSR with DLSS does.'), restart=True, hover=True)
+                   'FSR 3.1 or DLSS on they draw below that size, as DLDSR with DLSS does.'), restart=True)
         scale, resolution = self.var('render_scale', 'ini'), self.var('render_resolution', 'ini')
         # The warning sits in a holder that keeps its grid row, so hiding it never lets the next row slide in.
         holder = self.ttk.Frame(f)
@@ -2230,10 +2233,9 @@ class Launcher:
         scale.trace_add('write', scale_fits)
         scale_fits()
         self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', 'ini', self.frame_rate_options),
-                 _("Unlimited: up to 240 FPS. With VSync on, your monitor's refresh rate is the highest it goes."),
-                 hover=True)
-        self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'), hover=True)
-        self.check(f, 'hdr', 'app', _('HDR'), _('When HDR is on in Windows and the display supports it.'), hover=True)
+                 _("Unlimited: up to 240 FPS. With VSync on, your monitor's refresh rate is the highest it goes."))
+        self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'))
+        self.check(f, 'hdr', 'app', _('HDR'), _('When HDR is on in Windows and the display supports it.'))
         # Upscaling, then image quality, as PC games with FSR and DLSS lay them out: the upscaler and its
         # quality mode together, anti-aliasing for the game's own image when no upscaler runs. One list, a
         # gap between the groups, no headings: the rows say what they are.
@@ -2242,27 +2244,27 @@ class Launcher:
         self.row(f, _('Upscaling'), self.choice(f, None, None, self.upscaler_options, var=upscaler),
                  _('FSR 3.1 and DLSS draw the race smaller and scale it up, smoothing edges from the game\'s own '
                    'motion vectors: more FPS. The HUD and menus stay sharp. Also in the game: Insert > Image.'),
-                 restart=True, hover=True)
+                 restart=True)
         if WINDOWS:
             self.build_dlss_row(f)
         preset = self.var('preset', 'ini')
         quality = self.row(f, _('Quality'), self.choice(f, 'preset', 'ini', self.quality_options),
                            _('Native AA (DLAA with DLSS) keeps the full resolution and only smooths edges. Quality, '
-                             'Balanced and Performance draw the race at 67, 59 and 50 % of it for more FPS.'), hover=True)
+                             'Balanced and Performance draw the race at 67, 59 and 50 % of it for more FPS.'))
         # Only DLSS has presets. The row (title, box) hides with another upscaler.
         first = self.next_row(f)
         self.row(f, _('DLSS preset'), self.choice(f, 'dlss_preset', 'ini', DLSS_PRESETS),
                  _('K is the driver\'s default. M and L are the newer second-generation models; L costs a few '
-                   'percent more.'), restart=True, hover=True)
+                   'percent more.'), restart=True)
         preset_widgets = [w for r in range(first, self.next_row(f)) for w in f.grid_slaves(row=r)]
         self.row(f, _('Sharpening'), self.choice(f, None, None, SHARPENING, var=self.sharpening_var()),
                  _("Sharpens the final image (AMD RCAS). No effect while the game's picture is scaled to a window "
-                   'of another size. Also in the game: Insert > Image.'), hover=True)
+                   'of another size. Also in the game: Insert > Image.'))
         self.gap(f)
         aa = self.anti_aliasing_var()
         anti_aliasing = self.row(f, _('Anti-aliasing'), self.choice(f, None, None, self.anti_aliasing_options, var=aa),
                                  _('The game\'s own multisampling, or none. With FSR 3.1 or DLSS on, they smooth the '
-                                   'edges instead.'), restart=True, hover=True)
+                                   'edges instead.'), restart=True)
 
         def follow_upscaler(*_args):
             on = upscaler.get() != 'off'
@@ -2280,13 +2282,13 @@ class Launcher:
         self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
                  _('Medium loads the largest textures at 4096 at most, Low at half size or less: about 1 GB less '
                    'video memory in a race, for graphics cards with 4 GB that crash or freeze in races.'),
-                 restart=True, hover=True)
+                 restart=True)
         self.row(f, _('Anisotropic filtering'), self.choice(f, 'anisotropy', 'ini', ANISOTROPY),
                  _('Sharper floors and walls seen at an angle, at little cost on most graphics cards.'),
-                 restart=True, hover=True)
+                 restart=True)
         self.row(f, _('Graphics mode'), self.choice(f, None, None, GRAPHICS_MODES, var=self.graphics_mode_var()),
                  _('PS4 Pro runs the game with its Pro graphics. Menus and a race start work; other events are not '
-                   'tested yet. Switch back if something looks wrong.'), restart=True, hover=True)
+                   'tested yet. Switch back if something looks wrong.'), restart=True)
         restore = self.ttk.Button(f, text=_('Restore defaults'), command=self.restore_graphics_defaults)
         restore.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((18, 4)))
         self.hover_hint(_('Puts every setting on this page back to its default. Save keeps them.'), restore)
@@ -2440,9 +2442,9 @@ class Launcher:
         return [(value, (label,)) for value, label in graphics_options.render_scale_choices(base, offered)]
 
     def build_performance(self):
-        f = self.scrolled_page('performance', _('Performance'), _('Frame rate and speed options.'))
+        f = self.scrolled_page('performance', _('Performance'))
         # Frame rate limit is on the Graphics page, next to VSync.
-        self.section(f, _('Frame rate', 'Частота кадров'), top=4)
+        self.gap(f, 4)
         self.check(f, 'menu_fps_cap', 'app', _('Menus at 60 FPS'),
                    _('On: the menus and the pause menu run at 60 FPS like on PS4. Off: at the frame rate limit '
                      '(some menu animations then run faster).'))
@@ -2451,7 +2453,7 @@ class Launcher:
                      'half as often, as it does with two players. Off: always at the full rate.'))
         self.row(f, _('Frames queued'), self.choice(f, 'frames_queued', 'ini', FRAMES_QUEUED),
                  _('1 is the lowest input latency; more can raise FPS when the graphics card is the limit.'))
-        self.section(f, _('Shaders'))
+        self.gap(f)
         self.check(f, 'pipeline_binary_cache', 'app', _('Use pipeline binary cache (A/B test)'),
                    _('Reuse saved Vulkan pipelines. Disable to compare FPS with normal compilation. '
                      'Takes effect on the next launch; saved caches are preserved.'))
@@ -2464,7 +2466,7 @@ class Launcher:
                      'or effect may appear a moment later. Switch it off if something stays missing.'))
         self.check(f, 'parallel_warmup', 'app', _('Fast shader cache loading (parallel)'),
                    _('Loading screen only: builds the cached pipelines on several CPU threads.'))
-        self.section(f, _('GPU data'))
+        self.gap(f)
         gpus = list_gpus()
         cards = [('', ('Automatic',))] + [(row[0], (row[1],)) for row in gpus]
         self.row(f, _('Graphics card'), self.choice(f, 'gpu_id', 'app', cards),
@@ -2499,15 +2501,15 @@ class Launcher:
 
     def build_cheats(self):
         """Cheats: game patches that open parts of the game while they are on (CHEATS)."""
-        f = self.scrolled_page('cheats', _('Cheats'), _('Open parts of the game without playing for them. Your saves keep your own progress.'))
-        self.section(f, _('Unlocks'), top=4)
+        f = self.scrolled_page('cheats', _('Cheats'))
+        self.gap(f, 4)
         for key, _patch, title, hint in CHEATS:
             self.check(f, key, 'app', _(title), _(hint), restart=True)
         self.note(f, _('Not yet: the 2049 and 2050 cups of 2048 (they open when you finish the cup before them).'))
 
     def build_game(self):
-        f = self.scrolled_page('game', _('Game', 'Игра'), _('Your game dump, saves and the game patches.'))
-        self.section(f, _('Folders'), top=4)
+        f = self.scrolled_page('game', _('Game', 'Игра'))
+        self.gap(f, 4)
         self.folder(f, 'game_dir', _('Game folder', 'Папка игры'),
                     _('Choose the folder with eboot.bin', 'Выберите папку с eboot.bin'),
                     _('Your own dump of the game (eboot.bin, sce_module, sce_sys): WipEout Omega Collection, '
@@ -2526,9 +2528,9 @@ class Launcher:
         self.folder(f, 'savedata_dir', _('Save data folder (optional)'), _('Choose the save data folder'),
                     _('Only the saves, in a folder of their own: for example a network share two PCs play '
                       'from (not both at once). Empty: savedata in the saves folder.'), on_change=self.refresh_status)
-        self.section(f, _('Saves'))
+        self.gap(f)
         self.build_save_backups(f)
-        self.section(f, _('Language'))
+        self.gap(f)
         self.row(f, _('Game language', 'Язык игры'), self.choice(f, 'language', 'app',
                                                                   lambda: game_languages(self.meta_dir())))
         name = self.ttk.Entry(f, textvariable=self.var('player_name', 'app'), width=20, validate='key',
@@ -2551,10 +2553,9 @@ class Launcher:
                  _("The highest target of the Eliminator slider in the race setup (the game's own: 600 points).",
                    'Наибольшая цель ползунка Eliminator в настройке гонки (в самой игре: 600 очков).'),
                  restart=True)
-        self.section(f, _('Overlay'))
+        self.gap(f)
         self.check(f, 'show_fps', 'ini', _('Show performance overlay'),
                    _('Items, size and corner: in-game menu (Insert / R3+L2) > Overlay.'))
-        self.section(f, _('Screenshots'))
         shots = self.ttk.Button(f, text=_('Open the screenshots folder'),
                                 command=lambda: self.open_path(
                                     Path(self.var('user_dir', 'app').get() or DATA_DIR / 'user') / 'screenshots'))
@@ -2573,7 +2574,7 @@ class Launcher:
     def build_online(self):
         """The Online switch; on, PLAY hosts or joins (scripts/online_host.py, docs/online-multiplayer.md)."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('online', _('Online', 'Онлайн'), _('Races with other players over the internet.'))
+        f = self.scrolled_page('online', _('Online', 'Онлайн'))
         enabled = self.var('online_enabled', 'app')
         self.check(f, 'online_enabled', 'app', _('Play online', 'Играть онлайн'),
                    _("Off: the game plays offline. On: PLAY connects it, and its ONLINE menu works."))
@@ -2746,8 +2747,8 @@ class Launcher:
         """Your own music: a guide, the folder, the switches (gow3.ini, also in the in-game Music tab)
         and the songs found."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('music', _('Music'), _("Play your own songs in the game instead of its music."))
-        self.section(f, _('How it works'), top=4)
+        f = self.scrolled_page('music', _('Music'))
+        self.gap(f, 4)
         self.note(f, _("1. Put your songs in the music folder below: MP3, OGG, FLAC, WAV or M4A. Subfolders are fine.\n"
                        "2. Click PLAY. Your songs play in menus and races instead of the game's music. The sound "
                        "effects stay. Set how loud with Music volume below.\n"
@@ -2757,7 +2758,7 @@ class Launcher:
                        "menus, and the other songs play in races."), top=8)
         self.note(f, _("Mode songs: songs in subfolders named zone, eliminator or detonator play only in that "
                        "mode. A mode without its own folder plays the race songs."), top=4)
-        self.section(f, _('Settings'))
+        self.gap(f)
         self.folder(f, 'music_dir', _('Music folder'), _('Choose your music folder'),
                     _('Empty: the music folder next to your saves.'), on_change=self.refresh_music)
         self.check(f, 'music', 'ini', _('Play my music'), _("Off: the game's own music, even with songs in the folder."))
@@ -2892,8 +2893,7 @@ class Launcher:
         """Loose-file mods layered over the game at start: the switch, the load order with a details
         panel for the selected mod, presets, third-party patches and the folders."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('mods', _('Mods', 'Моды'),
-                               _('Change textures, sounds and text. Your game files stay untouched.', 'Меняйте текстуры, звуки и тексты. Файлы игры не изменяются.'))
+        f = self.scrolled_page('mods', _('Mods', 'Моды'))
         top = ttk.Frame(f)
         top.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=self.px((14, 0)))
         ttk.Checkbutton(top, text=_('Load mods', 'Загружать моды'), variable=self.var('mods_enabled', 'app')).pack(side='left')
@@ -2933,7 +2933,7 @@ class Launcher:
                               (_('Delete', 'Удалить'), self.delete_mod_preset)):
             ttk.Button(presets, text=text, command=command).pack(side='left', padx=self.px((6, 0)))
         self.build_third_party_patches(f)
-        self.section(f, _('Folders'), top=28)
+        self.gap(f, 24)
         self.folder(f, 'mods_dir', _('Mods folder', 'Папка модов'), _('Choose the mods folder', 'Выберите папку модов'),
                     on_change=self.refresh_lists)
         self.folder(f, 'patches_dir', _('Patches folder', 'Папка патчей'), _('Choose the patches folder', 'Выберите папку патчей'),
@@ -2943,8 +2943,7 @@ class Launcher:
         """The Controls page: the keyboard & mouse table, button icons and the gamepad remapping of
         the PS4 buttons (run.py passes GOW3_KEY_MAP and GOW3_PAD_MAP to the game)."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('controls', _('Controls', 'Управление'),
-                               _('Keyboard and mouse, button icons and gamepad mapping.'))
+        f = self.scrolled_page('controls', _('Controls', 'Управление'))
         saved = {kind: control_values(self.app.get('controls'), kind) for kind in ('key', 'pad')}
         style = self.app.get('pad_style') if self.app.get('pad_style') in PAD_STYLES else 'playstation'
         self.pad_style = tk.StringVar(value=style)
@@ -2992,7 +2991,6 @@ class Launcher:
         f.grid(row=self.next_row(page), column=0, columnspan=2, sticky='we')
         f.columnconfigure(1, weight=1)
         self.section(f, _('Keyboard & Mouse Mapping'), top=12)
-        self.note(f, _('Which key or mouse input presses each button of the game.'), top=4)
         table = mapping_table()
         r = 0
         for row in CONTROLS:
@@ -3022,7 +3020,6 @@ class Launcher:
         f.grid(row=self.next_row(page), column=0, columnspan=2, sticky='we')
         f.columnconfigure(1, weight=1)
         self.section(f, _('Gamepad Mapping'), top=12)
-        self.note(f, _('Which gamepad button presses each button of the game.'), top=4)
         names = ttk.Frame(f)
         for value in PAD_STYLES:
             ttk.Radiobutton(names, text=PAD_STYLE_NAMES[value], value=value, variable=self.pad_style,
@@ -3190,7 +3187,7 @@ class Launcher:
     def build_linux_options(self, f):
         """Wayland / X11, GameMode and MangoHud: only the ones this system has can be turned on."""
         tools = linux_tools()
-        self.section(f, _('Linux'), top=4)
+        self.gap(f, 4)
         self.check(f, 'desktop_integration', 'app', _('Menu entry and icon (AppImage)'),
                    _('Creates gow3.desktop in ~/.local/share/applications so the launcher and the game show their '
                      'icon in the dock and the menu. Turning it off removes the entry.'))
@@ -3208,9 +3205,8 @@ class Launcher:
 
     def build_advanced(self):
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('advanced', _('Advanced', 'Дополнительно'),
-                               _('Launcher options, files and diagnostics.'))
-        self.section(f, _('Launcher', 'Лаунчер'), top=4)
+        f = self.scrolled_page('advanced', _('Advanced', 'Дополнительно'))
+        self.gap(f, 4)
         self.row(f, _('Launcher language', 'Язык лаунчера'), self.choice(f, 'ui_language', 'app', UI_LANGUAGES),
                  _('Applies when the launcher opens again.', 'Применится при следующем открытии лаунчера.'))
         self.row(f, _('GUI Scale'), self.choice(f, 'ui_scale', 'app', UI_SCALES),
@@ -3233,7 +3229,7 @@ class Launcher:
         ttk.Label(holder, text=f'v{VERSION}', style='Muted.TLabel').pack(side='left', padx=self.px(10))
         if not WINDOWS:
             self.build_linux_options(f)
-        self.section(f, _('Graphics', 'Графика'))
+        self.gap(f)
         self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
                  _('Below 1920 × 1080: the size of the game\'s picture (the Steam Deck uses 1280 × 720). From '
                    '1920 × 1080 up it follows Graphics > Resolution.'), restart=True)
@@ -4028,7 +4024,7 @@ class Launcher:
         self.row(f, _('NVIDIA DLSS'), holder,
                  _("DLAA needs NVIDIA's DLSS file, nvngx_dlss.dll. The launcher downloads it from NVIDIA's own "
                    'GitHub (DLSS {}) and checks it before using it. Needs an NVIDIA RTX graphics card.').format(
-                     DLSS_SDK_VERSION), hover=True)
+                     DLSS_SDK_VERSION))
         self.refresh_dlss_row()
 
     def refresh_dlss_row(self, busy=None):
