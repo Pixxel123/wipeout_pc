@@ -1394,6 +1394,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
+    if (sel.boot) {
+        return BootProgram(sel, hw_stage, sw_stage, params, binding, runtime_info);
+    }
     if (sel.worker) {
         // gow3: draw-preparation worker: look up only, with the worker's own Info copy.
         auto& worker = *sel.worker;

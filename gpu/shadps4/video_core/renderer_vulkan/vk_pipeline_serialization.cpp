@@ -1172,13 +1172,20 @@ void PipelineCache::StartOnDemand() {
                     ++dropped;
                 }
             }
-            db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
             std::printf("Pipeline startup: %zu saved shader files dropped for on-demand reads (%s), "
                         "pipeline keys kept\n",
                         dropped,
                         marker.empty()                            ? "no marker"
                         : marker == std::vector<u8>{0}            ? "disk shaders were off"
                                                                   : "another translator");
+            // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild, so a start
+            // that ends inside it drops its files again next time.
+            const bool rebuilt = RebuildFromPrecompileList();
+            db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
+            if (rebuilt) {
+                db.Flush();
+                IndexDiskShaders();
+            }
         } else {
             IndexDiskShaders();
         }

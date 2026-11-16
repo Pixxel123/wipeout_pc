@@ -115,6 +115,9 @@ struct PipelineSelection {
     bool compilation_pending = false;
     DrawIndirectParams draw_indirect_params{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
+    /// gow3: set: a start-up rebuild from a precompile list (vk_precompile_boot.cpp) translates
+    /// the programs, not program_cache.
+    struct PrecompileBoot* boot{};
 };
 
 /// gow3: a draw-preparation worker's own program state (see vk_draw_prep.h).
@@ -218,6 +221,13 @@ private:
     bool RefreshComputeKey();
     friend struct PrecompileReplay;
     void CapturePrecompile();
+    friend struct PrecompileBoot;
+    /// gow3 diagnostic GOW3_PRECOMPILE_BOOT (vk_precompile_boot.cpp): translates a precompile
+    /// list into the store after a recompiler change dropped its shaders; false when off.
+    bool RebuildFromPrecompileList();
+    Result BootProgram(PipelineSelection& sel, Shader::HwStage hw_stage, Shader::SwStage sw_stage,
+                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding,
+                       const Shader::RuntimeInfo& runtime_info);
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
