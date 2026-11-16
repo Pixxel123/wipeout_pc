@@ -17,7 +17,7 @@
 #include "shader_recompiler/specialization.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
-#include "video_core/renderer_vulkan/vk_precompile_replay.h"
+#include "video_core/renderer_vulkan/vk_precompile_record.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
 
@@ -181,7 +181,7 @@ public:
 
     /// gow3 diagnostic (GOW3_PRECOMPILE_RECORD): reports the recording every few seconds.
     /// GPU command thread, between submissions.
-    void ReplayPrecompile();
+    void ReportPrecompile();
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
                               std::optional<Shader::Gcn::FetchShaderData>, u64>;
@@ -219,7 +219,7 @@ private:
     bool RefreshGraphicsKey(PipelineSelection& sel);
     bool RefreshGraphicsStages(PipelineSelection& sel);
     bool RefreshComputeKey();
-    friend struct PrecompileReplay;
+    friend struct PrecompileRecord;
     void CapturePrecompile();
     friend struct PrecompileBoot;
     /// gow3 diagnostic GOW3_PRECOMPILE_BOOT (vk_precompile_boot.cpp): translates a precompile
@@ -304,7 +304,7 @@ private:
     bool NewPipelineKey(const std::string& name);
     void ReportDiskShaders();
 
-    PrecompileReplayPtr precompile; ///< gow3: null unless a GOW3_PRECOMPILE_* switch is set
+    PrecompileRecordPtr precompile; ///< gow3: null unless a GOW3_PRECOMPILE_* switch is set
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

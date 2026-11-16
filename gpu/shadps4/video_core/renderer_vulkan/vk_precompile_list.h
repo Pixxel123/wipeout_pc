@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// gow3 (GOW3_PRECOMPILE_RECORD / GOW3_PRECOMPILE_LIST, vk_precompile_replay.cpp): the file one
-// launch records its new pipelines' guest inputs into and a later launch replays them from.
-// Only the format and its checks here. An assert in the selection ends the game, so every
-// count, index and offset the replay relies on is checked on load, and an entry that fails is
-// dropped and counted.
+// gow3 (GOW3_PRECOMPILE_RECORD / GOW3_PRECOMPILE_LIST): the file a launch records its new
+// pipelines' guest inputs into (vk_precompile_record.cpp) and a later launch's start-up rebuild
+// replays them from (vk_precompile_boot.cpp). Only the format and its checks here. An assert in
+// the selection ends the game, so every count, index and offset the replay relies on is checked
+// on load, and an entry that fails is dropped and counted.
 //
 // Layout (native byte order, x86-64 only):
 //   header: magic, version, Regs words, user-data words, stages
@@ -39,12 +39,12 @@ namespace Vulkan::Precompile {
 constexpr std::array<char, 8> ListMagic = {'G', 'O', 'W', '3', 'P', 'C', 'L', '\n'};
 constexpr u32 ListVersion = 2;
 
-/// The build's layout, checked in the header (the replay static_asserts them).
+/// The build's layout, checked in the header (the recorder static_asserts them).
 constexpr u32 ListRegsWords = 0xD000;  ///< AmdGpu::Regs::NumRegs
 constexpr u32 ListUserDataWords = 16;  ///< AmdGpu::NUM_USER_DATA
 constexpr u32 ListStages = 6;          ///< MaxShaderStages
 constexpr u32 ListHwStages = 6;        ///< Regs::ProgramForStage takes 0..5
-/// Registers the selection indexes arrays with (the replay static_asserts them).
+/// Registers the selection indexes arrays with (the recorder static_asserts them).
 constexpr u32 ListPsInControlReg = 0xA1B6; ///< SPI_PS_IN_CONTROL, num_interp in bits 0-5
 constexpr u32 ListMaxPsInputs = 32;        ///< HwFragmentRuntimeInfo::inputs
 /// A draw-indirect sgpr offset names a vertex-stage user-data register from this one on; the
@@ -485,7 +485,7 @@ struct ParsedList {
     return list;
 }
 
-/// Reads the list at `path` (vk_precompile_replay.cpp); none when it cannot be used (logged).
+/// Reads the list at `path` (vk_precompile_record.cpp); none when it cannot be used (logged).
 std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys);
 
 } // namespace Vulkan::Precompile

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// gow3 (GOW3_PRECOMPILE_*, vk_precompile_replay.cpp): the reserved memory the precompile
+// gow3 (GOW3_PRECOMPILE_*, vk_precompile_record.cpp): the reserved memory the precompile
 // diagnostics read recorded guest words through, and the fault handler that serves or counts
 // the reads that land outside them. Linux only: elsewhere nothing can be reserved and
 // SetUpFaultGuard fails.

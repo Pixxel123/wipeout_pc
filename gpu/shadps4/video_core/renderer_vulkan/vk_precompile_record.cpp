@@ -39,7 +39,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_precompile_guard.h"
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
-#include "video_core/renderer_vulkan/vk_precompile_replay.h"
+#include "video_core/renderer_vulkan/vk_precompile_record.h"
 #include "video_core/renderer_vulkan/vk_precompile_shadow.h"
 
 namespace Vulkan {
@@ -138,10 +138,10 @@ std::vector<u32> ReadProgramCode(VAddr address) {
 
 } // namespace
 
-struct PrecompileReplay {
-    PrecompileReplay(std::FILE* record_file_)
+struct PrecompileRecord {
+    PrecompileRecord(std::FILE* record_file_)
         : record_file{record_file_}, slots{g_reserved.record, RecordSlotSize, NumRecordSlots} {}
-    ~PrecompileReplay() {
+    ~PrecompileRecord() {
         if (record_file) {
             std::fclose(record_file);
         }
@@ -174,7 +174,7 @@ private:
 };
 
 namespace {
-PrecompileReplay* g_active; ///< reported at exit
+PrecompileRecord* g_active; ///< reported at exit
 
 void ReportAtExit() {
     if (g_active) {
@@ -183,7 +183,7 @@ void ReportAtExit() {
 }
 } // namespace
 
-void PrecompileReplay::Report(bool final) {
+void PrecompileRecord::Report(bool final) {
     const auto now = std::chrono::steady_clock::now();
     if (!final && (now - last_report < ReportInterval || record == record_reported)) {
         return;
@@ -202,7 +202,7 @@ void PrecompileReplay::Report(bool final) {
                     .c_str());
 }
 
-void PrecompileReplay::Capture(PipelineCache& cache) {
+void PrecompileRecord::Capture(PipelineCache& cache) {
     const auto& sel = cache.sel;
     const u64 key_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
     if (!seen.insert(key_hash).second) {
@@ -260,7 +260,7 @@ void PrecompileReplay::Capture(PipelineCache& cache) {
 }
 
 /// Appends a capture to the list file, after the code of programs it uses first.
-void PrecompileReplay::Record(const KeyCapture& c) {
+void PrecompileRecord::Record(const KeyCapture& c) {
     // The rebuild takes vertex + fragment keys only: a geometry key's selection also reads
     // the copy shader through vs_program, which is not among the recorded stages.
     if (c.regs->stage_enable.raw != AmdGpu::ShaderStageEnable::Vs) {
@@ -293,7 +293,7 @@ void PrecompileReplay::Record(const KeyCapture& c) {
 }
 
 /// Writes a program's code before the first entry that uses it, once per program.
-void PrecompileReplay::RecordCode(const StageCapture& stage) {
+void PrecompileRecord::RecordCode(const StageCapture& stage) {
     if (!record_file || !code_seen.insert(stage.hash).second) {
         return;
     }
@@ -307,7 +307,7 @@ void PrecompileReplay::RecordCode(const StageCapture& stage) {
 }
 
 /// Appends one entry to the list file, flushed at once: the game may end without exiting.
-bool PrecompileReplay::WriteRecord(const std::vector<u8>& bytes) {
+bool PrecompileRecord::WriteRecord(const std::vector<u8>& bytes) {
     if (bytes.size() > MaxListEntryBytes || record.bytes + bytes.size() > MaxListBytes) {
         if (!record_capped_logged) {
             record_capped_logged = true;
@@ -328,7 +328,7 @@ bool PrecompileReplay::WriteRecord(const std::vector<u8>& bytes) {
     return true;
 }
 
-const char* PrecompileReplay::RecordStage(const Shader::Info& info, StageCapture& stage,
+const char* PrecompileRecord::RecordStage(const Shader::Info& info, StageCapture& stage,
                                           KeyCapture& c) {
     if (info.user_data.size() != stage.user_data.size()) {
         return "unexpected user data size";
@@ -346,7 +346,7 @@ const char* PrecompileReplay::RecordStage(const Shader::Info& info, StageCapture
     return completed ? error : "fault while recording";
 }
 
-const char* PrecompileReplay::RecordWalker(const Shader::Info& info, StageCapture& stage,
+const char* PrecompileRecord::RecordWalker(const Shader::Info& info, StageCapture& stage,
                                            KeyCapture& c) {
     if (!info.srt_info.walker_func) {
         return nullptr;
@@ -383,7 +383,7 @@ const char* PrecompileReplay::RecordWalker(const Shader::Info& info, StageCaptur
     return nullptr;
 }
 
-const char* PrecompileReplay::RecordFetch(const Shader::Info& info, StageCapture& stage,
+const char* PrecompileRecord::RecordFetch(const Shader::Info& info, StageCapture& stage,
                                           KeyCapture& c) {
     if (!info.has_fetch_shader) {
         return nullptr;
@@ -424,11 +424,11 @@ const char* PrecompileReplay::RecordFetch(const Shader::Info& info, StageCapture
     return nullptr;
 }
 
-void PrecompileReplayDeleter::operator()(PrecompileReplay* replay) const {
-    if (g_active == replay) {
+void PrecompileRecordDeleter::operator()(PrecompileRecord* record) const {
+    if (g_active == record) {
         g_active = nullptr;
     }
-    delete replay;
+    delete record;
 }
 
 namespace Precompile {
@@ -504,7 +504,7 @@ std::FILE* OpenRecord(const char* path) {
 }
 } // namespace
 
-PrecompileReplayPtr MakePrecompileReplay() {
+PrecompileRecordPtr MakePrecompileRecord() {
     const char* record_path = PathSetting("GOW3_PRECOMPILE_RECORD");
     const char* list_path = PathSetting("GOW3_PRECOMPILE_LIST");
     const char* boot = std::getenv("GOW3_PRECOMPILE_BOOT");
@@ -538,9 +538,9 @@ PrecompileReplayPtr MakePrecompileReplay() {
     }
     static const bool report_at_exit = std::atexit(ReportAtExit) == 0;
     (void)report_at_exit;
-    auto* precompile = new PrecompileReplay(record_file);
+    auto* precompile = new PrecompileRecord(record_file);
     g_active = precompile;
-    return PrecompileReplayPtr{precompile};
+    return PrecompileRecordPtr{precompile};
 #endif
 }
 
@@ -550,7 +550,7 @@ void PipelineCache::CapturePrecompile() {
     }
 }
 
-void PipelineCache::ReplayPrecompile() {
+void PipelineCache::ReportPrecompile() {
     if (precompile) {
         precompile->Report(false);
     }
