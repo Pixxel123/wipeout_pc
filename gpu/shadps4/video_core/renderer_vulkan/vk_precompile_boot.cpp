@@ -440,13 +440,10 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
         }
     } else {
         // As GetProgram looks a permutation up: the first Info with this draw's user data.
-        if (!CheckWalk(program.info, params.hash)) {
-            return {};
-        }
         program.info.pgm_base = params.Base();
         program.info.user_data = params.user_data;
         program.info.RefreshFlatBuf();
-        if (Failed()) {
+        if (Failed() || !CheckWalk(program.info, params.hash)) {
             return {};
         }
         const Shader::StageSpecialization spec{program.info, runtime_info, cache.profile,
@@ -515,8 +512,11 @@ std::optional<size_t> PrecompileBoot::Translate(BootProgram& program, bool initi
 
 /// Runs the program's walker on the stage's recorded user data and words alone, served by the
 /// fault handler as when they were recorded: false (the entry stops) when it reads a word or
-/// follows a pointer the recording did not. The shadow copy cannot tell: its gaps read as
-/// zero and a pointer it does not lead in still holds a guest address, both without a fault.
+/// follows a pointer the recording did not, or when the walk through the shadow copy (the
+/// flattened user data `info` holds) read other values. The shadow copy cannot tell by itself:
+/// its gaps read as zero and a pointer it does not lead in still holds a guest address, both
+/// without a fault; a word recorded through one table but read through another, or half of a
+/// pointer read as a plain word (repointed in the copy), reads other values there.
 bool PrecompileBoot::CheckWalk(const Shader::Info& info, u64 hash) {
     if (!info.srt_info.walker_func) {
         return true;
@@ -553,6 +553,13 @@ bool PrecompileBoot::CheckWalk(const Shader::Info& info, u64 hash) {
             return std::ranges::find(stage->roots, root) != stage->roots.end();
         })) {
         why = "a user-data pointer the recording did not follow";
+    }
+    // Past the user data, which the shadow walk read with its pointers repointed.
+    const auto& walked = info.flattened_ud_buf;
+    if (!why && (walked.size() != flat.size() || flat.size() < ListUserDataWords ||
+                 !std::equal(flat.begin() + ListUserDataWords, flat.end(),
+                             walked.begin() + ListUserDataWords))) {
+        why = "the shadow copy gave other values than the recording";
     }
     if (why) {
         Stop(Reject::StrayWalk, fmt::format("program {:016x}: {}", hash, why));
