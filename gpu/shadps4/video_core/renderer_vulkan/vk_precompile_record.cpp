@@ -27,6 +27,7 @@
 #include <cstring>
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -102,11 +103,11 @@ void AddRoot(StageCapture& stage, u32 sgpr, u64 target) {
     stage.roots.emplace_back(sgpr, target);
 }
 
-/// New keys captured or not, captures written to the list file or not, programs whose code
-/// was written.
+/// New keys captured or not, captures written to the list file, already in it or not written,
+/// programs whose code was written.
 struct RecordTally {
     u64 captured, capture_failed, skipped, words;
-    u64 written, bytes, not_written, code_written, code_missing;
+    u64 written, bytes, already, not_written, code_written, code_missing;
     bool operator==(const RecordTally&) const = default;
 };
 
@@ -139,8 +140,11 @@ std::vector<u32> ReadProgramCode(VAddr address) {
 } // namespace
 
 struct PrecompileRecord {
-    PrecompileRecord(std::FILE* record_file_)
-        : record_file{record_file_}, slots{g_reserved.record, RecordSlotSize, NumRecordSlots} {}
+    PrecompileRecord(std::FILE* record_file_, ListAppend&& kept)
+        : record_file{record_file_}, list_bytes{kept.keep ? kept.bytes - EncodeListHeader().size()
+                                                          : 0},
+          keys{std::move(kept.keys)}, code_seen{kept.code.begin(), kept.code.end()},
+          slots{g_reserved.record, RecordSlotSize, NumRecordSlots} {}
     ~PrecompileRecord() {
         if (record_file) {
             std::fclose(record_file);
@@ -163,9 +167,11 @@ private:
     const char* RecordFetch(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
 
     std::FILE* record_file; ///< null once a write failed
+    size_t list_bytes;      ///< the file's entries, kept and written: what the size cap counts
     RecordTally record{}, record_reported{};
     bool record_capped_logged = false;
-    std::unordered_set<u64> code_seen; ///< programs whose code was written or not found
+    std::set<u64> keys;                ///< the file's keys, by KeyContentHash
+    std::unordered_set<u64> code_seen; ///< programs whose code is in the file or not found
     RecordSlots slots;
     std::unordered_set<u64> seen; ///< key hashes already captured or skipped
     u32 failure_lines = 0;
@@ -193,12 +199,12 @@ void PrecompileRecord::Report(bool final) {
     const auto& t = record;
     std::printf("%s\n",
                 fmt::format("Precompile record: {} captured, {} capture failed, {} skipped "
-                            "(cap/hs/motion), {} guest words, {} written ({} KiB), {} not "
-                            "written (geometry/size/write), code of {} programs, {} without "
-                            "code{}",
+                            "(cap/hs/motion), {} guest words, {} written ({} KiB), {} already "
+                            "in the list, {} not written (geometry/size/write), code of {} "
+                            "programs, {} without code{}",
                             t.captured, t.capture_failed, t.skipped, t.words, t.written,
-                            t.bytes >> 10, t.not_written, t.code_written, t.code_missing,
-                            final ? " (exit)" : "")
+                            t.bytes >> 10, t.already, t.not_written, t.code_written,
+                            t.code_missing, final ? " (exit)" : "")
                     .c_str());
 }
 
@@ -282,11 +288,18 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     }
     key.words = c.words;
     key.pointers = c.pointers;
+    // An earlier launch recorded it (and its programs' code) already.
+    const u64 content = KeyContentHash(key);
+    if (keys.contains(content)) {
+        ++record.already;
+        return;
+    }
     for (const auto& stage : c.stages) {
         RecordCode(stage);
     }
     if (record_file && WriteRecord(EncodeListEntry(key))) {
         ++record.written;
+        keys.insert(content);
     } else {
         ++record.not_written;
     }
@@ -308,7 +321,7 @@ void PrecompileRecord::RecordCode(const StageCapture& stage) {
 
 /// Appends one entry to the list file, flushed at once: the game may end without exiting.
 bool PrecompileRecord::WriteRecord(const std::vector<u8>& bytes) {
-    if (bytes.size() > MaxListEntryBytes || record.bytes + bytes.size() > MaxListBytes) {
+    if (!ListHasRoom(list_bytes, bytes.size())) {
         if (!record_capped_logged) {
             record_capped_logged = true;
             std::printf("Precompile record: list full (%zu MiB), later captures not written\n",
@@ -325,6 +338,7 @@ bool PrecompileRecord::WriteRecord(const std::vector<u8>& bytes) {
         return false;
     }
     record.bytes += bytes.size();
+    list_bytes += bytes.size();
     return true;
 }
 
@@ -431,26 +445,46 @@ void PrecompileRecordDeleter::operator()(PrecompileRecord* record) const {
     delete record;
 }
 
+namespace {
+/// The most a list file can hold.
+size_t MaxListFileBytes() {
+    return MaxListBytes + EncodeListHeader().size();
+}
+
+/// Reads a whole file, but not much more than `limit` bytes: a larger file shows by its size.
+/// False when it cannot be read (errno says why).
+bool ReadFileBytes(const char* path, size_t limit, std::vector<u8>& bytes) {
+    std::FILE* file = std::fopen(path, "rb");
+    if (!file) {
+        return false;
+    }
+    bytes.clear();
+    u8 chunk[1 << 16];
+    for (size_t read; bytes.size() <= limit && (read = std::fread(chunk, 1, sizeof(chunk), file));) {
+        bytes.insert(bytes.end(), chunk, chunk + read);
+    }
+    const bool failed = std::ferror(file);
+    std::fclose(file);
+    if (failed) {
+        errno = EIO;
+    }
+    return !failed;
+}
+} // namespace
+
 namespace Precompile {
 
 std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys) {
-    std::FILE* file = std::fopen(path, "rb");
-    if (!file) {
+    std::vector<u8> bytes;
+    if (!ReadFileBytes(path, MaxListFileBytes(), bytes)) {
         std::printf("Precompile list: cannot read %s (%s), off\n", path, std::strerror(errno));
         return std::nullopt;
     }
-    std::vector<u8> bytes;
-    u8 chunk[1 << 16];
-    for (size_t read; (read = std::fread(chunk, 1, sizeof(chunk), file)) != 0;) {
-        if (bytes.size() + read > MaxListBytes + EncodeListHeader().size()) {
-            std::fclose(file);
-            std::printf("Precompile list: %s is larger than %zu MiB, rejected\n", path,
-                        MaxListBytes >> 20);
-            return std::nullopt;
-        }
-        bytes.insert(bytes.end(), chunk, chunk + read);
+    if (bytes.size() > MaxListFileBytes()) {
+        std::printf("Precompile list: %s is larger than %zu MiB, rejected\n", path,
+                    MaxListBytes >> 20);
+        return std::nullopt;
     }
-    std::fclose(file);
     auto parsed = ParseList(bytes, max_keys);
     switch (parsed.status) {
     case ParsedList::Status::Ok:
@@ -487,8 +521,35 @@ bool SameFile(const char* a, const char* b) {
     return error ? std::string_view{a} == b : same;
 }
 
-/// A new list file with its header, or null (logged).
-std::FILE* OpenRecord(const char* path) {
+/// The list file to record into, null when it cannot be written (logged). A list of this
+/// version is kept and appended to, without a cut-off last entry (the game may end inside a
+/// write); anything else is written anew. `kept` says what the file holds.
+std::FILE* OpenRecord(const char* path, ListAppend& kept) {
+    std::vector<u8> existing;
+    if (!ReadFileBytes(path, MaxListFileBytes(), existing) && errno != ENOENT) {
+        std::printf("Precompile record: cannot read %s (%s), off\n", path, std::strerror(errno));
+        return nullptr;
+    }
+    kept = PlanListAppend(existing);
+    if (kept.keep) {
+        std::error_code error;
+        if (existing.size() > kept.bytes) {
+            std::filesystem::resize_file(path, kept.bytes, error);
+        }
+        std::FILE* file = error ? nullptr : std::fopen(path, "ab");
+        if (!file) {
+            std::printf("Precompile record: cannot write %s (%s), off\n", path,
+                        error ? error.message().c_str() : std::strerror(errno));
+            return nullptr;
+        }
+        std::printf("Precompile record: appending to %s (%zu keys, code of %zu programs%s)\n",
+                    path, kept.keys.size(), kept.code.size(),
+                    existing.size() > kept.bytes ? ", a cut-off last entry dropped" : "");
+        return file;
+    }
+    if (kept.why) {
+        std::printf("Precompile record: %s %s, written anew\n", path, kept.why);
+    }
     std::FILE* file = std::fopen(path, "wb");
     const auto header = EncodeListHeader();
     if (!file || std::fwrite(header.data(), 1, header.size(), file) != header.size() ||
@@ -528,7 +589,8 @@ PrecompileRecordPtr MakePrecompileRecord() {
     std::printf("Precompile record: not supported on this platform\n");
     return nullptr;
 #else
-    std::FILE* record_file = OpenRecord(record_path);
+    ListAppend kept;
+    std::FILE* record_file = OpenRecord(record_path, kept);
     if (!record_file) {
         return nullptr;
     }
@@ -538,7 +600,7 @@ PrecompileRecordPtr MakePrecompileRecord() {
     }
     static const bool report_at_exit = std::atexit(ReportAtExit) == 0;
     (void)report_at_exit;
-    auto* precompile = new PrecompileRecord(record_file);
+    auto* precompile = new PrecompileRecord(record_file, std::move(kept));
     g_active = precompile;
     return PrecompileRecordPtr{precompile};
 #endif
