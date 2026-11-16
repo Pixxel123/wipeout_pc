@@ -22,12 +22,14 @@ RecordedKey SampleKey(u64 seed) {
     fragment.sw_stage = 0;
     fragment.hw_stage = 0;
     fragment.hash = 0xF5F5'0000ULL + seed;
+    fragment.spec_digest = 0x5EC0'0000ULL + seed;
     fragment.user_data[0] = u32(Table);
     fragment.roots = {{0, Table}};
     RecordedStage vertex{};
     vertex.sw_stage = 3;
     vertex.hw_stage = 1;
     vertex.hash = 0x7575'0000ULL + seed;
+    vertex.spec_digest = 0x5EC1'0000ULL + seed;
     key.stages = {fragment, vertex};
     key.words = {{Table, 8, u32(Nested)}, {Table, 12, 0}, {Table, 64, 0xAAAA5555},
                  {Nested, 0, u32(seed)}};
@@ -258,16 +260,32 @@ void TestOldVersion() {
     assert(list.status == ParsedList::Status::OtherVersion && list.version == 1);
 }
 
-void TestContentHash() {
-    // The key hash numbers permutations by first use, so a launch can record the same guest
-    // inputs under another one: the content hash leaves it out.
-    auto renumbered = SampleKey(1);
-    renumbered.key_hash ^= 0xFF;
-    assert(KeyContentHash(renumbered) == KeyContentHash(SampleKey(1)));
-    auto other = SampleKey(1);
-    other.words[2].value ^= 1;
-    assert(KeyContentHash(other) != KeyContentHash(SampleKey(1)));
-    assert(KeyContentHash(SampleKey(2)) != KeyContentHash(SampleKey(1)));
+void TestStagesDigest() {
+    // Another launch records the same pipeline with other key hash, guest addresses, registers
+    // and table words: the stages' programs and specs say it is the same.
+    auto relaunched = SampleKey(1);
+    relaunched.key_hash ^= 0xFF;
+    relaunched.regs[0].second += 0x1000;
+    relaunched.stages[0].user_data[0] += 0x40;
+    relaunched.stages[0].roots[0].second += 0x40;
+    for (auto& word : relaunched.words) {
+        word.base += 0x40;
+    }
+    relaunched.words[2].value ^= 1;
+    relaunched.pointers[0].base += 0x40;
+    const auto digest = [](const RecordedKey& key) { return StagesDigest(key.stages); };
+    assert(digest(relaunched) == digest(SampleKey(1)));
+    // Another permutation of one stage, or another program, is a new entry.
+    auto other_spec = SampleKey(1);
+    other_spec.stages[1].spec_digest ^= 1;
+    assert(digest(other_spec) != digest(SampleKey(1)));
+    auto other_program = SampleKey(1);
+    other_program.stages[0].hash ^= 1;
+    assert(digest(other_program) != digest(SampleKey(1)));
+    // The stages count as a whole: a key with only one of them is another entry.
+    auto one_stage = SampleKey(1);
+    one_stage.stages.pop_back();
+    assert(digest(one_stage) != digest(SampleKey(1)));
 }
 
 void TestAppendKeeps() {
@@ -283,7 +301,7 @@ void TestAppendKeeps() {
     Append(file, EncodeListEntry(SampleKey(2)));
     const auto plan = PlanListAppend(file);
     assert(plan.keep && !plan.why && plan.bytes == file.size());
-    assert(plan.keys == (std::set<u64>{KeyContentHash(key), KeyContentHash(SampleKey(2))}));
+    assert(plan.keys == (std::set<u64>{StagesDigest(key.stages), StagesDigest(SampleKey(2).stages)}));
     assert(plan.code == std::set<u64>{fragment});
 
     // A header alone is kept as an empty list.
@@ -299,7 +317,7 @@ void TestAppendAfterCutOff() {
     for (size_t size = first_end + 1; size < whole.size(); ++size) {
         const auto plan = PlanListAppend(std::span<const u8>{whole.data(), size});
         assert(plan.keep && plan.bytes == first_end);
-        assert(plan.keys == std::set<u64>{KeyContentHash(SampleKey(1))});
+        assert(plan.keys == std::set<u64>{StagesDigest(SampleKey(1).stages)});
         std::vector<u8> file{whole.begin(), whole.begin() + plan.bytes};
         Append(file, EncodeListEntry(SampleKey(3)));
         const auto list = ParseList(file, 100);
@@ -310,7 +328,7 @@ void TestAppendAfterCutOff() {
     corrupt[EncodeListHeader().size() + 4 + 8 + 20] ^= 0x40;
     const auto plan = PlanListAppend(corrupt);
     assert(plan.keep && plan.bytes == corrupt.size());
-    assert(plan.keys == std::set<u64>{KeyContentHash(SampleKey(2))});
+    assert(plan.keys == std::set<u64>{StagesDigest(SampleKey(2).stages)});
 }
 
 void TestAppendReplaces() {
@@ -350,7 +368,7 @@ int main() {
     TestCode();
     TestCodeRejects();
     TestOldVersion();
-    TestContentHash();
+    TestStagesDigest();
     TestAppendKeeps();
     TestAppendAfterCutOff();
     TestAppendReplaces();

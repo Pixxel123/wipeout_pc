@@ -28,11 +28,14 @@
 #include <filesystem>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <unordered_set>
 #include <fmt/format.h>
 
+#include "common/hash.h"
+#include "common/serdes.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -68,6 +71,7 @@ struct StageCapture {
     SwStage sw_stage;
     HwStage hw_stage;
     u64 hash;
+    u64 spec_digest; ///< RecordedStage::spec_digest
     VAddr code;
     u64 walker, walker_size; ///< the SRT walker's code
     AmdGpu::UserData user_data;
@@ -161,6 +165,7 @@ private:
     void Record(const KeyCapture& c);
     void RecordCode(const StageCapture& stage);
     bool WriteRecord(const std::vector<u8>& bytes);
+    static std::optional<u64> SpecDigest(PipelineCache& cache, u64 program, u64 stage_hash);
     const char* RecordStage(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordWalker(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordFetch(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
@@ -169,7 +174,7 @@ private:
     size_t list_bytes;      ///< the file's entries, kept and written: what the size cap counts
     RecordTally record{}, record_reported{};
     bool record_capped_logged = false;
-    std::set<u64> keys;                ///< the file's keys, by KeyContentHash
+    std::set<u64> keys;                ///< the file's keys, by StagesDigest
     std::unordered_set<u64> code_seen; ///< programs whose code is in the file or not found
     RecordSlots slots;
     std::unordered_set<u64> seen; ///< key hashes already captured or skipped
@@ -243,7 +248,9 @@ void PrecompileRecord::Capture(PipelineCache& cache) {
         stage.code = sel.regs->ProgramForStage(u32(info->hw_stage))->Address<VAddr>();
         stage.walker = u64(info->srt_info.walker_func);
         stage.walker_size = info->srt_info.walker_func_size;
-        if (const char* error = RecordStage(*info, stage, c)) {
+        const auto digest = SpecDigest(cache, stage.hash, sel.graphics_key.stage_hashes[i]);
+        stage.spec_digest = digest.value_or(0);
+        if (const char* error = digest ? RecordStage(*info, stage, c) : "permutation not found") {
             ++record.capture_failed;
             if (failure_lines++ < MaxDetails) {
                 std::printf("Precompile record: capture of key %016llx failed, stage %u "
@@ -283,7 +290,7 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     }
     for (const auto& stage : c.stages) {
         key.stages.push_back({u32(stage.sw_stage), u32(stage.hw_stage), stage.hash,
-                              stage.user_data, stage.roots});
+                              stage.spec_digest, stage.user_data, stage.roots});
     }
     key.words = c.words;
     key.pointers = c.pointers;
@@ -291,7 +298,7 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     for (const auto& stage : c.stages) {
         RecordCode(stage);
     }
-    const u64 content = KeyContentHash(key);
+    const u64 content = StagesDigest(key.stages);
     if (keys.contains(content)) {
         ++record.already;
         return;
@@ -302,6 +309,27 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     } else {
         ++record.not_written;
     }
+}
+
+/// The digest of the spec of the permutation a key's stage hash (HashCombine(program, index))
+/// names; none when the program has no such permutation.
+std::optional<u64> PrecompileRecord::SpecDigest(PipelineCache& cache, u64 program,
+                                                u64 stage_hash) {
+    std::shared_lock lock{cache.programs_mutex};
+    const auto found = cache.program_cache.find(program);
+    if (found == cache.program_cache.end()) {
+        return std::nullopt;
+    }
+    const auto& modules = found->second->modules;
+    for (size_t index = 0; index < modules.size(); ++index) {
+        if (HashCombine(program, u64(index)) == stage_hash) {
+            Serialization::Archive ar;
+            modules[index].spec.Serialize(ar);
+            const std::vector<u8> bytes = ar.TakeOff();
+            return Fnv1a(bytes);
+        }
+    }
+    return std::nullopt;
 }
 
 /// Writes a program's code before the first entry that uses it, once per program.

@@ -12,8 +12,9 @@
 //   entries: body size, FNV-1a 64 of the body, body
 //   body: its kind, then
 //     a key: recorded key hash, draw-indirect sgpr offsets, the nonzero register words, then per
-//            stage its program's hash, user data and user-data pointers, then the guest words
-//            and the table pointers (vk_precompile_shadow.h);
+//            stage its program's hash, the digest of the spec the draw selected, user data and
+//            user-data pointers, then the guest words and the table pointers
+//            (vk_precompile_shadow.h);
 //     a program's code (once per program hash, before the first key that uses it): the hash
 //            and the code words, from the start token through the OrbShdr header.
 // No translator output: the list outlives a shader store reset. The code is the game's: a
@@ -37,7 +38,7 @@
 namespace Vulkan::Precompile {
 
 constexpr std::array<char, 8> ListMagic = {'G', 'O', 'W', '3', 'P', 'C', 'L', '\n'};
-constexpr u32 ListVersion = 2;
+constexpr u32 ListVersion = 3;
 
 /// The build's layout, checked in the header (the recorder static_asserts them).
 constexpr u32 ListRegsWords = 0xD000;  ///< AmdGpu::Regs::NumRegs
@@ -77,6 +78,9 @@ struct RecordedStage {
     u32 sw_stage;
     u32 hw_stage;
     u64 hash;
+    /// FNV-1a 64 of the serialized StageSpecialization of the permutation the recording draw
+    /// selected: what the rebuild writes to the store's meta for this stage.
+    u64 spec_digest;
     std::array<u32, ListUserDataWords> user_data;
     std::vector<std::pair<u32, u64>> roots; ///< user-data pointers followed: first sgpr, target
     bool operator==(const RecordedStage&) const = default;
@@ -292,6 +296,7 @@ inline bool Decode(Reader& in, RecordedKey& key) {
         stage.sw_stage = in.Get<u32>();
         stage.hw_stage = in.Get<u32>();
         stage.hash = in.Get<u64>();
+        stage.spec_digest = in.Get<u64>();
         for (auto& word : stage.user_data) {
             word = in.Get<u32>();
         }
@@ -384,6 +389,7 @@ inline const char* AddCode(Reader& in, std::map<u64, std::vector<u32>>& code) {
         Put(body, stage.sw_stage);
         Put(body, stage.hw_stage);
         Put(body, stage.hash);
+        Put(body, stage.spec_digest);
         for (const u32 word : stage.user_data) {
             Put(body, word);
         }
@@ -491,11 +497,17 @@ struct ParsedList {
     return list;
 }
 
-/// A key's content without its key hash, which holds permutation numbers and so differs
-/// between launches: what a recording dedupes against the list it appends to.
-[[nodiscard]] inline u64 KeyContentHash(RecordedKey key) {
-    key.key_hash = 0;
-    return Fnv1a(EncodeListEntry(key));
+/// What the rebuild makes of an entry: per stage its program and spec. Entries alike in this
+/// translate to the same permutations, whatever their guest addresses and registers (which
+/// differ between launches): a recording keeps one of them.
+[[nodiscard]] inline u64 StagesDigest(std::span<const RecordedStage> stages) {
+    std::vector<u8> bytes;
+    for (const auto& stage : stages) {
+        ListDetail::Put(bytes, stage.sw_stage);
+        ListDetail::Put(bytes, stage.hash);
+        ListDetail::Put(bytes, stage.spec_digest);
+    }
+    return Fnv1a(bytes);
 }
 
 /// Whether an entry of `entry_bytes` still fits a list whose entries take `list_bytes`
@@ -510,7 +522,7 @@ struct ListAppend {
     bool keep = false;          ///< append to the file; otherwise it is written anew
     const char* why = nullptr;  ///< why an existing file is written anew
     size_t bytes = 0;           ///< kept: the header and every entry that could be framed
-    std::set<u64> keys;         ///< kept keys, by KeyContentHash
+    std::set<u64> keys;         ///< kept keys, by StagesDigest
     std::set<u64> code;         ///< programs whose code is kept
 };
 
@@ -541,7 +553,7 @@ struct ListAppend {
     plan.keep = true;
     plan.bytes = list.framed_bytes;
     for (const auto& key : list.keys) {
-        plan.keys.insert(KeyContentHash(key));
+        plan.keys.insert(StagesDigest(key.stages));
     }
     for (const auto& [hash, words] : list.code) {
         plan.code.insert(hash);
