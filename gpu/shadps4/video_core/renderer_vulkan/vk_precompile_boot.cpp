@@ -22,6 +22,8 @@
 // SRT walker patch never rewrites a walker that the store then saves. A walker that reads a
 // word or follows a pointer the recording did not would read the shadow's gaps or a stale guest
 // address without faulting, so each walk is first run on the recorded words alone (CheckWalk).
+// An assert in the translator ends the game instead: a marker file beside the list names the
+// entry being translated, and the next start skips the entries it names (CrashMarker).
 
 #include <algorithm>
 #include <bit>
@@ -31,6 +33,7 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <fmt/format.h>
@@ -144,6 +147,48 @@ bool ReadRecorded(u64 address, void* out, size_t size) {
     return true;
 }
 
+/// The crash-loop guard: `<list>.boot` names, one key hash per line, the entries a start ended
+/// in, plus the one being translated. A translator assert exits the game (_Exit) and the disk
+/// marker is saved only after the rebuild, so the next start rebuilds again and skips them.
+class CrashMarker {
+public:
+    explicit CrashMarker(std::string path_) : path{std::move(path_)} {
+        if (std::FILE* file = std::fopen(path.c_str(), "r")) {
+            for (unsigned long long hash; std::fscanf(file, "%llx", &hash) == 1;) {
+                earlier.insert(hash);
+            }
+            std::fclose(file);
+        }
+    }
+
+    /// Whether an earlier start ended while translating this entry.
+    [[nodiscard]] bool Skip(u64 key_hash) const {
+        return earlier.contains(key_hash);
+    }
+
+    /// Names `key_hash` as the entry being translated, before it starts.
+    void Enter(u64 key_hash) {
+        std::FILE* file = std::fopen(path.c_str(), "w");
+        if (!file) {
+            return;
+        }
+        for (const u64 hash : earlier) {
+            std::fprintf(file, "%016llx\n", static_cast<unsigned long long>(hash));
+        }
+        std::fprintf(file, "%016llx\n", static_cast<unsigned long long>(key_hash));
+        std::fclose(file);
+    }
+
+    /// The rebuild ended: nothing to skip next time.
+    void Finish() const {
+        std::remove(path.c_str());
+    }
+
+private:
+    std::string path;
+    std::set<u64> earlier;
+};
+
 u64 PeakMemoryMiB() {
 #ifdef __linux__
     rusage usage{};
@@ -156,7 +201,8 @@ u64 PeakMemoryMiB() {
 } // namespace
 
 struct PrecompileBoot {
-    PrecompileBoot(PipelineCache& cache_, const ParsedList& list_) : cache{cache_}, list{list_} {}
+    PrecompileBoot(PipelineCache& cache_, const ParsedList& list_, std::string marker_path)
+        : cache{cache_}, list{list_}, marker{std::move(marker_path)} {}
 
     void Run();
     PipelineCache::Result Program(const Shader::ShaderParams& params, HwStage hw_stage,
@@ -197,7 +243,8 @@ private:
     std::optional<Reject> stopped;
     std::string stop_detail;
 
-    u32 translated = 0, permutations = 0;
+    CrashMarker marker;
+    u32 translated = 0, permutations = 0, skipped = 0;
     std::array<u32, size_t(Reject::Count)> rejects{};
     std::chrono::steady_clock::time_point started;
 };
@@ -213,8 +260,18 @@ void PrecompileBoot::Run() {
     walk_roots.reserve(ListUserDataWords);
     const u32 count = u32(std::min<size_t>(list.keys.size(), MaxEntries));
     for (u32 index = 0; index < count; ++index) {
-        Entry(index, list.keys[index]);
+        const auto& key = list.keys[index];
+        if (marker.Skip(key.key_hash)) {
+            ++skipped;
+            std::printf("Precompile boot: entry %u (recorded key %016llx) skipped: the previous "
+                        "start ended while translating it\n",
+                        index, static_cast<unsigned long long>(key.key_hash));
+            continue;
+        }
+        marker.Enter(key.key_hash);
+        Entry(index, key);
     }
+    marker.Finish();
     Report();
 }
 
@@ -523,9 +580,10 @@ void PrecompileBoot::Report() const {
                         .count();
     std::printf("%s\n",
                 fmt::format("Precompile boot: {} entries, {} translated, {} programs, {} "
-                            "permutations written, {} rejected{}, {} ms, peak memory {} MiB",
+                            "permutations written, {} rejected{}, {} skipped (crash marker), "
+                            "{} ms, peak memory {} MiB",
                             list.keys.size(), translated, programs.size(), permutations,
-                            rejected, reasons.empty() ? "" : " (" + reasons + ")", ms,
+                            rejected, reasons.empty() ? "" : " (" + reasons + ")", skipped, ms,
                             PeakMemoryMiB())
                     .c_str());
 }
@@ -552,7 +610,7 @@ bool PipelineCache::RebuildFromPrecompileList() {
     if (!parsed || !SetUpFaultGuard()) {
         return false;
     }
-    auto boot_run = std::make_unique<PrecompileBoot>(*this, *parsed);
+    auto boot_run = std::make_unique<PrecompileBoot>(*this, *parsed, std::string{path} + ".boot");
     boot_run->Run();
     return true;
 #endif
