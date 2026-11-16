@@ -191,6 +191,9 @@ public:
     [[nodiscard]] bool AtEnd() const {
         return at == bytes.size();
     }
+    [[nodiscard]] size_t Position() const {
+        return at;
+    }
 
 private:
     std::span<const u8> bytes;
@@ -426,6 +429,7 @@ struct ParsedList {
     std::map<u64, std::vector<u32>> code; ///< program hash -> code words, checked (CheckCode)
     u32 rejected = 0;                 ///< entries dropped: corrupt, invalid, cut off or past the cap
     std::vector<std::string> reasons; ///< why, for the first few
+    size_t framed_bytes = 0; ///< the header and every entry that could be framed: no cut-off tail
 };
 
 /// Reads a list; keeps at most `max_keys` entries.
@@ -454,6 +458,7 @@ struct ParsedList {
         return list;
     }
     list.status = ParsedList::Status::Ok;
+    list.framed_bytes = in.Position();
     const auto reject = [&](std::string why) {
         if (list.reasons.size() < max_reasons) {
             list.reasons.push_back(std::move(why));
@@ -468,6 +473,7 @@ struct ParsedList {
             reject("entry " + std::to_string(index) + ": cut off");
             break; // the rest cannot be framed
         }
+        list.framed_bytes = in.Position();
         const char* why = Fnv1a(body) != checksum ? "checksum mismatch" : nullptr;
         ListDetail::Reader entry{body};
         const auto kind = entry.Get<ListRecord>();
@@ -483,6 +489,64 @@ struct ParsedList {
         }
     }
     return list;
+}
+
+/// A key's content without its key hash, which holds permutation numbers and so differs
+/// between launches: what a recording dedupes against the list it appends to.
+[[nodiscard]] inline u64 KeyContentHash(RecordedKey key) {
+    key.key_hash = 0;
+    return Fnv1a(EncodeListEntry(key));
+}
+
+/// Whether an entry of `entry_bytes` still fits a list whose entries take `list_bytes`
+/// (LoadListFile reads at most the header plus MaxListBytes).
+[[nodiscard]] inline bool ListHasRoom(size_t list_bytes, size_t entry_bytes) {
+    return entry_bytes <= MaxListEntryBytes && list_bytes + entry_bytes <= MaxListBytes;
+}
+
+/// What a recording keeps of the list file it was given (GOW3_PRECOMPILE_RECORD): a list of
+/// this version grows over launches; anything else is written anew.
+struct ListAppend {
+    bool keep = false;          ///< append to the file; otherwise it is written anew
+    const char* why = nullptr;  ///< why an existing file is written anew
+    size_t bytes = 0;           ///< kept: the header and every entry that could be framed
+    std::set<u64> keys;         ///< kept keys, by KeyContentHash
+    std::set<u64> code;         ///< programs whose code is kept
+};
+
+/// `file` is the existing file's bytes, empty when there is none.
+[[nodiscard]] inline ListAppend PlanListAppend(std::span<const u8> file) {
+    ListAppend plan;
+    if (file.empty()) {
+        return plan;
+    }
+    if (file.size() > MaxListBytes + EncodeListHeader().size()) {
+        plan.why = "is larger than a list can be";
+        return plan;
+    }
+    const auto list = ParseList(file, ~0u, 0);
+    switch (list.status) {
+    case ParsedList::Status::NotAList:
+        plan.why = "is not a precompile list";
+        return plan;
+    case ParsedList::Status::OtherVersion:
+        plan.why = "has another list version";
+        return plan;
+    case ParsedList::Status::OtherLayout:
+        plan.why = "has another register layout";
+        return plan;
+    case ParsedList::Status::Ok:
+        break;
+    }
+    plan.keep = true;
+    plan.bytes = list.framed_bytes;
+    for (const auto& key : list.keys) {
+        plan.keys.insert(KeyContentHash(key));
+    }
+    for (const auto& [hash, words] : list.code) {
+        plan.code.insert(hash);
+    }
+    return plan;
 }
 
 /// Reads the list at `path` (vk_precompile_record.cpp); none when it cannot be used (logged).

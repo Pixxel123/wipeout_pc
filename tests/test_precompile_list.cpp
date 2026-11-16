@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
 
@@ -257,6 +258,87 @@ void TestOldVersion() {
     assert(list.status == ParsedList::Status::OtherVersion && list.version == 1);
 }
 
+void TestContentHash() {
+    // The key hash numbers permutations by first use, so a launch can record the same guest
+    // inputs under another one: the content hash leaves it out.
+    auto renumbered = SampleKey(1);
+    renumbered.key_hash ^= 0xFF;
+    assert(KeyContentHash(renumbered) == KeyContentHash(SampleKey(1)));
+    auto other = SampleKey(1);
+    other.words[2].value ^= 1;
+    assert(KeyContentHash(other) != KeyContentHash(SampleKey(1)));
+    assert(KeyContentHash(SampleKey(2)) != KeyContentHash(SampleKey(1)));
+}
+
+void TestAppendKeeps() {
+    // No file yet: written anew, without a reason to log.
+    const auto none = PlanListAppend({});
+    assert(!none.keep && !none.why && none.keys.empty());
+
+    const auto key = SampleKey(1);
+    const u64 fragment = key.stages[0].hash;
+    auto file = EncodeListHeader();
+    Append(file, EncodeListCode(fragment, SampleCode(fragment)));
+    Append(file, EncodeListEntry(key));
+    Append(file, EncodeListEntry(SampleKey(2)));
+    const auto plan = PlanListAppend(file);
+    assert(plan.keep && !plan.why && plan.bytes == file.size());
+    assert(plan.keys == (std::set<u64>{KeyContentHash(key), KeyContentHash(SampleKey(2))}));
+    assert(plan.code == std::set<u64>{fragment});
+
+    // A header alone is kept as an empty list.
+    const auto empty = PlanListAppend(EncodeListHeader());
+    assert(empty.keep && empty.bytes == EncodeListHeader().size() && empty.keys.empty());
+}
+
+void TestAppendAfterCutOff() {
+    // A launch that ended inside a write leaves a cut-off entry: it is dropped, so what is
+    // appended after it still frames.
+    const auto whole = File({SampleKey(1), SampleKey(2)});
+    const size_t first_end = EncodeListHeader().size() + EncodeListEntry(SampleKey(1)).size();
+    for (size_t size = first_end + 1; size < whole.size(); ++size) {
+        const auto plan = PlanListAppend(std::span<const u8>{whole.data(), size});
+        assert(plan.keep && plan.bytes == first_end);
+        assert(plan.keys == std::set<u64>{KeyContentHash(SampleKey(1))});
+        std::vector<u8> file{whole.begin(), whole.begin() + plan.bytes};
+        Append(file, EncodeListEntry(SampleKey(3)));
+        const auto list = ParseList(file, 100);
+        assert(list.rejected == 0 && list.keys.size() == 2 && list.keys[1] == SampleKey(3));
+    }
+    // A corrupt entry in the middle frames: kept, it is rejected again on load.
+    auto corrupt = whole;
+    corrupt[EncodeListHeader().size() + 4 + 8 + 20] ^= 0x40;
+    const auto plan = PlanListAppend(corrupt);
+    assert(plan.keep && plan.bytes == corrupt.size());
+    assert(plan.keys == std::set<u64>{KeyContentHash(SampleKey(2))});
+}
+
+void TestAppendReplaces() {
+    auto other_version = File({SampleKey(1)});
+    const u32 version = ListVersion - 1;
+    std::memcpy(other_version.data() + ListMagic.size(), &version, sizeof(version));
+    const auto by_version = PlanListAppend(other_version);
+    assert(!by_version.keep && by_version.why && by_version.keys.empty());
+
+    auto other_layout = File({SampleKey(1)});
+    const u32 stages = ListStages + 1;
+    std::memcpy(other_layout.data() + ListMagic.size() + 12, &stages, sizeof(stages));
+    assert(!PlanListAppend(other_layout).keep && PlanListAppend(other_layout).why);
+
+    const std::vector<u8> garbage(64, 0x5A);
+    assert(!PlanListAppend(garbage).keep && PlanListAppend(garbage).why);
+    const auto header = EncodeListHeader();
+    assert(!PlanListAppend(std::span<const u8>{header.data(), 10}).keep);
+}
+
+void TestRoomCountsKeptBytes() {
+    // The size cap counts the kept entries too, so a list never grows past what loads.
+    assert(ListHasRoom(0, 100));
+    assert(ListHasRoom(MaxListBytes - 100, 100));
+    assert(!ListHasRoom(MaxListBytes - 99, 100));
+    assert(!ListHasRoom(0, MaxListEntryBytes + 1));
+}
+
 } // namespace
 
 int main() {
@@ -268,6 +350,11 @@ int main() {
     TestCode();
     TestCodeRejects();
     TestOldVersion();
+    TestContentHash();
+    TestAppendKeeps();
+    TestAppendAfterCutOff();
+    TestAppendReplaces();
+    TestRoomCountsKeptBytes();
     std::puts("precompile-list-test: ok");
     return 0;
 }
