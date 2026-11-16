@@ -1395,6 +1395,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
     if (sel.boot) {
+        // gow3: the start-up rebuild from a precompile list translates its own programs.
         return BootProgram(sel, hw_stage, sw_stage, params, binding, runtime_info);
     }
     if (sel.worker) {
