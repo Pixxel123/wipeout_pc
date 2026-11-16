@@ -19,7 +19,9 @@
 //
 // Single-threaded and blocking, Linux only (the fault handler). Every SRT walker this rebuild
 // creates is watched: a read of one that faults is served as zero and rejects the entry, so the
-// SRT walker patch never rewrites a walker that the store then saves.
+// SRT walker patch never rewrites a walker that the store then saves. A walker that reads a
+// word or follows a pointer the recording did not would read the shadow's gaps or a stale guest
+// address without faulting, so each walk is first run on the recorded words alone (CheckWalk).
 
 #include <algorithm>
 #include <bit>
@@ -58,6 +60,7 @@ using Shader::SwStage;
 
 constexpr u32 MaxEntries = 4000;
 constexpr u32 MaxDetails = 8;        ///< detail lines per reason
+constexpr size_t MaxRecordedWords = 4096, MaxRecordedPointers = 256; ///< as when recorded
 constexpr size_t MaxPermutations = 64; ///< IndexDiskShaders reads indices below 64
 /// Size of the SRT walker code generator (flatten_extended_userdata_pass.cpp).
 constexpr u64 WalkerCodeSize = 32ull << 20;
@@ -70,13 +73,14 @@ enum class Reject {
     Faulted,           ///< a read outside the recorded words faulted
     NotSelected,       ///< the selection stopped (an unsupported state)
     SpecChanged,       ///< a translation specialises unlike the lookup that asked for it
+    StrayWalk,         ///< a walker reads a word or follows a pointer the recording did not
     TooManyPermutations,
     Count,
 };
 
 constexpr std::array<const char*, size_t(Reject::Count)> RejectNames = {
     "not vertex + fragment", "no code", "no room", "faulted", "not selected", "spec changed",
-    "too many permutations",
+    "walk outside the recording", "too many permutations",
 };
 
 /// Synthetic base of a stage's code in the shadow layout: no guest pointer (48 bits) has it.
@@ -123,6 +127,23 @@ struct Shadow {
     u64 address = 0;
 };
 
+/// The recorded words of the entry being checked, by guest address (base + offset), sorted.
+const std::vector<std::pair<u64, u32>>* g_recorded;
+
+/// WalkRecorder's guest read for a check walk: recorded words only. Runs in the fault handler.
+bool ReadRecorded(u64 address, void* out, size_t size) {
+    auto* bytes = static_cast<u8*>(out);
+    for (size_t at = 0; at < size; at += sizeof(u32)) {
+        const auto found = std::ranges::lower_bound(*g_recorded, address + at, {},
+                                                    &std::pair<u64, u32>::first);
+        if (found == g_recorded->end() || found->first != address + at) {
+            return false;
+        }
+        std::memcpy(bytes + at, &found->second, sizeof(u32));
+    }
+    return true;
+}
+
 u64 PeakMemoryMiB() {
 #ifdef __linux__
     rusage usage{};
@@ -147,6 +168,7 @@ private:
     std::optional<Reject> Select(const RecordedKey& key, Shadow& shadow);
     bool MapShadow(const RecordedKey& key, Shadow& shadow);
     std::unique_ptr<AmdGpu::Regs> Registers(const RecordedKey& key, const Shadow& shadow) const;
+    bool CheckWalk(const Shader::Info& info, u64 hash);
     std::optional<size_t> Translate(BootProgram& program, bool initial,
                                     const Shader::ShaderParams& params, HwStage hw_stage,
                                     SwStage sw_stage, const Shader::Backend::Bindings& binding,
@@ -164,9 +186,14 @@ private:
     Shader::Pools pools; ///< the rebuild's own: a fault jumps out of a translation
     ShadowArena arena;
     ThreadState::Range walker_code{}; ///< where the SRT walkers of this rebuild are generated
+    RecordSlots slots{g_reserved.record, RecordSlotSize, NumRecordSlots};
+    std::vector<GuestWord> walk_words;
+    std::vector<GuestPointer> walk_pointers;
+    std::vector<std::pair<u32, u64>> walk_roots;
 
     // The entry being translated.
     const RecordedKey* entry = nullptr;
+    std::vector<std::pair<u64, u32>> recorded; ///< its words by guest address
     std::optional<Reject> stopped;
     std::string stop_detail;
 
@@ -181,6 +208,9 @@ void PrecompileBoot::Run() {
     // code, inside the generator's 32 MiB (nothing of the store was loaded yet).
     const u64 walkers = u64(Shader::RegisterWalkerCode(nullptr, 0));
     walker_code = {walkers, walkers + WalkerCodeSize};
+    walk_words.reserve(MaxRecordedWords);
+    walk_pointers.reserve(MaxRecordedPointers);
+    walk_roots.reserve(ListUserDataWords);
     const u32 count = u32(std::min<size_t>(list.keys.size(), MaxEntries));
     for (u32 index = 0; index < count; ++index) {
         Entry(index, list.keys[index]);
@@ -191,6 +221,11 @@ void PrecompileBoot::Run() {
 void PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
     Shadow shadow;
     entry = &key;
+    recorded.clear();
+    for (const auto& word : key.words) {
+        recorded.emplace_back(word.base + word.offset, word.value);
+    }
+    std::ranges::sort(recorded);
     stopped.reset();
     stop_detail.clear();
     const auto why = Select(key, shadow);
@@ -328,6 +363,9 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
         }
     } else {
         // As GetProgram looks a permutation up: the first Info with this draw's user data.
+        if (!CheckWalk(program.info, params.hash)) {
+            return {};
+        }
         program.info.pgm_base = params.Base();
         program.info.user_data = params.user_data;
         program.info.RefreshFlatBuf();
@@ -368,7 +406,7 @@ std::optional<size_t> PrecompileBoot::Translate(BootProgram& program, bool initi
     Shader::Info info{hw_stage, sw_stage, params};
     auto runtime = runtime_info;
     const auto ir = Shader::TranslateProgram(params.code, pools, info, runtime, profile);
-    if (Failed()) {
+    if (Failed() || !CheckWalk(info, params.hash)) {
         return std::nullopt;
     }
     Shader::StageSpecialization spec{info, runtime, profile, binding};
@@ -396,6 +434,53 @@ std::optional<size_t> PrecompileBoot::Translate(BootProgram& program, bool initi
     program.specs.push_back(std::move(spec));
     ++permutations;
     return perm;
+}
+
+/// Runs the program's walker on the stage's recorded user data and words alone, served by the
+/// fault handler as when they were recorded: false (the entry stops) when it reads a word or
+/// follows a pointer the recording did not. The shadow copy cannot tell: its gaps read as
+/// zero and a pointer it does not lead in still holds a guest address, both without a fault.
+bool PrecompileBoot::CheckWalk(const Shader::Info& info, u64 hash) {
+    if (!info.srt_info.walker_func) {
+        return true;
+    }
+    const auto stage = std::ranges::find(entry->stages, hash, &RecordedStage::hash);
+    if (stage == entry->stages.end()) {
+        Stop(Reject::StrayWalk, fmt::format("program {:016x} is not recorded", hash));
+        return false;
+    }
+    std::vector<u32> flat(info.srt_info.flattened_bufsize_dw);
+    walk_words.clear();
+    walk_pointers.clear();
+    walk_roots.clear();
+    slots.Reset();
+    WalkRecorder recorder{slots, stage->user_data, ReadRecorded, walk_words, walk_pointers,
+                          walk_roots};
+    auto& state = FaultState();
+    const u32 faults = state.faults;
+    g_recorded = &recorded;
+    state.recorder = &recorder;
+    info.srt_info.walker_func(reinterpret_cast<const u32*>(slots.Address(0)), flat.data());
+    state.recorder = nullptr;
+    g_recorded = nullptr;
+    const char* why = recorder.error;
+    if (!why && state.faults != faults) {
+        why = "a read outside the record slots faulted";
+    }
+    if (!why && !std::ranges::all_of(walk_pointers, [&](const GuestPointer& pointer) {
+            return std::ranges::find(entry->pointers, pointer) != entry->pointers.end();
+        })) {
+        why = "a table pointer the recording did not follow";
+    }
+    if (!why && !std::ranges::all_of(walk_roots, [&](const auto& root) {
+            return std::ranges::find(stage->roots, root) != stage->roots.end();
+        })) {
+        why = "a user-data pointer the recording did not follow";
+    }
+    if (why) {
+        Stop(Reject::StrayWalk, fmt::format("program {:016x}: {}", hash, why));
+    }
+    return !why;
 }
 
 /// Stops the entry: the selection goes on to its end without translating anything more.
