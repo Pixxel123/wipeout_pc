@@ -144,9 +144,10 @@ std::vector<u32> ReadProgramCode(VAddr address) {
 
 struct PrecompileRecord {
     PrecompileRecord(std::FILE* record_file_, ListAppend&& kept)
-        : record_file{record_file_}, list_bytes{kept.keep ? kept.bytes - EncodeListHeader().size()
-                                                          : 0},
-          list_entries{kept.entries}, keys{std::move(kept.keys)}, code_seen{kept.code.begin(), kept.code.end()},
+        : record_file{record_file_},
+          list_bytes{kept.keep ? kept.bytes - EncodeListHeader().size() : 0},
+          list_entries{kept.entries}, keys{std::move(kept.keys)},
+          code_seen{kept.code.begin(), kept.code.end()},
           slots{g_reserved.record, RecordSlotSize, NumRecordSlots} {}
     ~PrecompileRecord() {
         if (record_file) {
@@ -155,10 +156,12 @@ struct PrecompileRecord {
     }
 
     void Capture(PipelineCache& cache);
-    void Report(bool final);
+    /// Every few seconds when `end` is null; at once, with `end` after the counts, otherwise.
+    void Report(const char* end);
 
-    [[nodiscard]] bool Capturing() const {
-        return record_file;
+    /// A write failed: the recorder is done (PipelineCache::CapturePrecompile drops it).
+    [[nodiscard]] bool Stopped() const {
+        return !record_file;
     }
 
 private:
@@ -171,7 +174,7 @@ private:
     const char* RecordWalker(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordFetch(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
 
-    std::FILE* record_file; ///< null once a write failed
+    std::FILE* record_file; ///< null once a write failed (Stopped)
     size_t list_bytes;      ///< the file's entries, kept and written: what the size cap counts
     size_t list_entries;    ///< the file's key entries, kept and written: MaxListEntries
     RecordTally record{}, record_reported{};
@@ -190,14 +193,14 @@ PrecompileRecord* g_active; ///< reported at exit
 
 void ReportAtExit() {
     if (g_active) {
-        g_active->Report(true);
+        g_active->Report(" (exit)");
     }
 }
 } // namespace
 
-void PrecompileRecord::Report(bool final) {
+void PrecompileRecord::Report(const char* end) {
     const auto now = std::chrono::steady_clock::now();
-    if (!final && (now - last_report < ReportInterval || record == record_reported)) {
+    if (!end && (now - last_report < ReportInterval || record == record_reported)) {
         return;
     }
     last_report = now;
@@ -210,7 +213,7 @@ void PrecompileRecord::Report(bool final) {
                             "programs, {} without code{}",
                             t.captured, t.capture_failed, t.skipped, t.words, t.written,
                             t.bytes >> 10, t.already, t.not_written, t.code_written,
-                            t.code_missing, final ? " (exit)" : "")
+                            t.code_missing, end ? end : "")
                     .c_str());
 }
 
@@ -311,7 +314,7 @@ void PrecompileRecord::Record(const KeyCapture& c) {
         ++record.already;
         return;
     }
-    if (record_file && WriteRecord(EncodeListEntry(key))) {
+    if (WriteRecord(EncodeListEntry(key))) {
         ++record.written;
         ++list_entries;
         keys.insert(content);
@@ -343,7 +346,7 @@ std::optional<u64> PrecompileRecord::SpecDigest(PipelineCache& cache, u64 progra
 
 /// Writes a program's code before the first entry that uses it, once per program.
 void PrecompileRecord::RecordCode(const StageCapture& stage) {
-    if (!record_file || !code_seen.insert(stage.hash).second) {
+    if (!code_seen.insert(stage.hash).second) {
         return;
     }
     const auto code = ReadProgramCode(stage.code);
@@ -366,6 +369,9 @@ void PrecompileRecord::ListFull() {
 
 /// Appends one entry to the list file, flushed at once: the game may end without exiting.
 bool PrecompileRecord::WriteRecord(const std::vector<u8>& bytes) {
+    if (!record_file) { // an earlier write of this capture failed
+        return false;
+    }
     if (!ListHasRoom(list_bytes, bytes.size())) {
         ListFull();
         return false;
@@ -501,7 +507,11 @@ bool ReadFileBytes(const char* path, size_t limit, std::vector<u8>& bytes) {
     }
     bytes.clear();
     u8 chunk[1 << 16];
-    for (size_t read; bytes.size() <= limit && (read = std::fread(chunk, 1, sizeof(chunk), file));) {
+    while (bytes.size() <= limit) {
+        const size_t read = std::fread(chunk, 1, sizeof(chunk), file);
+        if (read == 0) {
+            break;
+        }
         bytes.insert(bytes.end(), chunk, chunk + read);
     }
     const bool failed = std::ferror(file);
@@ -643,14 +653,16 @@ PrecompileRecordPtr MakePrecompileRecord() {
 }
 
 void PipelineCache::CapturePrecompile() {
-    if (precompile->Capturing()) {
-        precompile->Capture(*this);
+    precompile->Capture(*this);
+    if (precompile->Stopped()) {
+        precompile->Report(" (stopped)");
+        precompile = nullptr;
     }
 }
 
 void PipelineCache::ReportPrecompile() {
     if (precompile) {
-        precompile->Report(false);
+        precompile->Report(nullptr);
     }
 }
 
