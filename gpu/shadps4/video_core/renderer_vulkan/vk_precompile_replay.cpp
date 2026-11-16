@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -87,6 +88,12 @@ constexpr size_t MaxRecordedWords = 4096, MaxRecordedPointers = 256;
 static_assert(ListRegsWords == AmdGpu::Regs::NumRegs);
 static_assert(ListUserDataWords == AmdGpu::NUM_USER_DATA);
 static_assert(ListStages == MaxShaderStages);
+// num_interp is the word between ps_input_addr's padding and barycentric_control's.
+static_assert(offsetof(AmdGpu::Regs, ps_input_addr) / sizeof(u32) + 2 == ListPsInControlReg);
+static_assert(offsetof(AmdGpu::Regs, barycentric_control) / sizeof(u32) ==
+              ListPsInControlReg + 2);
+static_assert(ListMaxPsInputs ==
+              std::tuple_size_v<decltype(Shader::HwFragmentRuntimeInfo::inputs)>);
 
 struct StageCapture {
     SwStage sw_stage;
@@ -763,6 +770,7 @@ KeyCapture PrecompileReplay::Expand(const RecordedKey& key,
     for (u32 hw_stage = 0; hw_stage < ListHwStages; ++hw_stage) {
         ProgramAt(*c.regs, hw_stage).address = 0;
     }
+    // Checked on load (ValidSgprOffset): the u16 keeps the whole offset.
     c.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
     c.key_hash = key.key_hash;
     c.submission = submissions;

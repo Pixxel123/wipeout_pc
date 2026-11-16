@@ -44,6 +44,12 @@ constexpr u32 ListRegsWords = 0xD000;  ///< AmdGpu::Regs::NumRegs
 constexpr u32 ListUserDataWords = 16;  ///< AmdGpu::NUM_USER_DATA
 constexpr u32 ListStages = 6;          ///< MaxShaderStages
 constexpr u32 ListHwStages = 6;        ///< Regs::ProgramForStage takes 0..5
+/// Registers the selection indexes arrays with (the replay static_asserts them).
+constexpr u32 ListPsInControlReg = 0xA1B6; ///< SPI_PS_IN_CONTROL, num_interp in bits 0-5
+constexpr u32 ListMaxPsInputs = 32;        ///< HwFragmentRuntimeInfo::inputs
+/// A draw-indirect sgpr offset names a vertex-stage user-data register from this one on; the
+/// translator asserts that it is one of the 16 (UdRegFromShOffset), 0 for none.
+constexpr u32 ListVsUserDataSgpr = 0x4C;
 
 constexpr size_t MaxListBytes = 128u << 20;
 constexpr size_t MaxListEntryBytes = 4u << 20;
@@ -206,12 +212,24 @@ inline bool DecodeCode(Reader& in, u64& hash, std::vector<u32>& code) {
     return in.Ok() && in.AtEnd();
 }
 
+/// Whether a draw-indirect sgpr offset is none or a vertex-stage user-data register.
+[[nodiscard]] inline bool ValidSgprOffset(u32 offset) {
+    return offset == 0 ||
+           (offset >= ListVsUserDataSgpr && offset < ListVsUserDataSgpr + ListUserDataWords);
+}
+
 /// Why a decoded key cannot be replayed safely, or null.
 inline const char* Check(const RecordedKey& key) {
     for (const auto& [index, value] : key.regs) {
         if (index >= ListRegsWords) {
             return "register index out of range";
         }
+        if (index == ListPsInControlReg && (value & 0x3F) > ListMaxPsInputs) {
+            return "too many pixel shader inputs";
+        }
+    }
+    if (!ValidSgprOffset(key.vertex_sgpr_offset) || !ValidSgprOffset(key.instance_sgpr_offset)) {
+        return "draw-indirect sgpr offset out of range";
     }
     if (key.stages.empty() || key.stages.size() > ListStages) {
         return "bad stage count";

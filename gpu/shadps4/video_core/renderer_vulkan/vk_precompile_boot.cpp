@@ -336,6 +336,7 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
     PipelineSelection selection{};
     selection.regs = regs.get();
     selection.boot = this;
+    // Checked on load (ValidSgprOffset): the u16 keeps the whole offset.
     selection.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
     bool selected = false;
     Watch();

@@ -14,8 +14,8 @@ RecordedKey SampleKey(u64 seed) {
     constexpr u64 Table = 0x2000'0000, Nested = 0x3000'1000;
     RecordedKey key{};
     key.key_hash = 0x1234'5678'9ABC'DEF0ULL ^ seed;
-    key.vertex_sgpr_offset = 2;
-    key.instance_sgpr_offset = 3;
+    key.vertex_sgpr_offset = ListVsUserDataSgpr + 2;
+    key.instance_sgpr_offset = 0;
     key.regs = {{0x2C0C, 0x100 + u32(seed)}, {0xA000, 7}, {ListRegsWords - 1, 9}};
     RecordedStage fragment{};
     fragment.sw_stage = 0;
@@ -149,6 +149,25 @@ void TestCorruptAndInvalid() {
     key = SampleKey(3);
     key.stages.clear();
     rejected(key, "bad stage count");
+    key = SampleKey(3);
+    key.regs.push_back({ListPsInControlReg, 0x40 | (ListMaxPsInputs + 1)});
+    rejected(key, "too many pixel shader inputs");
+    for (const u32 offset : {1u, ListVsUserDataSgpr - 1, ListVsUserDataSgpr + ListUserDataWords,
+                             0x10000 + ListVsUserDataSgpr}) {
+        key = SampleKey(3);
+        key.vertex_sgpr_offset = offset;
+        rejected(key, "draw-indirect sgpr offset out of range");
+        key = SampleKey(3);
+        key.instance_sgpr_offset = offset;
+        rejected(key, "draw-indirect sgpr offset out of range");
+    }
+    // The limits themselves are valid.
+    key = SampleKey(3);
+    key.regs.push_back({ListPsInControlReg, ListMaxPsInputs});
+    key.vertex_sgpr_offset = ListVsUserDataSgpr;
+    key.instance_sgpr_offset = ListVsUserDataSgpr + ListUserDataWords - 1;
+    const auto valid = ParseList(File({key}), 100);
+    assert(valid.keys.size() == 1 && valid.rejected == 0);
 
     // A count that claims more than the body holds is malformed, without allocating for it.
     auto huge = File({SampleKey(1)});
