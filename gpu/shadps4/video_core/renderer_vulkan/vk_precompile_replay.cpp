@@ -84,7 +84,6 @@ constexpr u32 MaxDetails = 8; ///< detail lines per kind
 constexpr u64 ReplayDelay = 3; ///< submissions between capture and replay
 constexpr auto ReplayBudget = std::chrono::milliseconds(2);
 constexpr auto ReportInterval = std::chrono::seconds(5);
-constexpr size_t MaxRecordedWords = 4096, MaxRecordedPointers = 256;
 
 static_assert(ListRegsWords == AmdGpu::Regs::NumRegs);
 static_assert(ListUserDataWords == AmdGpu::NUM_USER_DATA);

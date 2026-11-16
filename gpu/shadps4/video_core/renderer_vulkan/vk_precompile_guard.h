@@ -23,6 +23,8 @@ constexpr u64 RecordSlotSize = 16ull << 20;
 constexpr u32 NumRecordSlots = 64;
 constexpr u64 ShadowArenaSize = 1ull << 30;
 constexpr size_t MaxShadowBytes = 4u << 20; ///< one capture
+/// Most guest words and table pointers one stage's walk may read (WalkRecorder's vectors).
+constexpr size_t MaxRecordedWords = 4096, MaxRecordedPointers = 256;
 
 /// Address ranges reserved once: the record slots and the shadow arena, whose first page
 /// stays inaccessible (the "dead" pointer for anything not recorded).
