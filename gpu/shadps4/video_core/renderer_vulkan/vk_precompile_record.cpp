@@ -30,7 +30,6 @@
 #include <set>
 #include <span>
 #include <string>
-#include <string_view>
 #include <unordered_set>
 #include <fmt/format.h>
 
@@ -514,13 +513,6 @@ const char* PathSetting(const char* name) {
     return value && value[0] ? value : nullptr;
 }
 
-/// Whether two paths name one file; for a path that does not exist yet, whether they are equal.
-bool SameFile(const char* a, const char* b) {
-    std::error_code error;
-    const bool same = std::filesystem::equivalent(a, b, error);
-    return error ? std::string_view{a} == b : same;
-}
-
 /// The list file to record into, null when it cannot be written (logged). A list of this
 /// version is kept and appended to, without a cut-off last entry (the game may end inside a
 /// write); anything else is written anew. `kept` says what the file holds.
@@ -575,13 +567,9 @@ PrecompileRecordPtr MakePrecompileRecord() {
                     "(GOW3_PRECOMPILE_BOOT=1), not used\n",
                     list_path);
     }
-    // The start-up rebuild reads the list (vk_precompile_boot.cpp), after this: a record file
-    // of the same name would empty it first.
-    if (record_path && list_path && boot_on && SameFile(record_path, list_path)) {
-        std::printf("Precompile record: %s is the list of the start-up rebuild, not recording\n",
-                    record_path);
-        record_path = nullptr;
-    }
+    // The record file may be the start-up rebuild's list: it is opened here, before the rebuild
+    // reads it (StartOnDemand), and keeps the list's entries; the first capture comes after the
+    // rebuild, with the game's first draws.
     if (!record_path) {
         return nullptr;
     }
