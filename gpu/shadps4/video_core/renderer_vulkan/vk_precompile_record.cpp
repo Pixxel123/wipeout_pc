@@ -569,8 +569,9 @@ const char* PathSetting(const char* name) {
 }
 
 /// The list file to record into, null when it cannot be written (logged). A list of this
-/// version is kept and appended to, without a cut-off last entry (the game may end inside a
-/// write); anything else is written anew. `kept` says what the file holds.
+/// version is kept and appended to, up to the first entry that is cut off (the game may end
+/// inside a write) or fails its checksum; anything else is written anew. `kept` says what the
+/// file holds.
 std::FILE* OpenRecord(const char* path, ListAppend& kept) {
     std::vector<u8> existing;
     if (!ReadFileBytes(path, MaxListFileBytes(), existing) && errno != ENOENT) {
@@ -589,9 +590,10 @@ std::FILE* OpenRecord(const char* path, ListAppend& kept) {
                         error ? error.message().c_str() : std::strerror(errno));
             return nullptr;
         }
-        std::printf("Precompile record: appending to %s (%zu keys, code of %zu programs%s)\n",
-                    path, kept.keys.size(), kept.code.size(),
-                    existing.size() > kept.bytes ? ", a cut-off last entry dropped" : "");
+        std::printf("Precompile record: appending to %s (%zu entries, %zu distinct, code of %zu "
+                    "programs, %zu bytes from a cut-off or bad entry on dropped)\n",
+                    path, kept.entries, kept.keys.size(), kept.code.size(),
+                    existing.size() - kept.bytes);
         return file;
     }
     std::FILE* file = std::fopen(path, "wb");
