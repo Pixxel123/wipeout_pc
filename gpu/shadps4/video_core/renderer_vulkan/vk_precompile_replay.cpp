@@ -1048,15 +1048,9 @@ void PrecompileReplayDeleter::operator()(PrecompileReplay* replay) const {
     delete replay;
 }
 
-namespace {
-/// The value of an environment switch that names a file; null when unset or empty.
-const char* PathSetting(const char* name) {
-    const char* value = std::getenv(name);
-    return value && value[0] ? value : nullptr;
-}
+namespace Precompile {
 
-/// The list at `path`, none when it cannot be used (logged).
-std::optional<ParsedList> LoadList(const char* path) {
+std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys) {
     std::FILE* file = std::fopen(path, "rb");
     if (!file) {
         std::printf("Precompile list: cannot read %s (%s), off\n", path, std::strerror(errno));
@@ -1074,7 +1068,7 @@ std::optional<ParsedList> LoadList(const char* path) {
         bytes.insert(bytes.end(), chunk, chunk + read);
     }
     std::fclose(file);
-    auto parsed = ParseList(bytes, MaxCaptures);
+    auto parsed = ParseList(bytes, max_keys);
     switch (parsed.status) {
     case ParsedList::Status::Ok:
         std::printf("Precompile list: %s: %zu entries, %u rejected\n", path, parsed.keys.size(),
@@ -1092,6 +1086,15 @@ std::optional<ParsedList> LoadList(const char* path) {
         break;
     }
     return std::nullopt;
+}
+
+} // namespace Precompile
+
+namespace {
+/// The value of an environment switch that names a file; null when unset or empty.
+const char* PathSetting(const char* name) {
+    const char* value = std::getenv(name);
+    return value && value[0] ? value : nullptr;
 }
 
 /// A new list file with its header, or null (logged).
@@ -1124,7 +1127,7 @@ PrecompileReplayPtr MakePrecompileReplay() {
     return nullptr;
 #else
     // Loaded before the record file is opened, which may be the same file.
-    auto parsed = list_path ? LoadList(list_path) : std::nullopt;
+    auto parsed = list_path ? LoadListFile(list_path, MaxCaptures) : std::nullopt;
     std::FILE* record_file = record_path ? OpenRecord(record_path) : nullptr;
     if (!replay && !record_file && !parsed) {
         return nullptr;

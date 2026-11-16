@@ -25,6 +25,7 @@
 #include <array>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -465,5 +466,8 @@ struct ParsedList {
     }
     return list;
 }
+
+/// Reads the list at `path` (vk_precompile_replay.cpp); none when it cannot be used (logged).
+std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys);
 
 } // namespace Vulkan::Precompile
