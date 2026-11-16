@@ -294,7 +294,7 @@ private:
     bool NewPipelineKey(const std::string& name);
     void ReportDiskShaders();
 
-    PrecompileReplayPtr precompile; ///< gow3: null unless GOW3_PRECOMPILE_REPLAY is set
+    PrecompileReplayPtr precompile; ///< gow3: null unless a GOW3_PRECOMPILE_* switch is set
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

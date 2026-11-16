@@ -21,6 +21,10 @@
 // counted. The check: the same GraphicsPipelineKey (which holds each stage's permutation).
 // Nothing shared is written: program_cache is only read, under programs_mutex.
 //
+// GOW3_PRECOMPILE_RECORD=<file> writes each capture to a list (vk_precompile_list.h) as it is
+// made, for a later launch to replay. With only that set, nothing is replayed in this launch,
+// so the replay queue's cap drops nothing.
+//
 // Linux only (the fault handler edits the walker's registers in the signal context). While it
 // is on, the page manager's read-fault count also includes the faults of recorded walks.
 
@@ -55,6 +59,7 @@
 #include "shader_recompiler/info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_precompile_list.h"
 #include "video_core/renderer_vulkan/vk_precompile_replay.h"
 #include "video_core/renderer_vulkan/vk_precompile_shadow.h"
 
@@ -78,6 +83,10 @@ constexpr u32 NumRecordSlots = 64;
 constexpr u64 ShadowArenaSize = 1ull << 30;
 constexpr size_t MaxShadowBytes = 4u << 20; ///< one capture
 constexpr size_t MaxRecordedWords = 4096, MaxRecordedPointers = 256;
+
+static_assert(ListRegsWords == AmdGpu::Regs::NumRegs);
+static_assert(ListUserDataWords == AmdGpu::NUM_USER_DATA);
+static_assert(ListStages == MaxShaderStages);
 
 /// Address ranges this diagnostic reserved: the record slots and the shadow arena, whose first
 /// page stays inaccessible (the "dead" pointer for anything not recorded).
@@ -331,6 +340,12 @@ struct Tally {
     bool operator==(const Tally&) const = default;
 };
 
+/// Captures written to the list file, and those left out.
+struct RecordTally {
+    u64 written, bytes, not_written;
+    bool operator==(const RecordTally&) const = default;
+};
+
 enum class Detail { Different, Faulted, NotFound, CaptureFailed, Count };
 
 /// What a replayed selection came to.
@@ -354,7 +369,14 @@ const char* FaultPlace(u64 fault) {
 } // namespace
 
 struct PrecompileReplay {
-    PrecompileReplay() : slots{g_reserved.record, RecordSlotSize, NumRecordSlots} {}
+    PrecompileReplay(bool replay_same_launch_, std::FILE* record_file_)
+        : replay_same_launch{replay_same_launch_}, record_file{record_file_},
+          slots{g_reserved.record, RecordSlotSize, NumRecordSlots} {}
+    ~PrecompileReplay() {
+        if (record_file) {
+            std::fclose(record_file);
+        }
+    }
 
     void Capture(PipelineCache& cache);
     void Replay(PipelineCache& cache);
@@ -364,6 +386,7 @@ struct PrecompileReplay {
     Tally tally{}, reported{};
 
 private:
+    void Record(const KeyCapture& c);
     const char* RecordStage(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordWalker(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordFetch(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
@@ -373,6 +396,10 @@ private:
     std::string Difference(const KeyCapture& c, const GraphicsPipelineKey& key) const;
     void Log(Detail kind, const std::string& text);
 
+    const bool replay_same_launch; ///< GOW3_PRECOMPILE_REPLAY=1
+    std::FILE* record_file;        ///< GOW3_PRECOMPILE_RECORD, null when off or failed
+    RecordTally record{}, record_reported{};
+    bool record_capped_logged = false;
     RecordSlots slots;
     ShadowArena arena;
     std::unordered_set<u64> seen;          ///< key hashes already captured or skipped
@@ -400,10 +427,21 @@ void PrecompileReplay::Log(Detail kind, const std::string& text) {
 
 void PrecompileReplay::Report(bool final) {
     const auto now = std::chrono::steady_clock::now();
-    if (!final && (now - last_report < ReportInterval || tally == reported)) {
+    if (!final && now - last_report < ReportInterval) {
         return;
     }
     last_report = now;
+    if (record_file && (final || !(record == record_reported))) {
+        record_reported = record;
+        std::printf("Precompile record: %llu written (%llu KiB), %llu not written "
+                    "(geometry/size/write)%s\n",
+                    static_cast<unsigned long long>(record.written),
+                    static_cast<unsigned long long>(record.bytes >> 10),
+                    static_cast<unsigned long long>(record.not_written), final ? " (exit)" : "");
+    }
+    if (!final && tally == reported) {
+        return;
+    }
     reported = tally;
     const auto& t = tally;
     std::printf("%s\n",
@@ -426,7 +464,7 @@ void PrecompileReplay::Capture(PipelineCache& cache) {
     // Tessellation reads constants at selection time (not prepared either); the motion choice
     // reads a global that may have moved on by the replay.
     if (sel.regs->stage_enable.hs_en || sel.graphics_key.motion_vectors ||
-        waiting.size() >= MaxWaiting) {
+        (replay_same_launch && waiting.size() >= MaxWaiting)) {
         ++tally.skipped;
         return;
     }
@@ -478,7 +516,58 @@ void PrecompileReplay::Capture(PipelineCache& cache) {
     }
     ++tally.captured;
     tally.words += c.words.size();
-    waiting.push_back(std::move(c));
+    if (record_file) {
+        Record(c);
+    }
+    if (replay_same_launch) {
+        waiting.push_back(std::move(c));
+    }
+}
+
+/// Appends a capture to the list file, flushed at once: the game may end without exiting.
+void PrecompileReplay::Record(const KeyCapture& c) {
+    // A later launch replays vertex + fragment keys only: a geometry key's selection also reads
+    // the copy shader through vs_program, which is not among the recorded stages.
+    if (c.regs->stage_enable.raw != AmdGpu::ShaderStageEnable::Vs) {
+        ++record.not_written;
+        return;
+    }
+    RecordedKey key{};
+    key.key_hash = c.key_hash;
+    key.vertex_sgpr_offset = c.draw_indirect_params.vertex_sgpr_offset;
+    key.instance_sgpr_offset = c.draw_indirect_params.instance_sgpr_offset;
+    for (u32 i = 0; i < AmdGpu::Regs::NumRegs; ++i) {
+        if (const u32 value = c.regs->reg_array[i]) {
+            key.regs.emplace_back(i, value);
+        }
+    }
+    for (const auto& stage : c.stages) {
+        key.stages.push_back({u32(stage.sw_stage), u32(stage.hw_stage), stage.hash,
+                              stage.user_data, stage.roots});
+    }
+    key.words = c.words;
+    key.pointers = c.pointers;
+    const auto entry = EncodeListEntry(key);
+    if (entry.size() > MaxListEntryBytes || record.bytes + entry.size() > MaxListBytes) {
+        ++record.not_written;
+        if (!record_capped_logged) {
+            record_capped_logged = true;
+            std::printf("Precompile record: list full (%zu MiB), later captures not written\n",
+                        MaxListBytes >> 20);
+        }
+        return;
+    }
+    if (std::fwrite(entry.data(), 1, entry.size(), record_file) != entry.size() ||
+        std::fflush(record_file) != 0) {
+        ++record.not_written;
+        std::printf("Precompile record: write failed (%s), recording stopped\n",
+                    std::strerror(errno));
+        std::fclose(record_file);
+        record_file = nullptr;
+        return;
+    }
+    ++record.written;
+    record.bytes += entry.size();
 }
 
 const char* PrecompileReplay::RecordStage(const Shader::Info& info, StageCapture& stage,
@@ -740,31 +829,66 @@ void PrecompileReplayDeleter::operator()(PrecompileReplay* replay) const {
     delete replay;
 }
 
+namespace {
+/// The value of an environment switch that names a file; null when unset or empty.
+const char* PathSetting(const char* name) {
+    const char* value = std::getenv(name);
+    return value && value[0] ? value : nullptr;
+}
+
+/// A new list file with its header, or null (logged).
+std::FILE* OpenRecord(const char* path) {
+    std::FILE* file = std::fopen(path, "wb");
+    const auto header = EncodeListHeader();
+    if (!file || std::fwrite(header.data(), 1, header.size(), file) != header.size() ||
+        std::fflush(file) != 0) {
+        std::printf("Precompile record: cannot write %s (%s), off\n", path, std::strerror(errno));
+        if (file) {
+            std::fclose(file);
+        }
+        return nullptr;
+    }
+    std::printf("Precompile record: writing %s\n", path);
+    return file;
+}
+} // namespace
+
 PrecompileReplayPtr MakePrecompileReplay() {
     const char* env = std::getenv("GOW3_PRECOMPILE_REPLAY");
-    if (!env || env[0] != '1') {
+    const bool replay = env && env[0] == '1';
+    const char* record_path = PathSetting("GOW3_PRECOMPILE_RECORD");
+    if (!replay && !record_path) {
         return nullptr;
     }
 #ifndef __linux__
     std::printf("Precompile replay: not supported on this platform\n");
     return nullptr;
 #else
+    std::FILE* record_file = record_path ? OpenRecord(record_path) : nullptr;
+    if (!replay && !record_file) {
+        return nullptr;
+    }
     if (!g_reserved.record) {
         g_reserved.record = Reserve(RecordSlotSize * NumRecordSlots);
         g_reserved.shadow = Reserve(ShadowArenaSize);
         if (!g_reserved.record || !g_reserved.shadow) {
             std::printf("Precompile replay: could not reserve address space, off\n");
             g_reserved = {};
+            if (record_file) {
+                std::fclose(record_file);
+            }
             return nullptr;
         }
         (void)Common::Decoder::Instance(); // built now: the fault handler must not allocate
         Core::Signals::Instance()->RegisterAccessViolationHandler(OnFault, 0);
         std::atexit(ReportAtExit);
     }
-    auto* replay = new PrecompileReplay();
-    g_active = replay;
-    std::printf("Precompile replay: on\n");
-    return PrecompileReplayPtr{replay};
+    auto* precompile = new PrecompileReplay(replay, record_file);
+    g_active = precompile;
+    if (replay) {
+        std::printf("Precompile replay: on\n");
+    }
+    return PrecompileReplayPtr{precompile};
 #endif
 }
 
