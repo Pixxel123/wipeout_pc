@@ -124,7 +124,7 @@ AmdGpu::ShaderProgram& ProgramAt(AmdGpu::Regs& regs, u32 hw_stage) {
 
 /// A program translated in this rebuild: the Info of its first translation, which every meta
 /// of the program carries (as PublishShaders writes it), and its permutations' specs by index.
-struct BootProgram {
+struct TranslatedProgram {
     Shader::Info info;
     std::vector<Shader::StageSpecialization> specs;
 };
@@ -242,7 +242,7 @@ private:
     const RecordedStage* StageOf(u64 hash);
     bool CheckWalk(const Shader::Info& info, u64 hash);
     bool CheckFetch(const Shader::Info& info, const Shader::StageSpecialization& spec, u64 hash);
-    std::optional<size_t> Translate(BootProgram& program, bool initial,
+    std::optional<size_t> Translate(TranslatedProgram& program,
                                     const Shader::ShaderParams& params, HwStage hw_stage,
                                     SwStage sw_stage, const Shader::Backend::Bindings& binding,
                                     const Shader::RuntimeInfo& runtime_info,
@@ -255,7 +255,7 @@ private:
 
     PipelineCache& cache;
     const ParsedList& list;
-    std::unordered_map<u64, BootProgram> programs; ///< node-based: specs point at their Info
+    std::unordered_map<u64, TranslatedProgram> programs; ///< node-based: specs point at their Info
     Shader::Pools pools; ///< the rebuild's own: a fault jumps out of a translation
     ShadowArena arena;
     ThreadState::Range walker_code{}; ///< where the SRT walkers of this rebuild are generated
@@ -296,7 +296,7 @@ bool PrecompileBoot::Run() {
     walk_words.reserve(MaxRecordedWords);
     walk_pointers.reserve(MaxRecordedPointers);
     walk_roots.reserve(ListUserDataWords);
-    const u32 count = u32(std::min<size_t>(list.keys.size(), MaxEntries));
+    const u32 count = u32(list.keys.size()); // at most MaxEntries (LoadListFile)
     std::printf("Precompile boot: translating %u entries into the shader store\n", count);
     auto last_progress = started;
     for (u32 index = 0; index < count; ++index) {
@@ -474,8 +474,7 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
     auto& program = it->second;
     std::optional<size_t> perm;
     if (is_new) {
-        perm = Translate(program, true, params, hw_stage, sw_stage, binding, runtime_info,
-                         nullptr);
+        perm = Translate(program, params, hw_stage, sw_stage, binding, runtime_info, nullptr);
         if (!perm) {
             programs.erase(it);
             return {};
@@ -496,8 +495,8 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
         const auto found = std::ranges::find(program.specs, spec);
         perm = found != program.specs.end()
                    ? std::optional{size_t(std::distance(program.specs.begin(), found))}
-                   : Translate(program, false, params, hw_stage, sw_stage, binding,
-                               runtime_info, &spec);
+                   : Translate(program, params, hw_stage, sw_stage, binding, runtime_info,
+                               &spec);
         if (!perm) {
             return {};
         }
@@ -509,8 +508,9 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
 }
 
 /// Translates a new permutation as the shader compiler does (QueueShader), checks it and
-/// writes it; its index, or none when the entry stops.
-std::optional<size_t> PrecompileBoot::Translate(BootProgram& program, bool initial,
+/// writes it; its index, or none when the entry stops. `lookup` is the spec a later
+/// permutation was looked up with, null for the program's first translation.
+std::optional<size_t> PrecompileBoot::Translate(TranslatedProgram& program,
                                                 const Shader::ShaderParams& params,
                                                 HwStage hw_stage, SwStage sw_stage,
                                                 const Shader::Backend::Bindings& binding,
@@ -539,14 +539,14 @@ std::optional<size_t> PrecompileBoot::Translate(BootProgram& program, bool initi
     }
     // The race looks this permutation up with the program's first Info and a fresh runtime
     // info: a spec that differs from that lookup would never be found.
-    const auto first = initial ? Shader::StageSpecialization{info, runtime_info, profile, binding}
-                               : *lookup;
-    if (!(spec == first)) {
+    const auto expected =
+        lookup ? *lookup : Shader::StageSpecialization{info, runtime_info, profile, binding};
+    if (!(spec == expected)) {
         Stop(Reject::SpecChanged, fmt::format("program {:016x} permutation {}", params.hash,
                                               perm));
         return std::nullopt;
     }
-    if (initial) {
+    if (!lookup) {
         program.info = std::move(info);
     }
     spec.info = &program.info;
