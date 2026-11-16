@@ -53,6 +53,9 @@ constexpr u32 ListMaxPsInputs = 32;        ///< HwFragmentRuntimeInfo::inputs
 constexpr u32 ListVsUserDataSgpr = 0x4C;
 
 constexpr size_t MaxListBytes = 128u << 20;
+/// Key entries a list holds: the recorder stops at it, the rebuild reads no more. A list grows
+/// over launches and tracks (about 500 new keys per track, the rebuild ~1 ms each).
+constexpr u32 MaxListEntries = 16000;
 constexpr size_t MaxListEntryBytes = 4u << 20;
 constexpr u32 MaxWordOffset = (1u << 30) + 4; ///< WalkRecorder stops at 1 << 30, plus a pointer
 constexpr size_t MaxCodeBytes = 1u << 20;
@@ -530,6 +533,7 @@ struct ListAppend {
     const char* why = nullptr;  ///< why an existing file is written anew
     size_t bytes = 0;           ///< kept: the header and every entry that could be framed
     std::set<u64> keys;         ///< kept keys, by StagesDigest
+    size_t entries = 0;         ///< kept key entries: what the entry cap counts
     std::set<u64> code;         ///< programs whose code is kept
 };
 
@@ -562,6 +566,7 @@ struct ListAppend {
     if (plan.bytes < file.size()) { // only what is kept counts
         list = ParseList(file.first(plan.bytes), ~0u, 0);
     }
+    plan.entries = list.keys.size();
     for (const auto& key : list.keys) {
         plan.keys.insert(StagesDigest(key.stages));
     }

@@ -303,6 +303,11 @@ void TestAppendKeeps() {
     assert(plan.keep && !plan.why && plan.bytes == file.size());
     assert(plan.keys == (std::set<u64>{StagesDigest(key.stages), StagesDigest(SampleKey(2).stages)}));
     assert(plan.code == std::set<u64>{fragment});
+    assert(plan.entries == 2);
+    // The entry cap counts entries, the dedupe set distinct stages.
+    Append(file, EncodeListEntry(key));
+    const auto twice = PlanListAppend(file);
+    assert(twice.entries == 3 && twice.keys.size() == 2);
 
     // A header alone is kept as an empty list.
     const auto empty = PlanListAppend(EncodeListHeader());

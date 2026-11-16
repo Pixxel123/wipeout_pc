@@ -146,7 +146,7 @@ struct PrecompileRecord {
     PrecompileRecord(std::FILE* record_file_, ListAppend&& kept)
         : record_file{record_file_}, list_bytes{kept.keep ? kept.bytes - EncodeListHeader().size()
                                                           : 0},
-          keys{std::move(kept.keys)}, code_seen{kept.code.begin(), kept.code.end()},
+          list_entries{kept.entries}, keys{std::move(kept.keys)}, code_seen{kept.code.begin(), kept.code.end()},
           slots{g_reserved.record, RecordSlotSize, NumRecordSlots} {}
     ~PrecompileRecord() {
         if (record_file) {
@@ -165,6 +165,7 @@ private:
     void Record(const KeyCapture& c);
     void RecordCode(const StageCapture& stage);
     bool WriteRecord(const std::vector<u8>& bytes);
+    void ListFull();
     static std::optional<u64> SpecDigest(PipelineCache& cache, u64 program, u64 stage_hash);
     const char* RecordStage(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordWalker(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
@@ -172,8 +173,9 @@ private:
 
     std::FILE* record_file; ///< null once a write failed
     size_t list_bytes;      ///< the file's entries, kept and written: what the size cap counts
+    size_t list_entries;    ///< the file's key entries, kept and written: MaxListEntries
     RecordTally record{}, record_reported{};
-    bool record_capped_logged = false;
+    bool full_logged = false;
     std::set<u64> keys;                ///< the file's keys, by StagesDigest
     std::unordered_set<u64> code_seen; ///< programs whose code is in the file or not found
     RecordSlots slots;
@@ -294,17 +296,24 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     }
     key.words = c.words;
     key.pointers = c.pointers;
+    const u64 content = StagesDigest(key.stages);
+    const bool known = keys.contains(content);
+    if (!known && list_entries >= MaxListEntries) {
+        ListFull();
+        ++record.not_written;
+        return;
+    }
     // Code first, even for a key the list holds: an earlier launch may have missed it.
     for (const auto& stage : c.stages) {
         RecordCode(stage);
     }
-    const u64 content = StagesDigest(key.stages);
-    if (keys.contains(content)) {
+    if (known) {
         ++record.already;
         return;
     }
     if (record_file && WriteRecord(EncodeListEntry(key))) {
         ++record.written;
+        ++list_entries;
         keys.insert(content);
     } else {
         ++record.not_written;
@@ -346,14 +355,19 @@ void PrecompileRecord::RecordCode(const StageCapture& stage) {
     ++record.code_written;
 }
 
+void PrecompileRecord::ListFull() {
+    if (!full_logged) {
+        full_logged = true;
+        std::printf("Precompile record: list full (%u entries or %zu MiB), later captures not "
+                    "written\n",
+                    MaxListEntries, MaxListBytes >> 20);
+    }
+}
+
 /// Appends one entry to the list file, flushed at once: the game may end without exiting.
 bool PrecompileRecord::WriteRecord(const std::vector<u8>& bytes) {
     if (!ListHasRoom(list_bytes, bytes.size())) {
-        if (!record_capped_logged) {
-            record_capped_logged = true;
-            std::printf("Precompile record: list full (%zu MiB), later captures not written\n",
-                        MaxListBytes >> 20);
-        }
+        ListFull();
         return false;
     }
     if (std::fwrite(bytes.data(), 1, bytes.size(), record_file) != bytes.size() ||

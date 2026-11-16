@@ -63,8 +63,6 @@ using namespace Precompile;
 using Shader::HwStage;
 using Shader::SwStage;
 
-/// A list grows over launches and tracks (about 500 new keys per track, ~1 ms each here).
-constexpr u32 MaxEntries = 16000;
 constexpr u32 MaxDetails = 8;        ///< detail lines per reason
 constexpr auto ProgressInterval = std::chrono::seconds(1);
 constexpr size_t MaxPermutations = 64; ///< IndexDiskShaders reads indices below 64
@@ -297,7 +295,7 @@ bool PrecompileBoot::Run() {
     walk_words.reserve(MaxRecordedWords);
     walk_pointers.reserve(MaxRecordedPointers);
     walk_roots.reserve(ListUserDataWords);
-    const u32 count = u32(list.keys.size()); // at most MaxEntries (LoadListFile)
+    const u32 count = u32(list.keys.size()); // at most MaxListEntries (LoadListFile)
     std::printf("Precompile boot: translating %u entries into the shader store\n", count);
     auto last_progress = started;
     for (u32 index = 0; index < count; ++index) {
@@ -720,7 +718,7 @@ bool PipelineCache::RebuildFromPrecompileList() {
     std::printf("Precompile boot: not supported on this platform\n");
     return false;
 #else
-    auto parsed = LoadListFile(path, MaxEntries);
+    auto parsed = LoadListFile(path, MaxListEntries);
     if (!parsed || !SetUpFaultGuard()) {
         return false;
     }
