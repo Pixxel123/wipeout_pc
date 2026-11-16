@@ -303,7 +303,8 @@ bool PrecompileBoot::Run() {
                     marker.Earlier(), marker.Path().c_str());
     }
     // Every walker translated from here on is generated after the current end of the walker
-    // code, inside the generator's 32 MiB (nothing of the store was loaded yet).
+    // code, inside the generator's 32 MiB. Its own bounds are private to the recompiler: the
+    // range below overshoots the generator's end by what it held before, nothing at start.
     const u64 walkers = u64(Shader::RegisterWalkerCode(nullptr, 0));
     walker_code = {walkers, walkers + WalkerCodeSize};
     walk_words.reserve(MaxRecordedWords);
