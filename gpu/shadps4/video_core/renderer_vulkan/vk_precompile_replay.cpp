@@ -23,7 +23,8 @@
 //
 // GOW3_PRECOMPILE_RECORD=<file> writes each capture to a list (vk_precompile_list.h) as it is
 // made, for a later launch to replay. With only that set, nothing is replayed in this launch,
-// so the replay queue's cap drops nothing.
+// so the replay queue's cap drops nothing. GOW3_PRECOMPILE_LIST=<file> loads such a list in a
+// later launch, possibly with another build.
 //
 // Linux only (the fault handler edits the walker's registers in the signal context). While it
 // is on, the page manager's read-fault count also includes the faults of recorded walks.
@@ -35,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <cerrno>
@@ -348,6 +350,18 @@ struct RecordTally {
 
 enum class Detail { Different, Faulted, NotFound, CaptureFailed, Count };
 
+/// Each stage's program hash (0 for none), by SwStage: what a list entry waits for.
+using ProgramSet = std::array<u64, MaxShaderStages>;
+
+/// A key recorded by an earlier launch and what became of it in this one.
+struct ListEntry {
+    RecordedKey key;
+    ProgramSet programs;
+};
+
+/// Detail lines of the list replay.
+enum class ListNote { Rejected, Count };
+
 /// What a replayed selection came to.
 enum class Outcome { Selected, NotFound, Faulted, CodeGone, WalkerChanged, NoRoom };
 
@@ -381,6 +395,11 @@ struct PrecompileReplay {
     void Capture(PipelineCache& cache);
     void Replay(PipelineCache& cache);
     void Report(bool final);
+    void UseList(ParsedList&& parsed);
+
+    [[nodiscard]] bool Capturing() const {
+        return replay_same_launch || record_file;
+    }
 
     u64 submissions = 0;
     Tally tally{}, reported{};
@@ -395,6 +414,7 @@ private:
     std::optional<Outcome> Stale(PipelineCache& cache, const KeyCapture& c);
     std::string Difference(const KeyCapture& c, const GraphicsPipelineKey& key) const;
     void Log(Detail kind, const std::string& text);
+    void Note(ListNote kind, const std::string& text);
 
     const bool replay_same_launch; ///< GOW3_PRECOMPILE_REPLAY=1
     std::FILE* record_file;        ///< GOW3_PRECOMPILE_RECORD, null when off or failed
@@ -407,6 +427,12 @@ private:
     std::array<u32, size_t(Detail::Count)> details{};
     std::chrono::steady_clock::time_point last_report{};
     bool cap_logged = false, arena_logged = false, read_logged = false;
+
+    // GOW3_PRECOMPILE_LIST: a list recorded by an earlier launch.
+    std::vector<ListEntry> list;
+    std::map<ProgramSet, std::vector<u32>> list_by_programs; ///< entry indices
+    u32 list_rejected = 0;
+    std::array<u32, size_t(ListNote::Count)> list_notes{};
 };
 
 namespace {
@@ -422,6 +448,12 @@ void ReportAtExit() {
 void PrecompileReplay::Log(Detail kind, const std::string& text) {
     if (details[size_t(kind)]++ < MaxDetails) {
         std::printf("Precompile replay: %s\n", text.c_str());
+    }
+}
+
+void PrecompileReplay::Note(ListNote kind, const std::string& text) {
+    if (list_notes[size_t(kind)]++ < MaxDetails) {
+        std::printf("Precompile list: %s\n", text.c_str());
     }
 }
 
@@ -521,6 +553,43 @@ void PrecompileReplay::Capture(PipelineCache& cache) {
     }
     if (replay_same_launch) {
         waiting.push_back(std::move(c));
+    }
+}
+
+namespace {
+/// Index of the stage-enable word in Regs::reg_array.
+u32 StageEnableWord() {
+    const auto regs = std::make_unique<AmdGpu::Regs>();
+    return u32((reinterpret_cast<const u8*>(&regs->stage_enable) -
+                reinterpret_cast<const u8*>(regs->reg_array.data())) /
+               sizeof(u32));
+}
+} // namespace
+
+/// Keeps the entries the replay can use, indexed by their programs.
+void PrecompileReplay::UseList(ParsedList&& parsed) {
+    list_rejected = parsed.rejected;
+    for (const auto& reason : parsed.reasons) {
+        Note(ListNote::Rejected, "rejected " + reason);
+    }
+    const u32 stage_enable = StageEnableWord();
+    for (auto& key : parsed.keys) {
+        // Only what RECORD writes: vertex + fragment keys (no geometry or tessellation).
+        const bool vs_only = std::ranges::none_of(key.regs, [&](const auto& reg) {
+            return reg.first == stage_enable && reg.second != AmdGpu::ShaderStageEnable::Vs;
+        });
+        if (!vs_only) {
+            ++list_rejected;
+            Note(ListNote::Rejected,
+                 fmt::format("rejected key {:016x}: not a vertex + fragment key", key.key_hash));
+            continue;
+        }
+        ListEntry entry{std::move(key), {}};
+        for (const auto& stage : entry.key.stages) {
+            entry.programs[stage.sw_stage] = stage.hash;
+        }
+        list_by_programs[entry.programs].push_back(u32(list.size()));
+        list.push_back(std::move(entry));
     }
 }
 
@@ -836,6 +905,45 @@ const char* PathSetting(const char* name) {
     return value && value[0] ? value : nullptr;
 }
 
+/// The list at `path`, none when it cannot be used (logged).
+std::optional<ParsedList> LoadList(const char* path) {
+    std::FILE* file = std::fopen(path, "rb");
+    if (!file) {
+        std::printf("Precompile list: cannot read %s (%s), off\n", path, std::strerror(errno));
+        return std::nullopt;
+    }
+    std::vector<u8> bytes;
+    u8 chunk[1 << 16];
+    for (size_t read; (read = std::fread(chunk, 1, sizeof(chunk), file)) != 0;) {
+        if (bytes.size() + read > MaxListBytes + EncodeListHeader().size()) {
+            std::fclose(file);
+            std::printf("Precompile list: %s is larger than %zu MiB, rejected\n", path,
+                        MaxListBytes >> 20);
+            return std::nullopt;
+        }
+        bytes.insert(bytes.end(), chunk, chunk + read);
+    }
+    std::fclose(file);
+    auto parsed = ParseList(bytes, MaxCaptures);
+    switch (parsed.status) {
+    case ParsedList::Status::Ok:
+        std::printf("Precompile list: %s: %zu entries, %u rejected\n", path, parsed.keys.size(),
+                    parsed.rejected);
+        return parsed;
+    case ParsedList::Status::NotAList:
+        std::printf("Precompile list: %s is not a precompile list, rejected\n", path);
+        break;
+    case ParsedList::Status::OtherVersion:
+        std::printf("Precompile list: %s has version %u, this build reads %u, rejected\n", path,
+                    parsed.version, ListVersion);
+        break;
+    case ParsedList::Status::OtherLayout:
+        std::printf("Precompile list: %s has another register layout, rejected\n", path);
+        break;
+    }
+    return std::nullopt;
+}
+
 /// A new list file with its header, or null (logged).
 std::FILE* OpenRecord(const char* path) {
     std::FILE* file = std::fopen(path, "wb");
@@ -857,15 +965,18 @@ PrecompileReplayPtr MakePrecompileReplay() {
     const char* env = std::getenv("GOW3_PRECOMPILE_REPLAY");
     const bool replay = env && env[0] == '1';
     const char* record_path = PathSetting("GOW3_PRECOMPILE_RECORD");
-    if (!replay && !record_path) {
+    const char* list_path = PathSetting("GOW3_PRECOMPILE_LIST");
+    if (!replay && !record_path && !list_path) {
         return nullptr;
     }
 #ifndef __linux__
     std::printf("Precompile replay: not supported on this platform\n");
     return nullptr;
 #else
+    // Loaded before the record file is opened, which may be the same file.
+    auto parsed = list_path ? LoadList(list_path) : std::nullopt;
     std::FILE* record_file = record_path ? OpenRecord(record_path) : nullptr;
-    if (!replay && !record_file) {
+    if (!replay && !record_file && !parsed) {
         return nullptr;
     }
     if (!g_reserved.record) {
@@ -884,6 +995,9 @@ PrecompileReplayPtr MakePrecompileReplay() {
         std::atexit(ReportAtExit);
     }
     auto* precompile = new PrecompileReplay(replay, record_file);
+    if (parsed) {
+        precompile->UseList(std::move(*parsed));
+    }
     g_active = precompile;
     if (replay) {
         std::printf("Precompile replay: on\n");
@@ -893,7 +1007,9 @@ PrecompileReplayPtr MakePrecompileReplay() {
 }
 
 void PipelineCache::CapturePrecompile() {
-    precompile->Capture(*this);
+    if (precompile->Capturing()) {
+        precompile->Capture(*this);
+    }
 }
 
 void PipelineCache::ReplayPrecompile() {
