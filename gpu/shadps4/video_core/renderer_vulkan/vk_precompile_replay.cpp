@@ -33,6 +33,9 @@
 // An entry whose permutation is not built yet is tried again at the next new key of the same
 // programs: when the race selects that key, the permutation exists.
 //
+// GOW3_PRECOMPILE_BOOT=1 gives the list to the start-up rebuild (vk_precompile_boot.cpp)
+// instead: it is not replayed in the race then.
+//
 // Linux only (the fault handler edits the walker's registers in the signal context). While it
 // is on, the page manager's read-fault count also includes the faults of recorded walks.
 
@@ -50,6 +53,7 @@
 #include <shared_mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <fmt/format.h>
@@ -1119,6 +1123,18 @@ PrecompileReplayPtr MakePrecompileReplay() {
     const bool replay = env && env[0] == '1';
     const char* record_path = PathSetting("GOW3_PRECOMPILE_RECORD");
     const char* list_path = PathSetting("GOW3_PRECOMPILE_LIST");
+    const char* boot = std::getenv("GOW3_PRECOMPILE_BOOT");
+    if (boot && boot[0] == '1' && list_path) {
+        // The start-up rebuild reads the list (vk_precompile_boot.cpp), after this: a record
+        // file of the same name would empty it first.
+        if (record_path && std::string_view{record_path} == list_path) {
+            std::printf("Precompile record: %s is the list of the start-up rebuild, not "
+                        "recording\n",
+                        record_path);
+            record_path = nullptr;
+        }
+        list_path = nullptr;
+    }
     if (!replay && !record_path && !list_path) {
         return nullptr;
     }

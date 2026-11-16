@@ -17,7 +17,8 @@ struct PrecompileReplayDeleter {
 using PrecompileReplayPtr = std::unique_ptr<PrecompileReplay, PrecompileReplayDeleter>;
 
 /// Null unless GOW3_PRECOMPILE_REPLAY=1, GOW3_PRECOMPILE_RECORD=<file> or
-/// GOW3_PRECOMPILE_LIST=<file> is set.
+/// GOW3_PRECOMPILE_LIST=<file> is set. With GOW3_PRECOMPILE_BOOT=1 the list is the start-up
+/// rebuild's (vk_precompile_boot.cpp), not replayed here.
 PrecompileReplayPtr MakePrecompileReplay();
 
 } // namespace Vulkan
