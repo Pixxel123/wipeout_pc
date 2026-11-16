@@ -531,6 +531,9 @@ std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys) {
     case ParsedList::Status::Ok:
         std::printf("Precompile list: %s: %zu entries, %u rejected\n", path, parsed.keys.size(),
                     parsed.rejected);
+        for (const auto& reason : parsed.reasons) {
+            std::printf("Precompile list: rejected %s\n", reason.c_str());
+        }
         return parsed;
     case ParsedList::Status::NotAList:
         std::printf("Precompile list: %s is not a precompile list, rejected\n", path);
