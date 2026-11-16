@@ -287,14 +287,14 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     }
     key.words = c.words;
     key.pointers = c.pointers;
-    // An earlier launch recorded it (and its programs' code) already.
+    // Code first, even for a key the list holds: an earlier launch may have missed it.
+    for (const auto& stage : c.stages) {
+        RecordCode(stage);
+    }
     const u64 content = KeyContentHash(key);
     if (keys.contains(content)) {
         ++record.already;
         return;
-    }
-    for (const auto& stage : c.stages) {
-        RecordCode(stage);
     }
     if (record_file && WriteRecord(EncodeListEntry(key))) {
         ++record.written;
@@ -539,9 +539,6 @@ std::FILE* OpenRecord(const char* path, ListAppend& kept) {
                     existing.size() > kept.bytes ? ", a cut-off last entry dropped" : "");
         return file;
     }
-    if (kept.why) {
-        std::printf("Precompile record: %s %s, written anew\n", path, kept.why);
-    }
     std::FILE* file = std::fopen(path, "wb");
     const auto header = EncodeListHeader();
     if (!file || std::fwrite(header.data(), 1, header.size(), file) != header.size() ||
@@ -552,7 +549,11 @@ std::FILE* OpenRecord(const char* path, ListAppend& kept) {
         }
         return nullptr;
     }
-    std::printf("Precompile record: writing %s\n", path);
+    if (kept.why) {
+        std::printf("Precompile record: %s %s, written anew\n", path, kept.why);
+    } else {
+        std::printf("Precompile record: writing %s\n", path);
+    }
     return file;
 }
 } // namespace
