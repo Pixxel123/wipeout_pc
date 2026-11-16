@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <optional>
@@ -574,6 +575,12 @@ struct ListAppend {
         plan.code.insert(hash);
     }
     return plan;
+}
+
+/// Whether GOW3_PRECOMPILE_BOOT=1 asks for the start-up rebuild from GOW3_PRECOMPILE_LIST.
+[[nodiscard]] inline bool BootRequested() {
+    const char* boot = std::getenv("GOW3_PRECOMPILE_BOOT");
+    return boot && boot[0] == '1';
 }
 
 /// Reads the list at `path` (vk_precompile_record.cpp); none when it cannot be used (logged).

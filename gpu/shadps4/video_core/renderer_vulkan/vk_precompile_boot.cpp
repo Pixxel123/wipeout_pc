@@ -709,9 +709,8 @@ PipelineCache::Result PipelineCache::BootProgram(PipelineSelection& sel, HwStage
 }
 
 bool PipelineCache::RebuildFromPrecompileList() {
-    const char* boot = std::getenv("GOW3_PRECOMPILE_BOOT");
     const char* path = std::getenv("GOW3_PRECOMPILE_LIST");
-    if (!boot || boot[0] != '1' || !path || !path[0]) {
+    if (!BootRequested() || !path || !path[0]) {
         return false;
     }
 #ifndef __linux__

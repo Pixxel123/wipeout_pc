@@ -606,9 +606,11 @@ std::FILE* OpenRecord(const char* path, ListAppend& kept) {
 PrecompileRecordPtr MakePrecompileRecord() {
     const char* record_path = PathSetting("GOW3_PRECOMPILE_RECORD");
     const char* list_path = PathSetting("GOW3_PRECOMPILE_LIST");
-    const char* boot = std::getenv("GOW3_PRECOMPILE_BOOT");
-    const bool boot_on = boot && boot[0] == '1';
-    if (list_path && !boot_on) {
+    if (PathSetting("GOW3_PRECOMPILE_REPLAY")) {
+        std::printf("Precompile replay: GOW3_PRECOMPILE_REPLAY no longer exists (the start-up "
+                    "rebuild, GOW3_PRECOMPILE_BOOT, replaced it), ignored\n");
+    }
+    if (list_path && !BootRequested()) {
         std::printf("Precompile list: %s is read only by the start-up rebuild "
                     "(GOW3_PRECOMPILE_BOOT=1), not used\n",
                     list_path);
