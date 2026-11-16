@@ -323,12 +323,44 @@ void TestAppendAfterCutOff() {
         const auto list = ParseList(file, 100);
         assert(list.rejected == 0 && list.keys.size() == 2 && list.keys[1] == SampleKey(3));
     }
-    // A corrupt entry in the middle frames: kept, it is rejected again on load.
+    // A body that fails its checksum ends what is kept, with every entry after it: its size
+    // field may be the bad part, and then nothing after it frames.
     auto corrupt = whole;
     corrupt[EncodeListHeader().size() + 4 + 8 + 20] ^= 0x40;
     const auto plan = PlanListAppend(corrupt);
-    assert(plan.keep && plan.bytes == corrupt.size());
-    assert(plan.keys == std::set<u64>{StagesDigest(SampleKey(2).stages)});
+    assert(plan.keep && plan.bytes == EncodeListHeader().size() && plan.keys.empty());
+}
+
+void TestAppendAfterBadSize() {
+    // A bad size field mid-file: the next "entry" starts inside a body and cannot pass.
+    const auto whole = File({SampleKey(1), SampleKey(2), SampleKey(3)});
+    const size_t first_end = EncodeListHeader().size() + EncodeListEntry(SampleKey(1)).size();
+    auto bad = whole;
+    const u32 size = 16;
+    std::memcpy(bad.data() + first_end, &size, sizeof(size));
+    const auto plan = PlanListAppend(bad);
+    assert(plan.keep && plan.bytes == first_end);
+    assert(plan.keys == std::set<u64>{StagesDigest(SampleKey(1).stages)});
+    std::vector<u8> file{bad.begin(), bad.begin() + plan.bytes};
+    Append(file, EncodeListEntry(SampleKey(4)));
+    const auto list = ParseList(file, 100);
+    assert(list.rejected == 0 && list.keys.size() == 2 && list.keys[1] == SampleKey(4));
+}
+
+void TestAppendAfterZeroTail() {
+    // A power loss can leave the file's last blocks zero: each 12 zero bytes frame as an empty
+    // entry whose checksum fails, so the zeros are dropped before appending.
+    for (const size_t zeros : {1, 12, 40, 4096}) {
+        auto file = File({SampleKey(1), SampleKey(2)});
+        const size_t end = file.size();
+        file.resize(end + zeros, 0);
+        const auto plan = PlanListAppend(file);
+        assert(plan.keep && plan.bytes == end && plan.keys.size() == 2);
+        file.resize(plan.bytes);
+        Append(file, EncodeListEntry(SampleKey(3)));
+        const auto list = ParseList(file, 100);
+        assert(list.rejected == 0 && list.keys.size() == 3);
+    }
 }
 
 void TestAppendReplaces() {
@@ -371,6 +403,8 @@ int main() {
     TestStagesDigest();
     TestAppendKeeps();
     TestAppendAfterCutOff();
+    TestAppendAfterBadSize();
+    TestAppendAfterZeroTail();
     TestAppendReplaces();
     TestRoomCountsKeptBytes();
     std::puts("precompile-list-test: ok");

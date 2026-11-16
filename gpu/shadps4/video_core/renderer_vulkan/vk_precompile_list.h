@@ -435,7 +435,9 @@ struct ParsedList {
     std::map<u64, std::vector<u32>> code; ///< program hash -> code words, checked (CheckCode)
     u32 rejected = 0;                 ///< entries dropped: corrupt, invalid, cut off or past the cap
     std::vector<std::string> reasons; ///< why, for the first few
-    size_t framed_bytes = 0; ///< the header and every entry that could be framed: no cut-off tail
+    /// The header and every entry before the first that is cut off or fails its checksum (a
+    /// bad size field mid-file, a zero-filled tail after a power loss): what a recording keeps.
+    size_t framed_bytes = 0;
 };
 
 /// Reads a list; keeps at most `max_keys` entries.
@@ -471,6 +473,7 @@ struct ParsedList {
         }
         ++list.rejected;
     };
+    bool intact = true;
     for (size_t index = 0; !in.AtEnd(); ++index) {
         const u32 size = in.Get<u32>();
         const u64 checksum = in.Get<u64>();
@@ -479,8 +482,12 @@ struct ParsedList {
             reject("entry " + std::to_string(index) + ": cut off");
             break; // the rest cannot be framed
         }
-        list.framed_bytes = in.Position();
-        const char* why = Fnv1a(body) != checksum ? "checksum mismatch" : nullptr;
+        const bool checked = Fnv1a(body) == checksum;
+        intact = intact && checked;
+        if (intact) {
+            list.framed_bytes = in.Position();
+        }
+        const char* why = checked ? nullptr : "checksum mismatch";
         ListDetail::Reader entry{body};
         const auto kind = entry.Get<ListRecord>();
         if (!why && kind == ListRecord::Code) {
@@ -536,7 +543,7 @@ struct ListAppend {
         plan.why = "is larger than a list can be";
         return plan;
     }
-    const auto list = ParseList(file, ~0u, 0);
+    auto list = ParseList(file, ~0u, 0);
     switch (list.status) {
     case ParsedList::Status::NotAList:
         plan.why = "is not a precompile list";
@@ -552,6 +559,9 @@ struct ListAppend {
     }
     plan.keep = true;
     plan.bytes = list.framed_bytes;
+    if (plan.bytes < file.size()) { // only what is kept counts
+        list = ParseList(file.first(plan.bytes), ~0u, 0);
+    }
     for (const auto& key : list.keys) {
         plan.keys.insert(StagesDigest(key.stages));
     }
