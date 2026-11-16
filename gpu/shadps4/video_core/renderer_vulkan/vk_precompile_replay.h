@@ -7,18 +7,16 @@
 
 namespace Vulkan {
 
-/// gow3 diagnostic GOW3_PRECOMPILE_REPLAY (vk_precompile_replay.cpp): records the guest inputs
-/// of each pipeline new in this launch and replays its selection from them a few frames later.
-/// GOW3_PRECOMPILE_RECORD writes those inputs to a file, GOW3_PRECOMPILE_LIST replays one.
+/// gow3 diagnostic GOW3_PRECOMPILE_RECORD (vk_precompile_replay.cpp): records the guest inputs
+/// of each pipeline new in this launch into a precompile list, for a later launch's start-up
+/// rebuild (GOW3_PRECOMPILE_BOOT, vk_precompile_boot.cpp).
 struct PrecompileReplay;
 struct PrecompileReplayDeleter {
     void operator()(PrecompileReplay* replay) const;
 };
 using PrecompileReplayPtr = std::unique_ptr<PrecompileReplay, PrecompileReplayDeleter>;
 
-/// Null unless GOW3_PRECOMPILE_REPLAY=1, GOW3_PRECOMPILE_RECORD=<file> or
-/// GOW3_PRECOMPILE_LIST=<file> is set. With GOW3_PRECOMPILE_BOOT=1 the list is the start-up
-/// rebuild's (vk_precompile_boot.cpp), not replayed here.
+/// Null unless GOW3_PRECOMPILE_RECORD=<file> is set.
 PrecompileReplayPtr MakePrecompileReplay();
 
 } // namespace Vulkan

@@ -179,8 +179,8 @@ public:
 
     const ComputePipeline* GetComputePipeline();
 
-    /// gow3 diagnostic (GOW3_PRECOMPILE_REPLAY): replays the selections captured a few
-    /// submissions ago. GPU command thread, between submissions.
+    /// gow3 diagnostic (GOW3_PRECOMPILE_RECORD): reports the recording every few seconds.
+    /// GPU command thread, between submissions.
     void ReplayPrecompile();
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,

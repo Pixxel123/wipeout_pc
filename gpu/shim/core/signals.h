@@ -32,7 +32,7 @@ public:
 
 private:
     // gow3: different handlers may share a priority, in registration order
-    // (GOW3_PRECOMPILE_REPLAY's handler runs at 0 after the page manager, before the SRT walker
+    // (the GOW3_PRECOMPILE_* handler runs at 0 after the page manager, before the SRT walker
     // patch at 1). A handler is registered once.
     template <typename T>
     struct HandlerEntry {

@@ -93,7 +93,7 @@ bool SetUpFaultGuard() {
     g_reserved.record = Reserve(RecordSlotSize * NumRecordSlots);
     g_reserved.shadow = Reserve(ShadowArenaSize);
     if (!g_reserved.record || !g_reserved.shadow) {
-        std::printf("Precompile replay: could not reserve address space, off\n");
+        std::printf("Precompile: could not reserve address space, off\n");
         g_reserved = {};
         return false;
     }

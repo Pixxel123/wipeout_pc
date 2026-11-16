@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// gow3 (GOW3_PRECOMPILE_REPLAY, vk_precompile_replay.cpp): the guest words a new pipeline's
+// gow3 (GOW3_PRECOMPILE_*, vk_precompile_boot.cpp): the guest words a new pipeline's
 // selection read, and where they go in the private "shadow" copy it is replayed from. Only
 // layout and address arithmetic here; the replay maps the pages.
 
