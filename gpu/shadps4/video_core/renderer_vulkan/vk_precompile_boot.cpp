@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -150,9 +151,11 @@ bool ReadRecorded(u64 address, void* out, size_t size) {
     return true;
 }
 
-/// The crash-loop guard: `<list>.boot` names, one key hash per line, the entries a start ended
-/// in, plus the one being translated. A translator assert exits the game (_Exit) and the disk
-/// marker is saved only after the rebuild, so the next start rebuilds again and skips them.
+/// The crash-loop guard: `<list>.boot` names, one per line, the programs of the entries a start
+/// ended in, plus those of the entry being translated. A translator assert exits the game
+/// (_Exit) and the disk marker is saved only after the rebuild, so the next start rebuilds
+/// again and skips every entry that uses one of those programs: an assert is most likely
+/// the program's, whichever entry reached it.
 class CrashMarker {
 public:
     explicit CrashMarker(std::string path_) : path{std::move(path_)} {
@@ -164,22 +167,39 @@ public:
         }
     }
 
-    /// Whether an earlier start ended while translating this entry.
-    [[nodiscard]] bool Skip(u64 key_hash) const {
-        return earlier.contains(key_hash);
+    [[nodiscard]] const std::string& Path() const {
+        return path;
+    }
+    /// Programs an earlier start ended in.
+    [[nodiscard]] size_t Earlier() const {
+        return earlier.size();
     }
 
-    /// Names `key_hash` as the entry being translated, before it starts.
-    void Enter(u64 key_hash) {
+    /// Whether the entry uses a program an earlier start ended in.
+    [[nodiscard]] bool Skip(const RecordedKey& key) const {
+        return std::ranges::any_of(key.stages, [&](const RecordedStage& stage) {
+            return earlier.contains(stage.hash);
+        });
+    }
+
+    /// Names the entry's programs (none for null) as being translated, before it starts;
+    /// false when the file cannot be written.
+    [[nodiscard]] bool Enter(const RecordedKey* key) {
         std::FILE* file = std::fopen(path.c_str(), "w");
         if (!file) {
-            return;
+            return false;
         }
-        for (const u64 hash : earlier) {
-            std::fprintf(file, "%016llx\n", static_cast<unsigned long long>(hash));
+        bool written = true;
+        const auto put = [&](u64 hash) {
+            written &= std::fprintf(file, "%016llx\n", static_cast<unsigned long long>(hash)) > 0;
+        };
+        std::ranges::for_each(earlier, put);
+        if (key) {
+            for (const auto& stage : key->stages) {
+                put(stage.hash);
+            }
         }
-        std::fprintf(file, "%016llx\n", static_cast<unsigned long long>(key_hash));
-        std::fclose(file);
+        return std::fclose(file) == 0 && written;
     }
 
     /// The rebuild ended: nothing to skip next time.
@@ -207,7 +227,7 @@ struct PrecompileBoot {
     PrecompileBoot(PipelineCache& cache_, const ParsedList& list_, std::string marker_path)
         : cache{cache_}, list{list_}, marker{std::move(marker_path)} {}
 
-    void Run();
+    bool Run();
     PipelineCache::Result Program(const Shader::ShaderParams& params, HwStage hw_stage,
                                   SwStage sw_stage, Shader::Backend::Bindings& binding,
                                   const Shader::RuntimeInfo& runtime_info);
@@ -252,8 +272,19 @@ private:
     std::chrono::steady_clock::time_point started;
 };
 
-void PrecompileBoot::Run() {
+/// False when the crash marker cannot be written: then nothing is translated.
+bool PrecompileBoot::Run() {
     started = std::chrono::steady_clock::now();
+    if (!marker.Enter(nullptr)) {
+        std::printf("Precompile boot: cannot write %s (%s), rebuild off\n", marker.Path().c_str(),
+                    std::strerror(errno));
+        return false;
+    }
+    if (marker.Earlier()) {
+        std::printf("Precompile boot: an earlier start ended in the rebuild, entries using the %zu "
+                    "programs %s names are skipped\n",
+                    marker.Earlier(), marker.Path().c_str());
+    }
     // Every walker translated from here on is generated after the current end of the walker
     // code, inside the generator's 32 MiB (nothing of the store was loaded yet).
     const u64 walkers = u64(Shader::RegisterWalkerCode(nullptr, 0));
@@ -272,18 +303,24 @@ void PrecompileBoot::Run() {
                         count, permutations);
         }
         const auto& key = list.keys[index];
-        if (marker.Skip(key.key_hash)) {
-            ++skipped;
-            std::printf("Precompile boot: entry %u (recorded key %016llx) skipped: the previous "
-                        "start ended while translating it\n",
-                        index, static_cast<unsigned long long>(key.key_hash));
+        if (marker.Skip(key)) {
+            if (++skipped <= MaxDetails) {
+                std::printf("Precompile boot: entry %u (recorded key %016llx) skipped (crash "
+                            "marker)\n",
+                            index, static_cast<unsigned long long>(key.key_hash));
+            }
             continue;
         }
-        marker.Enter(key.key_hash);
+        if (!marker.Enter(&key)) {
+            std::printf("Precompile boot: cannot write %s (%s), rebuild stopped at entry %u\n",
+                        marker.Path().c_str(), std::strerror(errno), index);
+            break;
+        }
         Entry(index, key);
     }
     marker.Finish();
     Report();
+    return true;
 }
 
 void PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
@@ -639,8 +676,7 @@ bool PipelineCache::RebuildFromPrecompileList() {
         return false;
     }
     auto boot_run = std::make_unique<PrecompileBoot>(*this, *parsed, std::string{path} + ".boot");
-    boot_run->Run();
-    return true;
+    return boot_run->Run();
 #endif
 }
 
