@@ -423,17 +423,13 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
     shadow.words = key.words;
     for (const auto& stage : key.stages) {
-        // Padded to whole pages: the program address register holds bits 8 and up, and a
-        // region ends right before its guard page.
-        const auto& code = list.code.at(stage.hash);
-        const size_t bytes = code.size() * sizeof(u32);
+        // A code region is only marked out here (its first and last word) and copied in after
+        // the fill. Padded to whole pages: the program address register holds bits 8 and up,
+        // and a region ends right before its guard page.
+        const size_t bytes = list.code.at(stage.hash).size() * sizeof(u32);
         const size_t padded = (bytes + PageSize - 1) / PageSize * PageSize;
-        for (u32 i = 0; i < code.size(); ++i) {
-            shadow.words.push_back({CodeBase(stage.sw_stage), i * 4, code[i]});
-        }
-        if (padded > bytes) {
-            shadow.words.push_back({CodeBase(stage.sw_stage), u32(padded - 4), 0});
-        }
+        shadow.words.push_back({CodeBase(stage.sw_stage), 0, 0});
+        shadow.words.push_back({CodeBase(stage.sw_stage), u32(padded - 4), 0});
     }
     shadow.layout.emplace(shadow.words, PageSize);
     const auto address = arena.Map(*shadow.layout);
@@ -444,6 +440,11 @@ bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
     shadow.address = *address;
     shadow.layout->Fill(reinterpret_cast<u8*>(*address), *address, shadow.words, key.pointers,
                         g_reserved.shadow);
+    for (const auto& stage : key.stages) {
+        const auto& code = list.code.at(stage.hash);
+        const u64 at = *shadow.layout->Translate(CodeBase(stage.sw_stage), *address);
+        std::memcpy(reinterpret_cast<void*>(at), code.data(), code.size() * sizeof(u32));
+    }
     return true;
 }
 
