@@ -71,8 +71,9 @@ bool OnFault(void* context, void* fault_address) {
     if (t.recorder && g_reserved.InRecord(address)) {
         value = t.recorder->Load(u64(gregs[REG_RDI]), address, is_pointer);
     } else {
-        // Outside the recorded words (or the record slots in a replay): a zero, or for a
-        // pointer the dead page (not 0, whose next read would fault again outside the shadow).
+        // A read outside the recorded words (in a recording, outside the record slots; in a
+        // rebuild, a guard page or the dead page of the shadow copy): a zero, or for a pointer
+        // the dead page (not 0, whose next read would fault again outside the shadow).
         t.Note(address);
         value = is_pointer ? g_reserved.shadow : 0;
     }
