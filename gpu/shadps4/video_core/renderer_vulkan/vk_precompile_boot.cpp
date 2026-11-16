@@ -80,6 +80,7 @@ enum class Reject {
     NotSelected,       ///< the selection stopped (an unsupported state)
     SpecChanged,       ///< a translation specialises unlike the lookup that asked for it
     StrayWalk,         ///< a walker reads a word or follows a pointer the recording did not
+    StrayFetch,        ///< the fetch shader is read through a pointer the recording did not
     Exception,         ///< the translation threw
     TooManyPermutations,
     Count,
@@ -87,7 +88,8 @@ enum class Reject {
 
 constexpr std::array<const char*, size_t(Reject::Count)> RejectNames = {
     "not vertex + fragment", "no code", "no room", "faulted", "not selected", "spec changed",
-    "walk outside the recording", "exception", "too many permutations",
+    "walk outside the recording", "fetch outside the recording", "exception",
+    "too many permutations",
 };
 
 /// Synthetic base of a stage's code in the shadow layout: no guest pointer (48 bits) has it.
@@ -237,7 +239,9 @@ private:
     std::optional<Reject> Select(const RecordedKey& key, Shadow& shadow);
     bool MapShadow(const RecordedKey& key, Shadow& shadow);
     std::unique_ptr<AmdGpu::Regs> Registers(const RecordedKey& key, const Shadow& shadow) const;
+    const RecordedStage* StageOf(u64 hash);
     bool CheckWalk(const Shader::Info& info, u64 hash);
+    bool CheckFetch(const Shader::Info& info, const Shader::StageSpecialization& spec, u64 hash);
     std::optional<size_t> Translate(BootProgram& program, bool initial,
                                     const Shader::ShaderParams& params, HwStage hw_stage,
                                     SwStage sw_stage, const Shader::Backend::Bindings& binding,
@@ -486,6 +490,9 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
         }
         const Shader::StageSpecialization spec{program.info, runtime_info, cache.profile,
                                                binding};
+        if (!CheckFetch(program.info, spec, params.hash)) {
+            return {};
+        }
         const auto found = std::ranges::find(program.specs, spec);
         perm = found != program.specs.end()
                    ? std::optional{size_t(std::distance(program.specs.begin(), found))}
@@ -522,6 +529,9 @@ std::optional<size_t> PrecompileBoot::Translate(BootProgram& program, bool initi
         return std::nullopt;
     }
     Shader::StageSpecialization spec{info, runtime, profile, binding};
+    if (!CheckFetch(info, spec, params.hash)) {
+        return std::nullopt;
+    }
     auto emit_binding = binding;
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, ir, emit_binding);
     if (Failed()) {
@@ -559,9 +569,8 @@ bool PrecompileBoot::CheckWalk(const Shader::Info& info, u64 hash) {
     if (!info.srt_info.walker_func) {
         return true;
     }
-    const auto stage = std::ranges::find(entry->stages, hash, &RecordedStage::hash);
-    if (stage == entry->stages.end()) {
-        Stop(Reject::StrayWalk, fmt::format("program {:016x} is not recorded", hash));
+    const auto* stage = StageOf(hash);
+    if (!stage) {
         return false;
     }
     std::vector<u32> flat(info.srt_info.flattened_bufsize_dw);
@@ -603,6 +612,44 @@ bool PrecompileBoot::CheckWalk(const Shader::Info& info, u64 hash) {
         Stop(Reject::StrayWalk, fmt::format("program {:016x}: {}", hash, why));
     }
     return !why;
+}
+
+/// The entry's recorded stage of a program; null (the entry stops) when there is none.
+const RecordedStage* PrecompileBoot::StageOf(u64 hash) {
+    const auto stage = std::ranges::find(entry->stages, hash, &RecordedStage::hash);
+    if (stage == entry->stages.end()) {
+        Stop(Reject::StrayWalk, fmt::format("program {:016x} is not recorded", hash));
+        return nullptr;
+    }
+    return &*stage;
+}
+
+/// Whether the fetch shader and its vertex buffer tables were read through user-data pointers
+/// the recording followed (false: the entry stops). Any other pair of user-data words still
+/// holds a guest address, which the committed guest pool serves without a fault.
+bool PrecompileBoot::CheckFetch(const Shader::Info& info, const Shader::StageSpecialization& spec,
+                                u64 hash) {
+    if (!info.has_fetch_shader) {
+        return true;
+    }
+    const auto* stage = StageOf(hash);
+    if (!stage) {
+        return false;
+    }
+    const auto followed = [&](u32 sgpr) {
+        return std::ranges::any_of(stage->roots,
+                                   [&](const auto& root) { return root.first == sgpr; });
+    };
+    bool recorded = followed(info.fetch_shader_sgpr_base);
+    if (spec.fetch_shader_data) {
+        for (const auto& attrib : spec.fetch_shader_data->attributes) {
+            recorded = recorded && followed(attrib.sgpr_base);
+        }
+    }
+    if (!recorded) {
+        Stop(Reject::StrayFetch, fmt::format("program {:016x}", hash));
+    }
+    return recorded;
 }
 
 /// Stops the entry: the selection goes on to its end without translating anything more.
