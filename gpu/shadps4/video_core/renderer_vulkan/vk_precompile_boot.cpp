@@ -63,7 +63,8 @@ using namespace Precompile;
 using Shader::HwStage;
 using Shader::SwStage;
 
-constexpr u32 MaxEntries = 4000;
+/// A list grows over launches and tracks (about 500 new keys per track, ~1 ms each here).
+constexpr u32 MaxEntries = 16000;
 constexpr u32 MaxDetails = 8;        ///< detail lines per reason
 constexpr auto ProgressInterval = std::chrono::seconds(1);
 constexpr size_t MaxPermutations = 64; ///< IndexDiskShaders reads indices below 64
