@@ -35,6 +35,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/vk_spec_probe.h"
 
 namespace Vulkan {
 
@@ -437,6 +438,18 @@ std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
 std::atomic<u32> g_gow3_pool_reuses;
 std::atomic<u32> g_gow3_pending_draws;
 namespace {
+// gow3: the permutation probe (vk_spec_probe.h) in GetProgram. GOW3_PERM_PROBE=0 turns it off,
+// read once at start, so one build can be measured both ways.
+const bool g_perm_probe = [] {
+    const char* env = std::getenv("GOW3_PERM_PROBE");
+    return !(env && std::strcmp(env, "0") == 0);
+}();
+// Probe counters (GOW3_FRAME_STATS). Only the GPU thread writes them, so an increment is a plain
+// load and store, not a locked instruction per draw.
+std::atomic<u64> g_probe_hits, g_probe_misses, g_probe_conservative;
+void Bump(std::atomic<u64>& counter) {
+    counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
 struct PhaseTimer {
     std::atomic<u64>& counter;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -689,6 +702,22 @@ void PipelineCache::SeedWorkerCaches() {
 }
 
 void PipelineCache::ReportCompilerStats() {
+    if (g_perm_probe) {
+        static u64 last_hits = 0, last_misses = 0, last_conservative = 0;
+        const u64 hits = g_probe_hits.load(std::memory_order_relaxed);
+        const u64 misses = g_probe_misses.load(std::memory_order_relaxed);
+        const u64 conservative = g_probe_conservative.load(std::memory_order_relaxed);
+        std::printf("Shader selection: permutation probe hits %llu, misses %llu (%llu of them "
+                    "matched the same permutation on the full compare)\n",
+                    static_cast<unsigned long long>(hits - last_hits),
+                    static_cast<unsigned long long>(misses - last_misses),
+                    static_cast<unsigned long long>(conservative - last_conservative));
+        last_hits = hits;
+        last_misses = misses;
+        last_conservative = conservative;
+    } else {
+        std::printf("Shader selection: permutation probe off (GOW3_PERM_PROBE=0)\n");
+    }
     if (compiler) {
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u\n",
@@ -1272,7 +1301,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
-    auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
+    // Paths that compile take their own copy (CompileModule may change it).
+    const auto& runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
     if (sel.worker) {
         // gow3: draw-preparation worker: look up only, with the worker's own Info copy.
         auto& worker = *sel.worker;
@@ -1344,9 +1374,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             return {};
         }
         auto start = binding;
+        auto compile_info = runtime_info;
         const auto module =
-            CompileModule(new_program->info, runtime_info, params.code, 0, binding);
-        auto spec = Shader::StageSpecialization(new_program->info, runtime_info, profile, start);
+            CompileModule(new_program->info, compile_info, params.code, 0, binding);
+        auto spec = Shader::StageSpecialization(new_program->info, compile_info, profile, start);
         const auto perm_hash = HashCombine(params.hash, 0);
 
         RegisterShaderMeta(new_program->info, spec.fetch_shader_data, spec, perm_hash, 0);
@@ -1379,6 +1410,31 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
+
+    // gow3: a permutation found below; disk-loaded modules count as matched on first use.
+    const auto use_permutation = [&](size_t perm_idx) -> Result {
+        info.AddBindings(binding);
+        const auto& permutation = program->modules[perm_idx];
+        if (!disk_modules_unused.empty() && disk_modules_unused.erase(permutation.module)) {
+            ++disk_stats.matched;
+        }
+        return std::make_tuple(&program->info, permutation.module,
+                               permutation.spec.fetch_shader_data,
+                               HashCombine(params.hash, perm_idx));
+    };
+
+    // gow3: consecutive draws of a program almost always use the same permutation. Compare it
+    // with this draw's inputs directly; a specialization is built only when it differs.
+    const bool probe = g_perm_probe && program->last_used < program->modules.size();
+    if (probe) {
+        if (SpecProbe::Matches(program->modules[program->last_used].spec, info, runtime_info,
+                               binding)) {
+            Bump(g_probe_hits);
+            return use_permutation(program->last_used);
+        }
+        Bump(g_probe_misses);
+    }
+
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
     size_t perm_idx = NewPermutationIndex(*program);
@@ -1386,11 +1442,13 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
 
     vk::ShaderModule module{};
 
-    // gow3: consecutive draws of a program almost always use the same permutation.
-    auto it = program->last_used < program->modules.size() &&
-                      program->modules[program->last_used].spec == spec
-                  ? program->modules.begin() + program->last_used
-                  : std::ranges::find(program->modules, spec, &Program::Module::spec);
+    const bool last_matches = program->last_used < program->modules.size() &&
+                              program->modules[program->last_used].spec == spec;
+    if (probe && last_matches) {
+        Bump(g_probe_conservative);
+    }
+    auto it = last_matches ? program->modules.begin() + program->last_used
+                           : std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it != program->modules.end()) {
         program->last_used = std::distance(program->modules.begin(), it);
     }
@@ -1405,20 +1463,15 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             return {};
         }
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        auto compile_info = runtime_info;
+        module = CompileModule(new_info, compile_info, params.code, perm_idx, binding);
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         disk_stats.compiled += DiskShadersActive();
         std::unique_lock lk{programs_mutex};
         program->InsertPermut(module, std::move(spec), perm_idx);
     } else {
-        info.AddBindings(binding);
-        module = it->module;
-        if (!disk_modules_unused.empty() && disk_modules_unused.erase(module)) {
-            ++disk_stats.matched;
-        }
-        perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
+        return use_permutation(std::distance(program->modules.begin(), it));
     }
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
