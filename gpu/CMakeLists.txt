@@ -541,6 +541,13 @@ add_executable(async-fetch-snapshot-test EXCLUDE_FROM_ALL ../tests/test_async_fe
 target_compile_options(async-fetch-snapshot-test PRIVATE -UNDEBUG)
 target_include_directories(async-fetch-snapshot-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(async-fetch-snapshot-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum)
+add_executable(spec-match-test EXCLUDE_FROM_ALL ../tests/test_spec_match.cpp
+    shadps4/shader_recompiler/frontend/fetch_shader.cpp
+    shadps4/shader_recompiler/frontend/decode.cpp
+    shadps4/shader_recompiler/frontend/format.cpp)
+target_compile_options(spec-match-test PRIVATE -UNDEBUG)
+target_include_directories(spec-match-test PRIVATE shim shadps4 third_party/gcn/include)
+target_link_libraries(spec-match-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum)
 add_executable(texture-set-key-test EXCLUDE_FROM_ALL ../tests/test_texture_set_key.cpp)
 target_compile_options(texture-set-key-test PRIVATE -UNDEBUG)
 target_include_directories(texture-set-key-test PRIVATE shim shadps4 third_party/gcn/include)
