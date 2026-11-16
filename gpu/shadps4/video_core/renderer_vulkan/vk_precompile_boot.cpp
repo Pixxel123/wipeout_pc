@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <set>
@@ -78,13 +79,14 @@ enum class Reject {
     NotSelected,       ///< the selection stopped (an unsupported state)
     SpecChanged,       ///< a translation specialises unlike the lookup that asked for it
     StrayWalk,         ///< a walker reads a word or follows a pointer the recording did not
+    Exception,         ///< the translation threw
     TooManyPermutations,
     Count,
 };
 
 constexpr std::array<const char*, size_t(Reject::Count)> RejectNames = {
     "not vertex + fragment", "no code", "no room", "faulted", "not selected", "spec changed",
-    "walk outside the recording", "too many permutations",
+    "walk outside the recording", "exception", "too many permutations",
 };
 
 /// Synthetic base of a stage's code in the shadow layout: no guest pointer (48 bits) has it.
@@ -337,7 +339,16 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
     selection.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
     bool selected = false;
     Watch();
-    const bool completed = Guarded([&] { selected = cache.RefreshGraphicsKey(selection); });
+    const bool completed = Guarded([&] {
+        // Caught here, inside the recovery point: the shader compiler's jobs catch them too.
+        try {
+            selected = cache.RefreshGraphicsKey(selection);
+        } catch (const std::exception& exception) {
+            Stop(Reject::Exception, exception.what());
+        } catch (...) {
+            Stop(Reject::Exception, "unknown");
+        }
+    });
     const bool faulted = FaultState().faults != 0;
     FaultState().Stop();
     if (stopped) {
