@@ -194,8 +194,11 @@ std::vector<u32> ReadProgramCode(VAddr address) {
     std::memcpy(&length, reinterpret_cast<const u8*>(info.data()) + CodeHeaderLengthAt,
                 sizeof(length));
     const u64 words = std::max<u64>(header + CodeHeaderWords, ((length >> 8) + 3) / 4);
+    if (words * 4 > MaxCodeBytes) {
+        return {};
+    }
     std::vector<u32> code(words);
-    if (words * 4 > MaxCodeBytes || !ReadGuest(address, code.data(), words * 4)) {
+    if (!ReadGuest(address, code.data(), words * 4)) {
         return {};
     }
     return code;
