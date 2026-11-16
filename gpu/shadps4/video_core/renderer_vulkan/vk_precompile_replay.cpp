@@ -24,7 +24,12 @@
 // GOW3_PRECOMPILE_RECORD=<file> writes each capture to a list (vk_precompile_list.h) as it is
 // made, for a later launch to replay. With only that set, nothing is replayed in this launch,
 // so the replay queue's cap drops nothing. GOW3_PRECOMPILE_LIST=<file> loads such a list in a
-// later launch, possibly with another build.
+// later launch, possibly with another build. When a draw selects a key new in this launch, the
+// entries recorded for the same stage programs are replayed the same way, with this launch's
+// code addresses and walkers. Permutation numbers differ across launches, so the check is
+// whether the replayed key is one the race selects in this launch, before or after the replay.
+// An entry whose permutation is not built yet is tried again at the next new key of the same
+// programs: when the race selects that key, the permutation exists.
 //
 // Linux only (the fault handler edits the walker's registers in the signal context). While it
 // is on, the page manager's read-fault count also includes the faults of recorded walks.
@@ -43,6 +48,7 @@
 #include <shared_mutex>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <fmt/format.h>
 #ifdef __linux__
@@ -353,14 +359,54 @@ enum class Detail { Different, Faulted, NotFound, CaptureFailed, Count };
 /// Each stage's program hash (0 for none), by SwStage: what a list entry waits for.
 using ProgramSet = std::array<u64, MaxShaderStages>;
 
+/// What became of a list entry in this launch.
+enum class ListState {
+    NotNew,   ///< no key with its programs was new in this launch (yet)
+    Queued,   ///< waiting for its replay
+    NotBuilt, ///< a program or permutation the lookup needs is not built yet
+    Gone,     ///< the code moved before the replay
+    Skipped,  ///< no room for the shadow copy
+    Matched,  ///< replayed to a key the race selected
+    Unused,   ///< replayed to a key the race has not selected (yet)
+    Faulted,  ///< read outside the recorded words
+};
+
+/// Tried again at the next new key of the same programs.
+bool Retryable(ListState state) {
+    return state == ListState::NotNew || state == ListState::NotBuilt ||
+           state == ListState::Gone || state == ListState::Skipped;
+}
+
 /// A key recorded by an earlier launch and what became of it in this one.
 struct ListEntry {
     RecordedKey key;
     ProgramSet programs;
+    ListState state = ListState::NotNew;
+    u64 replayed = 0; ///< hash of the key the replay selected
 };
 
-/// Detail lines of the list replay.
-enum class ListNote { Rejected, Count };
+/// An entry to replay with the code addresses of the draw that asked for it.
+struct ListItem {
+    u32 entry;
+    u64 submission;
+    std::array<VAddr, MaxShaderStages> code; ///< by SwStage
+};
+
+struct ListTally {
+    u64 new_keys; ///< keys the race selected in this launch
+    u64 matched, unused, not_built, faulted, gone, skipped, waiting;
+    u64 never_seen; ///< NotNew, a program never seen in this launch
+    u64 not_new;    ///< NotNew, every program seen
+    bool operator==(const ListTally&) const = default;
+};
+
+/// Detail lines of the list replay. Unused and NotBuilt are printed at exit: most entries pass
+/// through them on the way to a match.
+enum class ListNote { Rejected, Faulted, Unused, NotBuilt, Count };
+
+AmdGpu::ShaderProgram& ProgramAt(AmdGpu::Regs& regs, u32 hw_stage) {
+    return const_cast<AmdGpu::ShaderProgram&>(*regs.ProgramForStage(hw_stage));
+}
 
 /// What a replayed selection came to.
 enum class Outcome { Selected, NotFound, Faulted, CodeGone, WalkerChanged, NoRoom };
@@ -396,9 +442,13 @@ struct PrecompileReplay {
     void Replay(PipelineCache& cache);
     void Report(bool final);
     void UseList(ParsedList&& parsed);
+    void NoteNewKey(PipelineCache& cache);
 
     [[nodiscard]] bool Capturing() const {
         return replay_same_launch || record_file;
+    }
+    [[nodiscard]] bool Listing() const {
+        return list_on;
     }
 
     u64 submissions = 0;
@@ -415,6 +465,11 @@ private:
     std::string Difference(const KeyCapture& c, const GraphicsPipelineKey& key) const;
     void Log(Detail kind, const std::string& text);
     void Note(ListNote kind, const std::string& text);
+    void ReplayListed(PipelineCache& cache, const ListItem& item);
+    KeyCapture Expand(const RecordedKey& key, const std::array<VAddr, MaxShaderStages>& code);
+    void AdoptWalkers(PipelineCache& cache, KeyCapture& c);
+    ListTally CountList();
+    void ReportOpenEntries();
 
     const bool replay_same_launch; ///< GOW3_PRECOMPILE_REPLAY=1
     std::FILE* record_file;        ///< GOW3_PRECOMPILE_RECORD, null when off or failed
@@ -429,10 +484,18 @@ private:
     bool cap_logged = false, arena_logged = false, read_logged = false;
 
     // GOW3_PRECOMPILE_LIST: a list recorded by an earlier launch.
+    bool list_on = false;
     std::vector<ListEntry> list;
     std::map<ProgramSet, std::vector<u32>> list_by_programs; ///< entry indices
     u32 list_rejected = 0;
+    std::deque<ListItem> list_waiting;
+    std::unordered_set<GraphicsPipelineKey> live_keys; ///< every key the race selected
+    /// Keys replayed to but not selected yet, with their entries.
+    std::unordered_map<GraphicsPipelineKey, std::vector<u32>> unused_keys;
+    std::unordered_set<u64> live_programs;
     std::array<u32, size_t(ListNote::Count)> list_notes{};
+    ListTally list_reported{};
+    std::mutex list_mutex; ///< the states and live sets: the exit report runs on another thread
 };
 
 namespace {
@@ -471,7 +534,28 @@ void PrecompileReplay::Report(bool final) {
                     static_cast<unsigned long long>(record.bytes >> 10),
                     static_cast<unsigned long long>(record.not_written), final ? " (exit)" : "");
     }
-    if (!final && tally == reported) {
+    if (list_on) {
+        const auto t = CountList();
+        if (final || !(t == list_reported)) {
+            list_reported = t;
+            std::printf("%s\n",
+                        fmt::format("Precompile list: {} entries, {} keys new in this launch, "
+                                    "{} matched a key the race used, {} replayed to a key not "
+                                    "used{}, {} permutation not built, {} faulted (outside "
+                                    "shadow), {} program never seen, {} programs never new "
+                                    "together, {} code gone, {} skipped (no room), {} waiting, "
+                                    "{} rejected{}",
+                                    list.size(), t.new_keys, t.matched, t.unused,
+                                    final ? "" : " yet", t.not_built, t.faulted, t.never_seen,
+                                    t.not_new, t.gone, t.skipped, t.waiting, list_rejected,
+                                    final ? " (exit)" : "")
+                            .c_str());
+        }
+        if (final) {
+            ReportOpenEntries();
+        }
+    }
+    if (!Capturing() || (!final && tally == reported)) {
         return;
     }
     reported = tally;
@@ -568,17 +652,23 @@ u32 StageEnableWord() {
 
 /// Keeps the entries the replay can use, indexed by their programs.
 void PrecompileReplay::UseList(ParsedList&& parsed) {
+    list_on = true;
     list_rejected = parsed.rejected;
     for (const auto& reason : parsed.reasons) {
         Note(ListNote::Rejected, "rejected " + reason);
     }
     const u32 stage_enable = StageEnableWord();
+    const auto vs_or_ps = [](const RecordedStage& stage) {
+        return (stage.sw_stage == u32(SwStage::Fragment) &&
+                stage.hw_stage == u32(HwStage::Fragment)) ||
+               (stage.sw_stage == u32(SwStage::Vertex) && stage.hw_stage == u32(HwStage::Vertex));
+    };
     for (auto& key : parsed.keys) {
         // Only what RECORD writes: vertex + fragment keys (no geometry or tessellation).
         const bool vs_only = std::ranges::none_of(key.regs, [&](const auto& reg) {
             return reg.first == stage_enable && reg.second != AmdGpu::ShaderStageEnable::Vs;
         });
-        if (!vs_only) {
+        if (!vs_only || !std::ranges::all_of(key.stages, vs_or_ps)) {
             ++list_rejected;
             Note(ListNote::Rejected,
                  fmt::format("rejected key {:016x}: not a vertex + fragment key", key.key_hash));
@@ -743,7 +833,200 @@ void PrecompileReplay::Replay(PipelineCache& cache) {
         waiting.pop_front();
         ReplayOne(cache, c);
     }
+    while (!list_waiting.empty() && list_waiting.front().submission + ReplayDelay <= submissions &&
+           std::chrono::steady_clock::now() < deadline) {
+        const ListItem item = list_waiting.front();
+        list_waiting.pop_front();
+        ReplayListed(cache, item);
+    }
     Report(false);
+}
+
+/// A draw selected a key new in this launch: it may match an entry replayed earlier, and the
+/// entries recorded for the same programs are queued with this draw's code addresses.
+void PrecompileReplay::NoteNewKey(PipelineCache& cache) {
+    const auto& sel = cache.sel;
+    std::scoped_lock lock{list_mutex};
+    if (!live_keys.insert(sel.graphics_key).second) {
+        return; // asked for again while it builds
+    }
+    if (const auto found = unused_keys.find(sel.graphics_key); found != unused_keys.end()) {
+        for (const u32 index : found->second) {
+            list[index].state = ListState::Matched;
+        }
+        unused_keys.erase(found);
+    }
+    ProgramSet programs{};
+    std::array<VAddr, MaxShaderStages> code{};
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (const auto* info = sel.infos[i]) {
+            programs[i] = info->pgm_hash;
+            code[i] = sel.regs->ProgramForStage(u32(info->hw_stage))->Address<VAddr>();
+            live_programs.insert(info->pgm_hash);
+        }
+    }
+    const auto found = list_by_programs.find(programs);
+    if (found == list_by_programs.end() ||
+        sel.regs->stage_enable.raw != AmdGpu::ShaderStageEnable::Vs) {
+        return;
+    }
+    for (const u32 index : found->second) {
+        auto& entry = list[index];
+        // No queue cap: an entry is queued once at a time, and the items are small.
+        if (!Retryable(entry.state)) {
+            continue;
+        }
+        entry.state = ListState::Queued;
+        list_waiting.push_back({index, submissions, code});
+    }
+}
+
+/// The recorded registers with only this launch's code addresses of the recorded stages: the
+/// earlier launch's addresses would reach AmdGpu::GetParams, which stops the game on code
+/// without its header.
+KeyCapture PrecompileReplay::Expand(const RecordedKey& key,
+                                    const std::array<VAddr, MaxShaderStages>& code) {
+    KeyCapture c{};
+    c.regs = std::make_unique<AmdGpu::Regs>();
+    c.regs->reg_array.fill(0);
+    for (const auto& [index, value] : key.regs) {
+        c.regs->reg_array[index] = value;
+    }
+    for (u32 hw_stage = 0; hw_stage < ListHwStages; ++hw_stage) {
+        ProgramAt(*c.regs, hw_stage).address = 0;
+    }
+    c.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
+    c.key_hash = key.key_hash;
+    c.submission = submissions;
+    for (const auto& recorded : key.stages) {
+        auto& stage = c.stages.emplace_back();
+        stage.sw_stage = SwStage(recorded.sw_stage);
+        stage.hw_stage = HwStage(recorded.hw_stage);
+        stage.hash = recorded.hash;
+        stage.code = code[recorded.sw_stage];
+        stage.user_data = recorded.user_data;
+        stage.roots = recorded.roots;
+        ProgramAt(*c.regs, recorded.hw_stage).address = stage.code >> 8;
+        c.programs.emplace_back(stage.code, stage.hash);
+    }
+    c.words = key.words;
+    c.pointers = key.pointers;
+    return c;
+}
+
+/// The walkers are this launch's JIT code: the replay watches the ones the lookup will run.
+void PrecompileReplay::AdoptWalkers(PipelineCache& cache, KeyCapture& c) {
+    std::shared_lock lock{cache.programs_mutex};
+    for (auto& stage : c.stages) {
+        const auto found = cache.program_cache.find(stage.hash);
+        const Shader::Info* info =
+            found != cache.program_cache.end() ? found->second->info_template.get() : nullptr;
+        stage.walker = info ? u64(info->srt_info.walker_func) : 0;
+        stage.walker_size = info ? info->srt_info.walker_func_size : 0;
+    }
+}
+
+void PrecompileReplay::ReplayListed(PipelineCache& cache, const ListItem& item) {
+    auto& entry = list[item.entry];
+    KeyCapture c = Expand(entry.key, item.code);
+    AdoptWalkers(cache, c);
+    const auto result = Select(cache, c);
+    std::scoped_lock lock{list_mutex};
+    switch (result.outcome) {
+    case Outcome::NoRoom:
+        entry.state = ListState::Skipped;
+        if (!arena_logged) {
+            arena_logged = true;
+            std::printf("Precompile list: no room for the shadow copy of recorded key %016llx "
+                        "(%zu bytes), skipped\n",
+                        static_cast<unsigned long long>(c.key_hash), result.shadow_bytes);
+        }
+        break;
+    case Outcome::CodeGone:
+    case Outcome::WalkerChanged:
+        entry.state = ListState::Gone;
+        break;
+    case Outcome::Faulted:
+        entry.state = ListState::Faulted;
+        Note(ListNote::Faulted, fmt::format("recorded key {:016x}: read outside the recorded words "
+                                            "at {:#x} ({}), {} fault(s)",
+                                            c.key_hash, result.fault, FaultPlace(result.fault),
+                                            result.faults));
+        break;
+    case Outcome::NotFound:
+        entry.state = ListState::NotBuilt;
+        break;
+    case Outcome::Selected:
+        entry.replayed = std::hash<GraphicsPipelineKey>{}(result.key);
+        if (live_keys.contains(result.key)) {
+            entry.state = ListState::Matched;
+        } else {
+            entry.state = ListState::Unused;
+            unused_keys[result.key].push_back(item.entry);
+        }
+        break;
+    }
+}
+
+/// At exit: the entries left replayed to a key the race never selected, or never built.
+void PrecompileReplay::ReportOpenEntries() {
+    std::scoped_lock lock{list_mutex};
+    for (const auto& entry : list) {
+        std::string programs;
+        for (const auto& stage : entry.key.stages) {
+            programs += fmt::format(" stage {} {:016x}", stage.sw_stage, stage.hash);
+        }
+        if (entry.state == ListState::Unused) {
+            Note(ListNote::Unused, fmt::format("recorded key {:016x} replayed as {:016x}, never "
+                                               "selected:{}",
+                                               entry.key.key_hash, entry.replayed, programs));
+        } else if (entry.state == ListState::NotBuilt) {
+            Note(ListNote::NotBuilt, fmt::format("recorded key {:016x}: program or permutation "
+                                                 "never built:{}",
+                                                 entry.key.key_hash, programs));
+        }
+    }
+}
+
+ListTally PrecompileReplay::CountList() {
+    std::scoped_lock lock{list_mutex};
+    ListTally t{};
+    t.new_keys = live_keys.size();
+    for (const auto& entry : list) {
+        switch (entry.state) {
+        case ListState::NotNew:
+            if (std::ranges::all_of(entry.programs, [&](u64 hash) {
+                    return !hash || live_programs.contains(hash);
+                })) {
+                ++t.not_new;
+            } else {
+                ++t.never_seen;
+            }
+            break;
+        case ListState::Queued:
+            ++t.waiting;
+            break;
+        case ListState::NotBuilt:
+            ++t.not_built;
+            break;
+        case ListState::Gone:
+            ++t.gone;
+            break;
+        case ListState::Skipped:
+            ++t.skipped;
+            break;
+        case ListState::Matched:
+            ++t.matched;
+            break;
+        case ListState::Unused:
+            ++t.unused;
+            break;
+        case ListState::Faulted:
+            ++t.faulted;
+            break;
+        }
+    }
+    return t;
 }
 
 /// Why the programs are no longer at their addresses with the walkers the capture recorded,
@@ -1009,6 +1292,9 @@ PrecompileReplayPtr MakePrecompileReplay() {
 void PipelineCache::CapturePrecompile() {
     if (precompile->Capturing()) {
         precompile->Capture(*this);
+    }
+    if (precompile->Listing()) {
+        precompile->NoteNewKey(*this);
     }
 }
 
