@@ -333,6 +333,24 @@ struct Tally {
 
 enum class Detail { Different, Faulted, NotFound, CaptureFailed, Count };
 
+/// What a replayed selection came to.
+enum class Outcome { Selected, NotFound, Faulted, CodeGone, WalkerChanged, NoRoom };
+
+struct ReplayResult {
+    Outcome outcome;
+    GraphicsPipelineKey key; ///< the selected key
+    u32 faults;
+    u64 fault;           ///< the first fault's address
+    size_t shadow_bytes; ///< of the shadow copy
+};
+
+const char* FaultPlace(u64 fault) {
+    return g_reserved.InShadow(fault)   ? "shadow guard or dead page"
+           : g_reserved.InRecord(fault) ? "record slots"
+           : fault                      ? "guest or host memory"
+                                        : "unknown address";
+}
+
 } // namespace
 
 struct PrecompileReplay {
@@ -350,7 +368,8 @@ private:
     const char* RecordWalker(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordFetch(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     void ReplayOne(PipelineCache& cache, KeyCapture& c);
-    bool StillCurrent(PipelineCache& cache, const KeyCapture& c);
+    ReplayResult Select(PipelineCache& cache, KeyCapture& c);
+    std::optional<Outcome> Stale(PipelineCache& cache, const KeyCapture& c);
     std::string Difference(const KeyCapture& c, const GraphicsPipelineKey& key) const;
     void Log(Detail kind, const std::string& text);
 
@@ -569,40 +588,79 @@ void PrecompileReplay::Replay(PipelineCache& cache) {
     Report(false);
 }
 
-/// Whether the programs are still at their addresses with the walkers the capture recorded.
-/// The lookup copies the program's info_template: a walker the replay does not watch could
-/// fault into the SRT walker patch, which would rewrite it for the game.
-bool PrecompileReplay::StillCurrent(PipelineCache& cache, const KeyCapture& c) {
+/// Why the programs are no longer at their addresses with the walkers the capture recorded,
+/// none when they are. The lookup copies the program's info_template: a walker the replay does
+/// not watch could fault into the SRT walker patch, which would rewrite it for the game.
+std::optional<Outcome> PrecompileReplay::Stale(PipelineCache& cache, const KeyCapture& c) {
     if (!std::ranges::all_of(c.programs, [](const auto& program) {
             return CodeStillThere(program.first, program.second);
         })) {
-        ++tally.code_gone;
-        return false;
+        return Outcome::CodeGone;
     }
     std::shared_lock lock{cache.programs_mutex};
     for (const auto& stage : c.stages) {
         const auto found = cache.program_cache.find(stage.hash);
         if (found != cache.program_cache.end() && found->second->info_template &&
             u64(found->second->info_template->srt_info.walker_func) != stage.walker) {
-            ++tally.walker_changed;
-            return false;
+            return Outcome::WalkerChanged;
         }
     }
-    return true;
+    return std::nullopt;
 }
 
 void PrecompileReplay::ReplayOne(PipelineCache& cache, KeyCapture& c) {
-    const ShadowLayout layout{c.words, PageSize};
-    const auto address = arena.Map(layout);
-    if (!address) {
+    const auto result = Select(cache, c);
+    switch (result.outcome) {
+    case Outcome::NoRoom:
         ++tally.skipped;
         if (!arena_logged) {
             arena_logged = true;
             std::printf("Precompile replay: no room for the shadow copy of key %016llx (%zu "
                         "bytes), skipped\n",
-                        static_cast<unsigned long long>(c.key_hash), layout.Size());
+                        static_cast<unsigned long long>(c.key_hash), result.shadow_bytes);
         }
-        return;
+        break;
+    case Outcome::CodeGone:
+        ++tally.code_gone;
+        break;
+    case Outcome::WalkerChanged:
+        ++tally.walker_changed;
+        break;
+    case Outcome::Faulted:
+        ++tally.faulted;
+        Log(Detail::Faulted, fmt::format("key {:016x}: read outside the recorded words at {:#x} "
+                                         "({}), {} fault(s)",
+                                         c.key_hash, result.fault, FaultPlace(result.fault),
+                                         result.faults));
+        break;
+    case Outcome::NotFound:
+        ++tally.not_found;
+        Log(Detail::NotFound, fmt::format("key {:016x}: program or permutation not found",
+                                          c.key_hash));
+        break;
+    case Outcome::Selected:
+        if (result.key == c.key) {
+            ++tally.same;
+        } else {
+            ++tally.different;
+            Log(Detail::Different,
+                fmt::format("key {:016x} replayed as {:016x}: {}", c.key_hash,
+                            std::hash<GraphicsPipelineKey>{}(result.key),
+                            Difference(c, result.key)));
+        }
+        break;
+    }
+}
+
+/// Runs the selection lookup-only from the capture alone, through a shadow copy of its words.
+ReplayResult PrecompileReplay::Select(PipelineCache& cache, KeyCapture& c) {
+    ReplayResult result{};
+    const ShadowLayout layout{c.words, PageSize};
+    result.shadow_bytes = layout.Size();
+    const auto address = arena.Map(layout);
+    if (!address) {
+        result.outcome = Outcome::NoRoom;
+        return result;
     }
     const u64 dead = g_reserved.shadow;
     layout.Fill(reinterpret_cast<u8*>(*address), *address, c.words, c.pointers, dead);
@@ -625,43 +683,35 @@ void PrecompileReplay::ReplayOne(PipelineCache& cache, KeyCapture& c) {
     selection.regs = c.regs.get();
     selection.worker = &worker;
     selection.draw_indirect_params = c.draw_indirect_params;
-    bool current = false, selected = false;
+    bool checked = false, selected = false;
+    std::optional<Outcome> stale;
     t_state.Watch(c.stages);
     const bool completed = Guarded([&] {
         // Checked right before the lookup, so the code cannot change in between.
-        current = StillCurrent(cache, c);
-        if (current) {
+        stale = Stale(cache, c);
+        checked = true;
+        if (!stale) {
             selected = cache.RefreshGraphicsKey(selection);
         }
     });
-    const u32 faults = t_state.faults;
-    const u64 fault = t_state.fault;
+    result.faults = t_state.faults;
+    result.fault = t_state.fault;
     t_state.Stop();
-
-    if (!current) {
-        tally.code_gone += !completed; // else counted in StillCurrent; a fault: code unmapped
-    } else if (!completed || faults != 0) {
-        ++tally.faulted;
-        const char* where = g_reserved.InShadow(fault)  ? "shadow guard or dead page"
-                            : g_reserved.InRecord(fault) ? "record slots"
-                            : fault                     ? "guest or host memory"
-                                                        : "unknown address";
-        Log(Detail::Faulted, fmt::format("key {:016x}: read outside the recorded words at {:#x} "
-                                         "({}), {} fault(s)",
-                                         c.key_hash, fault, where, faults));
-    } else if (!selected) {
-        ++tally.not_found;
-        Log(Detail::NotFound, fmt::format("key {:016x}: program or permutation not found",
-                                          c.key_hash));
-    } else if (selection.graphics_key == c.key) {
-        ++tally.same;
-    } else {
-        ++tally.different;
-        Log(Detail::Different, fmt::format("key {:016x} replayed as {:016x}: {}", c.key_hash,
-                                           std::hash<GraphicsPipelineKey>{}(selection.graphics_key),
-                                           Difference(c, selection.graphics_key)));
-    }
     arena.Unmap(*address, layout);
+
+    if (!checked) {
+        result.outcome = Outcome::CodeGone; // a fault in the check: the code is unmapped
+    } else if (stale) {
+        result.outcome = *stale;
+    } else if (!completed || result.faults != 0) {
+        result.outcome = Outcome::Faulted;
+    } else if (!selected) {
+        result.outcome = Outcome::NotFound;
+    } else {
+        result.outcome = Outcome::Selected;
+        result.key = selection.graphics_key;
+    }
+    return result;
 }
 
 std::string PrecompileReplay::Difference(const KeyCapture& c,
