@@ -22,8 +22,9 @@
 // Nothing shared is written: program_cache is only read, under programs_mutex.
 //
 // GOW3_PRECOMPILE_RECORD=<file> writes each capture to a list (vk_precompile_list.h) as it is
-// made, for a later launch to replay. With only that set, nothing is replayed in this launch,
-// so the replay queue's cap drops nothing. GOW3_PRECOMPILE_LIST=<file> loads such a list in a
+// made, for a later launch to replay, after the code of each program it is the first to use.
+// With only that set, nothing is replayed in this launch, so the replay queue's cap drops
+// nothing. GOW3_PRECOMPILE_LIST=<file> loads such a list in a
 // later launch, possibly with another build. When a draw selects a key new in this launch, the
 // entries recorded for the same stage programs are replayed the same way, with this launch's
 // code addresses and walkers. Permutation numbers differ across launches, so the check is
@@ -348,11 +349,35 @@ struct Tally {
     bool operator==(const Tally&) const = default;
 };
 
-/// Captures written to the list file, and those left out.
+/// Captures written to the list file, and those left out; programs whose code was written.
 struct RecordTally {
-    u64 written, bytes, not_written;
+    u64 written, bytes, not_written, code_written, code_missing;
     bool operator==(const RecordTally&) const = default;
 };
+
+/// A program's code from its start token through its OrbShdr header (vk_precompile_list.h),
+/// read without faulting; empty when the header is not where AmdGpu::GetParams looks first.
+std::vector<u32> ReadProgramCode(VAddr address) {
+    std::array<u32, 2> start;
+    if (!ReadGuest(address, start.data(), sizeof(start)) || start[0] != CodeStartToken) {
+        return {};
+    }
+    const u64 header = CodeHeaderAt(start);
+    std::array<u32, CodeHeaderWords> info;
+    if ((header + CodeHeaderWords) * 4 > MaxCodeBytes ||
+        !ReadGuest(address + header * 4, info.data(), sizeof(info))) {
+        return {};
+    }
+    u32 length;
+    std::memcpy(&length, reinterpret_cast<const u8*>(info.data()) + CodeHeaderLengthAt,
+                sizeof(length));
+    const u64 words = std::max<u64>(header + CodeHeaderWords, ((length >> 8) + 3) / 4);
+    std::vector<u32> code(words);
+    if (words * 4 > MaxCodeBytes || !ReadGuest(address, code.data(), words * 4)) {
+        return {};
+    }
+    return code;
+}
 
 enum class Detail { Different, Faulted, NotFound, CaptureFailed, Count };
 
@@ -457,6 +482,8 @@ struct PrecompileReplay {
 
 private:
     void Record(const KeyCapture& c);
+    void RecordCode(const StageCapture& stage);
+    bool WriteRecord(const std::vector<u8>& bytes);
     const char* RecordStage(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordWalker(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
     const char* RecordFetch(const Shader::Info& info, StageCapture& stage, KeyCapture& c);
@@ -476,6 +503,7 @@ private:
     std::FILE* record_file;        ///< GOW3_PRECOMPILE_RECORD, null when off or failed
     RecordTally record{}, record_reported{};
     bool record_capped_logged = false;
+    std::unordered_set<u64> code_seen; ///< programs whose code was written or not found
     RecordSlots slots;
     ShadowArena arena;
     std::unordered_set<u64> seen;          ///< key hashes already captured or skipped
@@ -533,10 +561,12 @@ void PrecompileReplay::Report(bool final) {
     if (record_file && (final || !(record == record_reported))) {
         record_reported = record;
         std::printf("Precompile record: %llu written (%llu KiB), %llu not written "
-                    "(geometry/size/write)%s\n",
+                    "(geometry/size/write), code of %llu programs, %llu without code%s\n",
                     static_cast<unsigned long long>(record.written),
                     static_cast<unsigned long long>(record.bytes >> 10),
-                    static_cast<unsigned long long>(record.not_written), final ? " (exit)" : "");
+                    static_cast<unsigned long long>(record.not_written),
+                    static_cast<unsigned long long>(record.code_written),
+                    static_cast<unsigned long long>(record.code_missing), final ? " (exit)" : "");
     }
     if (list_on) {
         const auto t = CountList();
@@ -688,7 +718,7 @@ void PrecompileReplay::UseList(ParsedList&& parsed) {
     }
 }
 
-/// Appends a capture to the list file, flushed at once: the game may end without exiting.
+/// Appends a capture to the list file, after the code of programs it uses first.
 void PrecompileReplay::Record(const KeyCapture& c) {
     // A later launch replays vertex + fragment keys only: a geometry key's selection also reads
     // the copy shader through vs_program, which is not among the recorded stages.
@@ -711,27 +741,50 @@ void PrecompileReplay::Record(const KeyCapture& c) {
     }
     key.words = c.words;
     key.pointers = c.pointers;
-    const auto entry = EncodeListEntry(key);
-    if (entry.size() > MaxListEntryBytes || record.bytes + entry.size() > MaxListBytes) {
+    for (const auto& stage : c.stages) {
+        RecordCode(stage);
+    }
+    if (record_file && WriteRecord(EncodeListEntry(key))) {
+        ++record.written;
+    } else {
         ++record.not_written;
+    }
+}
+
+/// Writes a program's code before the first entry that uses it, once per program.
+void PrecompileReplay::RecordCode(const StageCapture& stage) {
+    if (!record_file || !code_seen.insert(stage.hash).second) {
+        return;
+    }
+    const auto code = ReadProgramCode(stage.code);
+    if (code.empty() || CheckCode(stage.hash, code) ||
+        !WriteRecord(EncodeListCode(stage.hash, code))) {
+        ++record.code_missing;
+        return;
+    }
+    ++record.code_written;
+}
+
+/// Appends one entry to the list file, flushed at once: the game may end without exiting.
+bool PrecompileReplay::WriteRecord(const std::vector<u8>& bytes) {
+    if (bytes.size() > MaxListEntryBytes || record.bytes + bytes.size() > MaxListBytes) {
         if (!record_capped_logged) {
             record_capped_logged = true;
             std::printf("Precompile record: list full (%zu MiB), later captures not written\n",
                         MaxListBytes >> 20);
         }
-        return;
+        return false;
     }
-    if (std::fwrite(entry.data(), 1, entry.size(), record_file) != entry.size() ||
+    if (std::fwrite(bytes.data(), 1, bytes.size(), record_file) != bytes.size() ||
         std::fflush(record_file) != 0) {
-        ++record.not_written;
         std::printf("Precompile record: write failed (%s), recording stopped\n",
                     std::strerror(errno));
         std::fclose(record_file);
         record_file = nullptr;
-        return;
+        return false;
     }
-    ++record.written;
-    record.bytes += entry.size();
+    record.bytes += bytes.size();
+    return true;
 }
 
 const char* PrecompileReplay::RecordStage(const Shader::Info& info, StageCapture& stage,
