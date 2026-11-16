@@ -447,8 +447,43 @@ const bool g_perm_probe = [] {
 // Probe counters (GOW3_FRAME_STATS). Only the GPU thread writes them, so an increment is a plain
 // load and store, not a locked instruction per draw.
 std::atomic<u64> g_probe_hits, g_probe_misses, g_probe_conservative;
+std::atomic<u64> g_spec_verify_checks, g_spec_verify_mismatches;
 void Bump(std::atomic<u64>& counter) {
     counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+// GOW3_SPEC_VERIFY=N: every Nth probe hit (1: every hit) also builds the specialization and
+// checks that it equals the permutation the probe matched. 0 or unset: off.
+const u32 g_spec_verify = [] {
+    const char* env = std::getenv("GOW3_SPEC_VERIFY");
+    return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
+}();
+/// False when the probe's hit is wrong: the caller then takes the full path.
+[[gnu::noinline]] bool VerifyProbeHit(const Shader::StageSpecialization& matched,
+                                      const Shader::Info& info,
+                                      const Shader::RuntimeInfo& runtime_info,
+                                      const Shader::Profile& profile,
+                                      const Shader::Backend::Bindings& binding) {
+    static u64 hits = 0; // GPU thread only
+    if (++hits % g_spec_verify != 0) {
+        return true;
+    }
+    Bump(g_spec_verify_checks);
+    if (matched == Shader::StageSpecialization(info, runtime_info, profile, binding)) {
+        return true;
+    }
+    Bump(g_spec_verify_mismatches);
+    if (g_spec_verify_mismatches.load(std::memory_order_relaxed) <= 32) {
+        LOG_ERROR(Render_Vulkan,
+                  "gow3: GOW3_SPEC_VERIFY: the permutation probe matched {} shader {:#x} (sw stage "
+                  "{}) but its full specialization differs",
+                  info.hw_stage, info.pgm_hash, static_cast<u32>(info.sw_stage));
+        std::printf("Shader selection: GOW3_SPEC_VERIFY mismatch, %s shader %016llx (sw stage %u): "
+                    "probe matched, full specialization differs\n",
+                    fmt::format("{}", info.hw_stage).c_str(),
+                    static_cast<unsigned long long>(info.pgm_hash),
+                    static_cast<u32>(info.sw_stage));
+    }
+    return false;
 }
 struct PhaseTimer {
     std::atomic<u64>& counter;
@@ -715,6 +750,13 @@ void PipelineCache::ReportCompilerStats() {
         last_hits = hits;
         last_misses = misses;
         last_conservative = conservative;
+        if (g_spec_verify) {
+            std::printf("Shader selection: GOW3_SPEC_VERIFY=%u, %llu probe hits checked, %llu "
+                        "mismatches (all time)\n",
+                        g_spec_verify,
+                        static_cast<unsigned long long>(g_spec_verify_checks.load()),
+                        static_cast<unsigned long long>(g_spec_verify_mismatches.load()));
+        }
     } else {
         std::printf("Shader selection: permutation probe off (GOW3_PERM_PROBE=0)\n");
     }
@@ -1427,8 +1469,12 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     // with this draw's inputs directly; a specialization is built only when it differs.
     const bool probe = g_perm_probe && program->last_used < program->modules.size();
     if (probe) {
-        if (SpecProbe::Matches(program->modules[program->last_used].spec, info, runtime_info,
-                               binding)) {
+        const auto& last = program->modules[program->last_used].spec;
+        bool hit = SpecProbe::Matches(last, info, runtime_info, binding);
+        if (g_spec_verify != 0 && hit) [[unlikely]] {
+            hit = VerifyProbeHit(last, info, runtime_info, profile, binding);
+        }
+        if (hit) {
             Bump(g_probe_hits);
             return use_permutation(program->last_used);
         }
