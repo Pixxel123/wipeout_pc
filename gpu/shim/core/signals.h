@@ -1,7 +1,7 @@
 // gow3: fault-handler registry. The C loader's SIGSEGV handler calls
 // gow3gpu_handle_fault() first; registered handlers run in priority order.
 #pragma once
-#include <compare>
+#include <functional>
 #include <set>
 #include <signal.h>
 #include "common/singleton.h"
@@ -32,11 +32,16 @@ public:
     }
 
 private:
+    // gow3: different handlers may share a priority (GOW3_PRECOMPILE_REPLAY's reads run at 0
+    // with the page manager, before the SRT walker patch at 1); they cover different addresses.
     template <typename T>
     struct HandlerEntry {
         T handler;
         u32 priority;
-        std::strong_ordering operator<=>(const HandlerEntry& right) const { return priority <=> right.priority; }
+        bool operator<(const HandlerEntry& right) const {
+            if (priority != right.priority) return priority < right.priority;
+            return std::less<T>{}(handler, right.handler);
+        }
     };
     std::set<HandlerEntry<AccessViolationHandler>> access_violation_handlers;
     std::set<HandlerEntry<IllegalInstructionHandler>> illegal_instruction_handlers;

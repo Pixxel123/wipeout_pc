@@ -432,6 +432,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                  "first builds {})",
                  capture_count, count, fast_first_builds ? "on" : "off");
     }
+    precompile = MakePrecompileReplay();
 }
 
 PipelineCache::~PipelineCache() {
@@ -895,6 +896,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         found != graphics_pipelines.end()) {
         return found->second.get();
     }
+    if (precompile) {
+        CapturePrecompile();
+    }
     // gow3: the policy decides only for a missing build; one a worker already has stays with it.
     const bool background =
         AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect();
@@ -979,6 +983,9 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new) {
+        if (precompile) {
+            SkipPrecompile();
+        }
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
@@ -1408,15 +1415,18 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // pointers in the registers; ahead of the GPU thread that memory may already be
         // reused. A fault returns here (runtime_fault_recover) and the draw is left to the GPU
         // thread. A jump out of the specialization leaks its partial allocations (rare).
+        // The precompile replay keeps its own recovery point around the whole selection.
+        sigjmp_buf* const outer = runtime_fault_recover;
         sigjmp_buf recover;
         if (sigsetjmp(recover, 0)) {
-            worker.failed = true;
+            runtime_fault_recover = outer;
+            worker.failed = worker.faulted = true;
             return {};
         }
         runtime_fault_recover = &recover;
         info.RefreshFlatBuf();
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
-        runtime_fault_recover = nullptr;
+        runtime_fault_recover = outer;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
         if (it == program->modules.end()) {
             worker.failed = true;
