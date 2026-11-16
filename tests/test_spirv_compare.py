@@ -79,8 +79,10 @@ def meta(layout, program, index, sh, garbage):
         u64(sh['attributes'])
         for _ in range(sh['attributes']):
             ar.write(bytes(rng.randrange(1, 256) for _ in range(layout.sizes[0])))
-    for size, count in zip(layout.sizes[1:], sh['counts']):
+    for vector, (size, count) in enumerate(zip(layout.sizes[1:], sh['counts'])):
         u64(count)
+        if vector == 4 and 'salt' in sh:  # other sampler specs, all else the same
+            rng = random.Random(sh['rng_seed'] * 7 + sh['salt'])
         for _ in range(count):
             ar.write(bytes(rng.randrange(1, 256) for _ in range(size)))
     info = bytearray(garbage.randrange(256) for _ in range(layout.info))
@@ -158,6 +160,8 @@ class SpirvCompareTests(unittest.TestCase):
                       'bytes, spare bytes after fetch data [1]', out)
         self.assertIn('programs in both: 14 same', out)
         self.assertIn('without a readable meta: 0', out)
+        self.assertIn('metas without a SPIR-V: 0', out)
+        self.assertIn('the Info, is not compared', out)
 
     def test_another_layout_is_measured_too(self):
         layout = Layout(prefix=400, attribute=12, vs=4, buffer=20, image=24, sampler=2, info=1000,
@@ -181,6 +185,47 @@ class SpirvCompareTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('not in the race-built store: 2', out)
         self.assertIn(f'{program:#018x}: differ', out)
+
+    def test_a_spec_that_differs_in_the_last_vector_is_a_difference(self):
+        # Same SPIR-V, the samplers' spec bytes differ: the pair (spec, SPIR-V) is new.
+        target = (PROGRAMS[0][0], 0)
+
+        def shaders(salt):
+            def make(program, variant, vertex):
+                if (program, variant) != target:
+                    return shader(program, variant, vertex)
+                sh = shader(program, variant, vertex, [1, 1, 0, 2])
+                return dict(sh, salt=salt) if salt else sh
+            return make
+        race = write_store(self.root, 'race', Layout(), 1, shaders=shaders(0))
+        boot = write_store(self.root, 'boot', Layout(), 2, shaders=shaders(1))
+        code, out = run(race, boot)
+        self.assertEqual(code, 1, out)
+        self.assertIn('not in the race-built store: 1', out)
+        self.assertIn(f'{target[0]:#018x}: differ', out)
+
+    def test_a_boot_only_program_fails(self):
+        race = write_store(self.root, 'race', Layout(), 1)
+        boot = write_store(self.root, 'boot', Layout(), 2)
+        program, _, count = PROGRAMS[4]
+        for index in range(count):
+            (race / f'{program:#018x}_{index}.spv').unlink()
+            (race / f'{compare.hash_combine(program, index):#018x}.meta').unlink()
+        code, out = run(race, boot)
+        self.assertEqual(code, 1, out)
+        self.assertIn('boot only 1', out)
+        self.assertIn(f'{program:#018x}: boot only', out)
+        self.assertIn('not in the race-built store: 0', out)
+        self.assertIn('metas without a SPIR-V: 0', out)
+
+    def test_a_meta_without_its_spirv_fails(self):
+        race = write_store(self.root, 'race', Layout(), 1)
+        boot = write_store(self.root, 'boot', Layout(), 2)
+        (boot / f'{PROGRAMS[2][0]:#018x}_1.spv').unlink()
+        code, out = run(race, boot)
+        self.assertEqual(code, 1, out)
+        self.assertIn('metas without a SPIR-V: 1', out)
+        self.assertIn('not in the race-built store: 0', out)
 
     def test_other_spirv_bytes_are_a_difference(self):
         race = write_store(self.root, 'race', Layout(), 1)

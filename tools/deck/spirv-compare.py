@@ -6,8 +6,9 @@ permutations, each one the pair (its spec, its SPIR-V): <hash>_<index>.spv with 
 of its meta, <HashCombine(hash, index)>.meta. A meta whose spec sits with the wrong SPIR-V
 therefore counts as a difference. The rest of a meta (the program's Info, with flattened user
 data and walker bytes from whichever draw came first) is left out.
-A boot-built pair that the race-built store lacks for the same program is a difference;
-race-only ones are permutations the list did not cover.
+A boot-built pair that the race-built store lacks for the same program is a difference, and so
+is a program only the boot-built store has; race-only ones are permutations the list did not
+cover. A meta without its SPIR-V (a write cut short) is named and fails the check.
 
 Reading a meta (vk_pipeline_serialization.cpp RegisterShaderMeta, StageSpecialization and
 Info::Serialize, common/serdes.h): meta version u32, binary version u32, perm hash u64, perm
@@ -23,8 +24,9 @@ each meta, and the raw sizes are measured over all metas of both stores, which m
 one layout. The search tries element sizes up to MAX_ELEMENT; a vector whose count is 0 in
 every meta has no size to measure ('-'), and sizes the metas cannot tell apart stop the tool.
 
-Exits non-zero on a difference, an unreadable meta, an empty boot store or no common program,
-and with 2 when the metas do not give one layout. Prints hashes and counts only.
+Exits 1 on a difference, a boot-only program, an unreadable meta, a meta without its SPIR-V,
+an empty boot store or no common program, and 2 when the metas do not give one layout (nothing
+is compared then). Prints hashes and counts only.
 
 usage: python3 -I spirv-compare.py <race-built store dir> <boot-built store dir> [--all]"""
 import hashlib, os, re, struct, sys
@@ -208,13 +210,16 @@ def measure(metas, unreadable):
     return metas
 
 
-def load(store, unreadable):
+def load(store, unreadable, orphans):
     metas = []
-    for name in sorted(os.listdir(store)):
+    names = sorted(os.listdir(store))
+    paired = set()
+    for name in names:
         if not name.endswith(".spv"):
             continue
         program_text, _, index_text = name[:-4].rpartition("_")
         meta_name = f"{hash_combine(int(program_text, 16), int(index_text)):#018x}.meta"
+        paired.add(meta_name)
         try:
             with open(os.path.join(store, meta_name), "rb") as f:
                 data = f.read()
@@ -225,6 +230,7 @@ def load(store, unreadable):
             metas.append(Meta(store, name, data))
         except ValueError as e:
             unreadable.append((store, name, str(e)))
+    orphans += [os.path.join(store, n) for n in names if n.endswith(".meta") and n not in paired]
     return metas
 
 
@@ -246,8 +252,8 @@ def main():
     if len(args) != 2:
         sys.exit(__doc__)
     show_all = "--all" in sys.argv
-    unreadable, misfits = [], []
-    metas = load(args[0], unreadable) + load(args[1], unreadable)
+    unreadable, misfits, orphans = [], [], []
+    metas = load(args[0], unreadable, orphans) + load(args[1], unreadable, orphans)
     try:
         metas = measure(metas, misfits)
     except LayoutError as e:
@@ -274,16 +280,24 @@ def main():
         if show_all or b - r:
             lines.append(f"{program}: {kind}, race {len(r)} permutations, boot {len(b)}, "
                          f"boot not in race {len(b - r)}")
+    boot_only = sorted(set(boot) - set(race))
     print(f"programs: race {len(race)}, boot {len(boot)}, both {len(both)}, "
-          f"race only {len(set(race) - set(boot))}, boot only {len(set(boot) - set(race))}")
+          f"race only {len(set(race) - set(boot))}, boot only {len(boot_only)}")
     print("programs in both: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
-    print(f"boot-built permutations (spec, SPIR-V) not in the race-built store: {differences}")
+    print(f"boot-built permutations (spec, SPIR-V) not in the race-built store: {differences} "
+          f"(the rest of each meta, the Info, is not compared)")
     print(f"SPIR-V files without a readable meta: {len(unreadable)}")
     for store, name, why in unreadable[:8]:
         print(f"  {os.path.join(store, name)}: {why}")
+    print(f"metas without a SPIR-V: {len(orphans)}")
+    for path in orphans[:8]:
+        print(f"  {path}")
+    for program in boot_only:
+        lines.append(f"{program}: boot only, {len(boot[program])} permutations")
     for line in lines:
         print(line)
-    return 1 if differences or unreadable or not boot or not both else 0
+    failed = differences or boot_only or unreadable or orphans or not boot or not both
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
