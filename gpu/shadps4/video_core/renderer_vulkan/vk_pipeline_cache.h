@@ -17,6 +17,7 @@
 #include "shader_recompiler/specialization.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_precompile_replay.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
 
@@ -175,6 +176,10 @@ public:
 
     const ComputePipeline* GetComputePipeline();
 
+    /// gow3 diagnostic (GOW3_PRECOMPILE_REPLAY): replays the selections captured a few
+    /// submissions ago. GPU command thread, between submissions.
+    void ReplayPrecompile();
+
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
                               std::optional<Shader::Gcn::FetchShaderData>, u64>;
     Result GetProgram(PipelineSelection& sel, Shader::HwStage stage, Shader::SwStage l_stage,
@@ -211,6 +216,8 @@ private:
     bool RefreshGraphicsKey(PipelineSelection& sel);
     bool RefreshGraphicsStages(PipelineSelection& sel);
     bool RefreshComputeKey();
+    friend struct PrecompileReplay;
+    void CapturePrecompile();
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
@@ -286,6 +293,8 @@ private:
     /// False when this pipeline key is already in the store (nothing to write).
     bool NewPipelineKey(const std::string& name);
     void ReportDiskShaders();
+
+    PrecompileReplayPtr precompile; ///< gow3: null unless GOW3_PRECOMPILE_REPLAY is set
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,
