@@ -47,6 +47,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -1112,6 +1113,13 @@ const char* PathSetting(const char* name) {
     return value && value[0] ? value : nullptr;
 }
 
+/// Whether two paths name one file; for a path that does not exist yet, whether they are equal.
+bool SameFile(const char* a, const char* b) {
+    std::error_code error;
+    const bool same = std::filesystem::equivalent(a, b, error);
+    return error ? std::string_view{a} == b : same;
+}
+
 /// A new list file with its header, or null (logged).
 std::FILE* OpenRecord(const char* path) {
     std::FILE* file = std::fopen(path, "wb");
@@ -1138,7 +1146,7 @@ PrecompileReplayPtr MakePrecompileReplay() {
     if (boot && boot[0] == '1' && list_path) {
         // The start-up rebuild reads the list (vk_precompile_boot.cpp), after this: a record
         // file of the same name would empty it first.
-        if (record_path && std::string_view{record_path} == list_path) {
+        if (record_path && SameFile(record_path, list_path)) {
             std::printf("Precompile record: %s is the list of the start-up rebuild, not "
                         "recording\n",
                         record_path);
