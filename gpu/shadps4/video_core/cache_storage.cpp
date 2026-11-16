@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <queue>
 
@@ -217,6 +218,26 @@ void DataBase::Remove(BlobType type, const std::string& name) {
     std::scoped_lock lk{submit_mutex};
     ++num_requests;
     request_cv.notify_one();
+}
+
+void DataBase::Flush() {
+    if (!opened) {
+        return;
+    }
+    // ProcessIO takes each task's own future, so the wait goes through a promise of its own.
+    auto done = std::make_shared<std::promise<void>>();
+    auto finished = done->get_future();
+    {
+        auto request = std::packaged_task<void()>{[done] { done->set_value(); }};
+        std::scoped_lock lock{m_request};
+        req_queue.emplace(std::move(request));
+    }
+    {
+        std::scoped_lock lk{submit_mutex};
+        ++num_requests;
+        request_cv.notify_one();
+    }
+    finished.wait();
 }
 
 bool DataBase::Save(BlobType type, const std::string& name, std::vector<u8>&& data) {
