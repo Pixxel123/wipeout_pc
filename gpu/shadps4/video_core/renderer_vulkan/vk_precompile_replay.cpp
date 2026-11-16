@@ -8,10 +8,11 @@
 // registers, the draw-indirect parameters and the key, and per stage the program hash, code
 // address and user data, plus every guest word the stage's SRT walker and fetch-shader parse
 // read, with the pointer each was read through. The walker is JIT code: it runs once more with
-// fake pointers into reserved, inaccessible memory, so each of its reads faults into OnFault,
-// which reads the guest word, records it and hands back the value (or the fake pointer for the
-// next table). The fetch shader and vertex buffer descriptors are recorded from the parse the
-// draw just did. Program code is not recorded: in the same launch it is still in memory.
+// fake pointers into reserved, inaccessible memory, so each of its reads faults into the fault
+// handler (vk_precompile_guard.cpp), which reads the guest word, records it and hands back the
+// value (or the fake pointer for the next table). The fetch shader and vertex buffer
+// descriptors are recorded from the parse the draw just did. Program code is not recorded for
+// the same-launch replay: it is still in memory.
 //
 // Replay, a few submissions later, on the GPU command thread between submissions: the words go
 // into a private shadow copy (vk_precompile_shadow.h) with a guard page after each table, the
@@ -52,22 +53,13 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <fmt/format.h>
-#ifdef __linux__
-#include <sys/mman.h>
-#include <sys/uio.h>
-#include <ucontext.h>
-#include <unistd.h>
-#endif
 
-#include "common/decoder.h"
 #include "common/hash.h"
-#include "core/signals.h"
-#include "gow3_tls.h"
-#include "gow3_toggles.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_precompile_guard.h"
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
 #include "video_core/renderer_vulkan/vk_precompile_replay.h"
 #include "video_core/renderer_vulkan/vk_precompile_shadow.h"
@@ -86,68 +78,11 @@ constexpr u32 MaxDetails = 8; ///< detail lines per kind
 constexpr u64 ReplayDelay = 3; ///< submissions between capture and replay
 constexpr auto ReplayBudget = std::chrono::milliseconds(2);
 constexpr auto ReportInterval = std::chrono::seconds(5);
-constexpr size_t PageSize = 4096;
-constexpr u64 RecordSlotSize = 16ull << 20;
-constexpr u32 NumRecordSlots = 64;
-constexpr u64 ShadowArenaSize = 1ull << 30;
-constexpr size_t MaxShadowBytes = 4u << 20; ///< one capture
 constexpr size_t MaxRecordedWords = 4096, MaxRecordedPointers = 256;
 
 static_assert(ListRegsWords == AmdGpu::Regs::NumRegs);
 static_assert(ListUserDataWords == AmdGpu::NUM_USER_DATA);
 static_assert(ListStages == MaxShaderStages);
-
-/// Address ranges this diagnostic reserved: the record slots and the shadow arena, whose first
-/// page stays inaccessible (the "dead" pointer for anything not recorded).
-struct Reserved {
-    u64 record = 0, shadow = 0;
-    [[nodiscard]] bool InRecord(u64 at) const {
-        return at - record < RecordSlotSize * NumRecordSlots;
-    }
-    [[nodiscard]] bool InShadow(u64 at) const {
-        return at - shadow < ShadowArenaSize;
-    }
-};
-Reserved g_reserved; // set once, before the fault handler is registered
-
-#ifdef __linux__
-u64 Reserve(u64 size) {
-    void* at = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    return at == MAP_FAILED ? 0 : u64(at);
-}
-bool Protect(u64 address, size_t size, bool access) {
-    return mprotect(reinterpret_cast<void*>(address), size,
-                    access ? PROT_READ | PROT_WRITE : PROT_NONE) == 0;
-}
-void Discard(u64 address, size_t size) {
-    madvise(reinterpret_cast<void*>(address), size, MADV_DONTNEED);
-    Protect(address, size, false);
-}
-int g_read_errno; ///< of the first failed ReadGuest: EPERM from a sandbox, EFAULT unreadable
-
-/// A guest read that fails instead of faulting, so the fault handler can use it.
-bool ReadGuest(u64 address, void* out, size_t size) {
-    const int saved = errno;
-    iovec local{out, size}, remote{reinterpret_cast<void*>(address), size};
-    const bool read = process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == ssize_t(size);
-    if (!read && !g_read_errno) {
-        g_read_errno = errno;
-    }
-    errno = saved;
-    return read;
-}
-#else
-u64 Reserve(u64) {
-    return 0;
-}
-bool Protect(u64, size_t, bool) {
-    return false;
-}
-void Discard(u64, size_t) {}
-bool ReadGuest(u64, void*, size_t) {
-    return false;
-}
-#endif
 
 struct StageCapture {
     SwStage sw_stage;
@@ -170,139 +105,6 @@ struct KeyCapture {
     std::vector<GuestWord> words;
     std::vector<GuestPointer> pointers;
     std::vector<std::pair<VAddr, u64>> programs; ///< code the selection looks up: address, hash
-};
-
-/// Fault-handler state of the GPU command thread, the only one that records or replays.
-struct ThreadState {
-    WalkRecorder* recorder;                                  ///< set while a walker is recorded
-    std::array<std::pair<u64, u64>, MaxShaderStages> walkers; ///< code allowed to read our ranges
-    u32 num_walkers;
-    bool watching; ///< a recording or replay runs: note every fault
-    u32 faults;
-    u64 fault; ///< the first one's address
-
-    void Watch(std::span<const StageCapture> stages) {
-        num_walkers = 0;
-        for (const auto& stage : stages) {
-            if (stage.walker) {
-                walkers[num_walkers++] = {stage.walker, stage.walker + stage.walker_size};
-            }
-        }
-        faults = 0;
-        fault = 0;
-        watching = true;
-    }
-    void Stop() {
-        recorder = nullptr;
-        num_walkers = 0;
-        watching = false;
-    }
-    [[nodiscard]] bool InWalker(u64 rip) const {
-        for (u32 i = 0; i < num_walkers; ++i) {
-            if (rip >= walkers[i].first && rip < walkers[i].second) {
-                return true;
-            }
-        }
-        return false;
-    }
-    void Note(u64 address) {
-        if (faults++ == 0) {
-            fault = address;
-        }
-    }
-};
-constinit thread_local ThreadState t_state GOW3_TLS_INITIAL_EXEC{};
-
-/// Access-violation handler (priority 0, before the SRT walker patch). Reads of a watched
-/// walker are served here: recorded guest words while recording, else zero (and counted), so
-/// the SRT walker patch never rewrites a walker the game still uses. Other faults in our
-/// ranges are noted and go on to the recovery point (runtime_fault_recover); the rest pass
-/// through untouched (a guest page the page manager resolves is not a stray read).
-bool OnFault(void* context, void* fault_address) {
-#ifdef __linux__
-    auto& t = t_state;
-    const u64 address = u64(fault_address);
-    if (!t.watching && !g_reserved.InRecord(address) && !g_reserved.InShadow(address)) {
-        return false; // the game's own faults
-    }
-    auto& gregs = static_cast<ucontext_t*>(context)->uc_mcontext.gregs;
-    const u64 rip = u64(gregs[REG_RIP]);
-    ZydisDecodedInstruction inst;
-    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-    const bool walker_read =
-        t.InWalker(rip) &&
-        ZYAN_SUCCESS(Common::Decoder::Instance()->decodeInstruction(
-            inst, operands, reinterpret_cast<void*>(rip))) &&
-        inst.mnemonic == ZYDIS_MNEMONIC_MOV && operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-        operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
-        (operands[0].reg.value == ZYDIS_REGISTER_RDI ||
-         operands[0].reg.value == ZYDIS_REGISTER_R10D);
-    const bool ours = g_reserved.InRecord(address) || g_reserved.InShadow(address);
-    if (!walker_read) {
-        if (ours) {
-            t.Note(address); // a descriptor or fetch-shader read: back to the recovery point
-        }
-        return false;
-    }
-    const bool is_pointer = operands[0].reg.value == ZYDIS_REGISTER_RDI;
-    u64 value;
-    if (t.recorder && g_reserved.InRecord(address)) {
-        value = t.recorder->Load(u64(gregs[REG_RDI]), address, is_pointer);
-    } else {
-        // Outside the recorded words (or the record slots in a replay): a zero, or for a
-        // pointer the dead page (not 0, whose next read would fault again outside the shadow).
-        t.Note(address);
-        value = is_pointer ? g_reserved.shadow : 0;
-    }
-    gregs[is_pointer ? REG_RDI : REG_R10] = greg_t(value);
-    gregs[REG_RIP] += inst.length;
-    return true;
-#else
-    return false;
-#endif
-}
-
-/// Runs `body`; false when a fault jumped back out of it (runtime_fault_recover).
-template <typename Body>
-[[gnu::noinline]] bool Guarded(Body&& body) {
-    sigjmp_buf* const outer = runtime_fault_recover;
-    sigjmp_buf recover;
-    if (sigsetjmp(recover, 0)) {
-        runtime_fault_recover = outer;
-        return false;
-    }
-    runtime_fault_recover = &recover;
-    body();
-    runtime_fault_recover = outer;
-    return true;
-}
-
-/// Pages for the shadow copies, handed out once each: an address is never reused, so the
-/// fetch-shader parse cache (keyed by code address) cannot match an older copy.
-class ShadowArena {
-public:
-    std::optional<u64> Map(const ShadowLayout& layout) {
-        const size_t size = layout.Size();
-        if (size > MaxShadowBytes || next + size > g_reserved.shadow + ShadowArenaSize ||
-            !Protect(next, size, true)) {
-            return std::nullopt;
-        }
-        const u64 address = next;
-        next += size;
-        for (const size_t guard : layout.GuardPages()) {
-            if (!Protect(address + guard, PageSize, false)) {
-                Discard(address, size); // without its guard a stray read would go unnoticed
-                return std::nullopt;
-            }
-        }
-        return address;
-    }
-    void Unmap(u64 address, const ShadowLayout& layout) {
-        Discard(address, layout.Size());
-    }
-
-private:
-    u64 next = g_reserved.shadow + PageSize; ///< the first page is the dead page
 };
 
 /// Whether a program is still at its address. AmdGpu::GetParams stops the game (UNREACHABLE)
@@ -332,6 +134,15 @@ int PermutationOf(u64 program, u64 stage_hash) {
         }
     }
     return -1;
+}
+
+/// Notes this thread's faults; reads of the stages' walkers are served (vk_precompile_guard.h).
+void WatchStages(std::span<const StageCapture> stages) {
+    std::array<ThreadState::Range, MaxShaderStages> walkers{};
+    for (size_t i = 0; i < stages.size() && i < walkers.size(); ++i) {
+        walkers[i] = {stages[i].walker, stages[i].walker + stages[i].walker_size};
+    }
+    FaultState().Watch(walkers);
 }
 
 void AddRoot(StageCapture& stage, u32 sgpr, u64 target) {
@@ -444,13 +255,6 @@ struct ReplayResult {
     u64 fault;           ///< the first fault's address
     size_t shadow_bytes; ///< of the shadow copy
 };
-
-const char* FaultPlace(u64 fault) {
-    return g_reserved.InShadow(fault)   ? "shadow guard or dead page"
-           : g_reserved.InRecord(fault) ? "record slots"
-           : fault                      ? "guest or host memory"
-                                        : "unknown address";
-}
 
 } // namespace
 
@@ -650,10 +454,10 @@ void PrecompileReplay::Capture(PipelineCache& cache) {
             Log(Detail::CaptureFailed, fmt::format("capture of key {:016x} failed, stage {} "
                                                    "{:016x}: {}",
                                                    key_hash, i, stage.hash, error));
-            if (g_read_errno && !read_logged) {
+            if (FirstReadError() && !read_logged) {
                 read_logged = true;
                 std::printf("Precompile replay: first failed guest read: %s\n",
-                            std::strerror(g_read_errno));
+                            std::strerror(FirstReadError()));
             }
             return;
         }
@@ -801,7 +605,7 @@ const char* PrecompileReplay::RecordStage(const Shader::Info& info, StageCapture
             error = RecordFetch(info, stage, c);
         }
     });
-    t_state.Stop();
+    FaultState().Stop();
     return completed ? error : "fault while recording";
 }
 
@@ -821,11 +625,12 @@ const char* PrecompileReplay::RecordWalker(const Shader::Info& info, StageCaptur
     pointers.reserve(MaxRecordedPointers);
     slots.Reset();
     WalkRecorder recorder{slots, stage.user_data, ReadGuest, words, pointers, stage.roots};
-    t_state.Watch({&stage, 1});
-    t_state.recorder = &recorder;
+    auto& state = FaultState();
+    WatchStages({&stage, 1});
+    state.recorder = &recorder;
     info.srt_info.walker_func(reinterpret_cast<const u32*>(slots.Address(0)), flat.data());
-    const u32 faults = t_state.faults;
-    t_state.Stop();
+    const u32 faults = state.faults;
+    state.Stop();
     if (recorder.error) {
         return recorder.error;
     }
@@ -1187,7 +992,7 @@ ReplayResult PrecompileReplay::Select(PipelineCache& cache, KeyCapture& c) {
     selection.draw_indirect_params = c.draw_indirect_params;
     bool checked = false, selected = false;
     std::optional<Outcome> stale;
-    t_state.Watch(c.stages);
+    WatchStages(c.stages);
     const bool completed = Guarded([&] {
         // Checked right before the lookup, so the code cannot change in between.
         stale = Stale(cache, c);
@@ -1196,9 +1001,10 @@ ReplayResult PrecompileReplay::Select(PipelineCache& cache, KeyCapture& c) {
             selected = cache.RefreshGraphicsKey(selection);
         }
     });
-    result.faults = t_state.faults;
-    result.fault = t_state.fault;
-    t_state.Stop();
+    auto& state = FaultState();
+    result.faults = state.faults;
+    result.fault = state.fault;
+    state.Stop();
     arena.Unmap(*address, layout);
 
     if (!checked) {
@@ -1323,21 +1129,14 @@ PrecompileReplayPtr MakePrecompileReplay() {
     if (!replay && !record_file && !parsed) {
         return nullptr;
     }
-    if (!g_reserved.record) {
-        g_reserved.record = Reserve(RecordSlotSize * NumRecordSlots);
-        g_reserved.shadow = Reserve(ShadowArenaSize);
-        if (!g_reserved.record || !g_reserved.shadow) {
-            std::printf("Precompile replay: could not reserve address space, off\n");
-            g_reserved = {};
-            if (record_file) {
-                std::fclose(record_file);
-            }
-            return nullptr;
+    if (!SetUpFaultGuard()) {
+        if (record_file) {
+            std::fclose(record_file);
         }
-        (void)Common::Decoder::Instance(); // built now: the fault handler must not allocate
-        Core::Signals::Instance()->RegisterAccessViolationHandler(OnFault, 0);
-        std::atexit(ReportAtExit);
+        return nullptr;
     }
+    static const bool report_at_exit = std::atexit(ReportAtExit) == 0;
+    (void)report_at_exit;
     auto* precompile = new PrecompileReplay(replay, record_file);
     if (parsed) {
         precompile->UseList(std::move(*parsed));
