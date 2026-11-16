@@ -113,6 +113,9 @@ void TestCorruptAndInvalid() {
     key.stages[0].roots[0].first = ListUserDataWords - 1;
     rejected(key, "user-data pointer out of range");
     key = SampleKey(3);
+    key.stages[0].roots[0].first = 0xFFFFFFFFu; // sgpr + 1 would wrap to 0
+    rejected(key, "user-data pointer out of range");
+    key = SampleKey(3);
     key.stages[1].hw_stage = ListHwStages;
     rejected(key, "stage out of range");
     key = SampleKey(3);

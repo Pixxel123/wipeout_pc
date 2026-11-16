@@ -154,7 +154,7 @@ inline const char* Check(const RecordedKey& key) {
         }
         sw_stages |= 1u << stage.sw_stage;
         for (const auto& [sgpr, target] : stage.roots) {
-            if (sgpr + 1 >= ListUserDataWords) { // the replay rewrites two words
+            if (sgpr >= ListUserDataWords - 1) { // the replay rewrites two words (no wrap)
                 return "user-data pointer out of range";
             }
         }
