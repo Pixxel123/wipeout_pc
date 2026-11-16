@@ -394,6 +394,7 @@ struct ListItem {
 
 struct ListTally {
     u64 new_keys; ///< keys the race selected in this launch
+    u64 covered;  ///< of those, keys a replayed entry landed on
     u64 matched, unused, not_built, faulted, gone, skipped, waiting;
     u64 never_seen; ///< NotNew, a program never seen in this launch
     u64 not_new;    ///< NotNew, every program seen
@@ -492,6 +493,9 @@ private:
     std::unordered_set<GraphicsPipelineKey> live_keys; ///< every key the race selected
     /// Keys replayed to but not selected yet, with their entries.
     std::unordered_map<GraphicsPipelineKey, std::vector<u32>> unused_keys;
+    /// Keys the race selected that at least one replayed entry landed on: what a build from
+    /// the list would have had ready (several entries can land on one key).
+    std::unordered_set<GraphicsPipelineKey> covered;
     std::unordered_set<u64> live_programs;
     std::array<u32, size_t(ListNote::Count)> list_notes{};
     ListTally list_reported{};
@@ -539,13 +543,14 @@ void PrecompileReplay::Report(bool final) {
         if (final || !(t == list_reported)) {
             list_reported = t;
             std::printf("%s\n",
-                        fmt::format("Precompile list: {} entries, {} keys new in this launch, "
+                        fmt::format("Precompile list: {} entries, {} keys new in this launch ({} reached by a "
+                                    "replay), "
                                     "{} matched a key the race used, {} replayed to a key not "
                                     "used{}, {} permutation not built, {} faulted (outside "
                                     "shadow), {} program never seen, {} programs never new "
                                     "together, {} code gone, {} skipped (no room), {} waiting, "
                                     "{} rejected{}",
-                                    list.size(), t.new_keys, t.matched, t.unused,
+                                    list.size(), t.new_keys, t.covered, t.matched, t.unused,
                                     final ? "" : " yet", t.not_built, t.faulted, t.never_seen,
                                     t.not_new, t.gone, t.skipped, t.waiting, list_rejected,
                                     final ? " (exit)" : "")
@@ -854,6 +859,7 @@ void PrecompileReplay::NoteNewKey(PipelineCache& cache) {
         for (const u32 index : found->second) {
             list[index].state = ListState::Matched;
         }
+        covered.insert(sel.graphics_key);
         unused_keys.erase(found);
     }
     ProgramSet programs{};
@@ -960,6 +966,7 @@ void PrecompileReplay::ReplayListed(PipelineCache& cache, const ListItem& item) 
         entry.replayed = std::hash<GraphicsPipelineKey>{}(result.key);
         if (live_keys.contains(result.key)) {
             entry.state = ListState::Matched;
+            covered.insert(result.key);
         } else {
             entry.state = ListState::Unused;
             unused_keys[result.key].push_back(item.entry);
@@ -992,6 +999,7 @@ ListTally PrecompileReplay::CountList() {
     std::scoped_lock lock{list_mutex};
     ListTally t{};
     t.new_keys = live_keys.size();
+    t.covered = covered.size();
     for (const auto& entry : list) {
         switch (entry.state) {
         case ListState::NotNew:
