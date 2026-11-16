@@ -97,16 +97,30 @@ constexpr u64 CodeBase(u32 sw_stage) {
     return (1ull << 63) | sw_stage;
 }
 
-/// Whether AmdGpu::GetParams finds this code's header without searching, with the real
-/// AmdGpu::BinaryInfo (the list checked the same through byte offsets).
-bool HeaderFoundFirst(std::span<const u32> code, u64 hash) {
-    if (CheckCode(hash, code)) {
-        return false;
+/// The list checks code headers (CheckCode) through byte offsets: they must be where
+/// AmdGpu::BinaryInfo has its signature, length and hash, so that a code record the list keeps
+/// is one AmdGpu::GetParams finds without searching.
+consteval bool HeaderLayoutMatches() {
+    AmdGpu::BinaryInfo info{};
+    std::ranges::copy(CodeSignature, info.signature.begin());
+    info.length = 0xABCDEF;
+    info.shader_hash = 0x1122334455667788ULL;
+    const auto bytes = std::bit_cast<std::array<u8, sizeof(info)>>(info);
+    u32 length = 0;
+    u64 hash = 0;
+    for (u32 i = 0; i < sizeof(length); ++i) {
+        length |= u32(bytes[CodeHeaderLengthAt + i]) << (8 * i);
     }
-    const auto* info =
-        std::bit_cast<const AmdGpu::BinaryInfo*>(code.data() + CodeHeaderAt(code));
-    return info->Valid() && info->shader_hash == hash && info->length <= code.size_bytes();
+    for (u32 i = 0; i < sizeof(hash); ++i) {
+        hash |= u64(bytes[CodeHeaderHashAt + i]) << (8 * i);
+    }
+    return std::equal(CodeSignature.begin(), CodeSignature.end(), bytes.begin()) &&
+           (length >> 8) == info.length && hash == info.shader_hash;
 }
+static_assert(sizeof(AmdGpu::BinaryInfo) == CodeHeaderWords * sizeof(u32));
+#ifdef __linux__ // the rebuild runs only there; GCC and Clang evaluate this bit_cast
+static_assert(HeaderLayoutMatches());
+#endif
 
 bool VertexFragmentOnly(const RecordedKey& key, const AmdGpu::Regs& regs) {
     return regs.stage_enable.raw == AmdGpu::ShaderStageEnable::Vs &&
@@ -362,7 +376,7 @@ void PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
 std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& shadow) {
     for (const auto& stage : key.stages) {
         const auto code = list.code.find(stage.hash);
-        if (code == list.code.end() || !HeaderFoundFirst(code->second, stage.hash)) {
+        if (code == list.code.end()) { // its words were checked on load (CheckCode)
             stop_detail = fmt::format("no code for program {:016x}", stage.hash);
             return Reject::NoCode;
         }
