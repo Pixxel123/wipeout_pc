@@ -10,16 +10,21 @@
 // Layout (native byte order, x86-64 only):
 //   header: magic, version, Regs words, user-data words, stages
 //   entries: body size, FNV-1a 64 of the body, body
-//   body: recorded key hash, draw-indirect sgpr offsets, the nonzero register words, then per
-//         stage its program's hash, user data and user-data pointers, then the guest words and
-//         the table pointers (vk_precompile_shadow.h).
-// No program code and no translator output: the list outlives a shader store reset.
+//   body: its kind, then
+//     a key: recorded key hash, draw-indirect sgpr offsets, the nonzero register words, then per
+//            stage its program's hash, user data and user-data pointers, then the guest words
+//            and the table pointers (vk_precompile_shadow.h);
+//     a program's code (once per program hash, before the first key that uses it): the hash
+//            and the code words, from the start token through the OrbShdr header.
+// No translator output: the list outlives a shader store reset. The code is the game's: a
+// list stays on the player's machine.
 
 #pragma once
 
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <map>
 #include <set>
 #include <span>
 #include <string>
@@ -31,7 +36,7 @@
 namespace Vulkan::Precompile {
 
 constexpr std::array<char, 8> ListMagic = {'G', 'O', 'W', '3', 'P', 'C', 'L', '\n'};
-constexpr u32 ListVersion = 1;
+constexpr u32 ListVersion = 2;
 
 /// The build's layout, checked in the header (the replay static_asserts them).
 constexpr u32 ListRegsWords = 0xD000;  ///< AmdGpu::Regs::NumRegs
@@ -42,6 +47,17 @@ constexpr u32 ListHwStages = 6;        ///< Regs::ProgramForStage takes 0..5
 constexpr size_t MaxListBytes = 128u << 20;
 constexpr size_t MaxListEntryBytes = 4u << 20;
 constexpr u32 MaxWordOffset = (1u << 30) + 4; ///< WalkRecorder stops at 1 << 30, plus a pointer
+constexpr size_t MaxCodeBytes = 1u << 20;
+
+enum class ListRecord : u32 { Key = 0, Code = 1 };
+
+/// Program code as AmdGpu::GetParams finds it without searching: the start token, then the
+/// OrbShdr header (AmdGpu::BinaryInfo, 32 bytes) at (code[1] + 1) * 2 dwords.
+constexpr u32 CodeStartToken = 0xBEEB03FF;
+constexpr std::array<u8, 7> CodeSignature = {'O', 'r', 'b', 'S', 'h', 'd', 'r'};
+constexpr u32 CodeHeaderWords = 8;
+constexpr u32 CodeHeaderLengthAt = 8; ///< bytes into the header: a u32, the length in bits 8-31
+constexpr u32 CodeHeaderHashAt = 16;  ///< bytes into the header: the u64 shader hash
 
 [[nodiscard]] inline bool operator==(const GuestWord& a, const GuestWord& b) {
     return a.base == b.base && a.offset == b.offset && a.value == b.value;
@@ -79,6 +95,38 @@ struct RecordedKey {
     return hash;
 }
 
+/// Dword index of the code's header; past the end when there is none.
+[[nodiscard]] inline u64 CodeHeaderAt(std::span<const u32> code) {
+    return code.size() >= 2 ? (u64(code[1]) + 1) * 2 : code.size();
+}
+
+/// Why `code` cannot be the program `hash` as AmdGpu::GetParams reads it, or null.
+inline const char* CheckCode(u64 hash, std::span<const u32> code) {
+    if (code.size() < 2 || code[0] != CodeStartToken) {
+        return "code without its start token";
+    }
+    const u64 header = CodeHeaderAt(code);
+    if (header + CodeHeaderWords > code.size()) {
+        return "code header out of range";
+    }
+    const auto* bytes = reinterpret_cast<const u8*>(code.data() + header);
+    if (!std::equal(CodeSignature.begin(), CodeSignature.end(), bytes)) {
+        return "code header without its signature";
+    }
+    u64 header_hash;
+    std::memcpy(&header_hash, bytes + CodeHeaderHashAt, sizeof(header_hash));
+    if (header_hash != hash) {
+        return "code hash mismatch";
+    }
+    u32 length;
+    std::memcpy(&length, bytes + CodeHeaderLengthAt, sizeof(length));
+    length >>= 8;
+    if (length == 0 || length > code.size_bytes()) {
+        return "code length out of range";
+    }
+    return nullptr;
+}
+
 namespace ListDetail {
 
 template <typename T>
@@ -86,6 +134,15 @@ void Put(std::vector<u8>& out, T value) {
     const size_t at = out.size();
     out.resize(at + sizeof(T));
     std::memcpy(out.data() + at, &value, sizeof(T));
+}
+
+/// An entry: body size, checksum, body.
+inline std::vector<u8> Frame(const std::vector<u8>& body) {
+    std::vector<u8> out;
+    Put(out, u32(body.size()));
+    Put(out, Fnv1a(body));
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
 }
 
 /// Reads fixed-size values; once a read runs past the end, every later read gives zero.
@@ -134,6 +191,20 @@ private:
     bool ok = true;
 };
 
+/// Decodes a code body (after its kind); false when it ends early or has bytes left over.
+inline bool DecodeCode(Reader& in, u64& hash, std::vector<u32>& code) {
+    hash = in.Get<u64>();
+    const u32 words = in.Get<u32>();
+    if (words > MaxCodeBytes / sizeof(u32) || !in.Fits(words, sizeof(u32))) {
+        return false;
+    }
+    code.resize(words);
+    for (auto& word : code) {
+        word = in.Get<u32>();
+    }
+    return in.Ok() && in.AtEnd();
+}
+
 /// Why a decoded key cannot be replayed safely, or null.
 inline const char* Check(const RecordedKey& key) {
     for (const auto& [index, value] : key.regs) {
@@ -176,9 +247,8 @@ inline const char* Check(const RecordedKey& key) {
     return nullptr;
 }
 
-/// Decodes a body; false when it ends early or has bytes left over.
-inline bool Decode(std::span<const u8> body, RecordedKey& key) {
-    Reader in{body};
+/// Decodes a key body (after its kind); false when it ends early or has bytes left over.
+inline bool Decode(Reader& in, RecordedKey& key) {
     key.key_hash = in.Get<u64>();
     key.vertex_sgpr_offset = in.Get<u32>();
     key.instance_sgpr_offset = in.Get<u32>();
@@ -236,6 +306,33 @@ inline bool Decode(std::span<const u8> body, RecordedKey& key) {
     return in.Ok() && in.AtEnd();
 }
 
+/// Keeps a key entry; why it was dropped, or null.
+inline const char* AddKey(Reader& in, std::vector<RecordedKey>& keys, u32 max_keys) {
+    RecordedKey key{};
+    const char* why = !Decode(in, key) ? "malformed" : Check(key);
+    if (!why && keys.size() >= max_keys) {
+        why = "past the entry cap";
+    }
+    if (!why) {
+        keys.push_back(std::move(key));
+    }
+    return why;
+}
+
+/// Keeps a program's code, once per hash; why it was dropped, or null.
+inline const char* AddCode(Reader& in, std::map<u64, std::vector<u32>>& code) {
+    u64 hash;
+    std::vector<u32> words;
+    if (!DecodeCode(in, hash, words)) {
+        return "malformed";
+    }
+    if (const char* why = CheckCode(hash, words)) {
+        return why;
+    }
+    const auto [it, added] = code.try_emplace(hash, std::move(words));
+    return added || it->second == words ? nullptr : "code differs from an earlier record";
+}
+
 } // namespace ListDetail
 
 [[nodiscard]] inline std::vector<u8> EncodeListHeader() {
@@ -251,6 +348,7 @@ inline bool Decode(std::span<const u8> body, RecordedKey& key) {
 [[nodiscard]] inline std::vector<u8> EncodeListEntry(const RecordedKey& key) {
     using ListDetail::Put;
     std::vector<u8> body;
+    Put(body, ListRecord::Key);
     Put(body, key.key_hash);
     Put(body, key.vertex_sgpr_offset);
     Put(body, key.instance_sgpr_offset);
@@ -285,11 +383,20 @@ inline bool Decode(std::span<const u8> body, RecordedKey& key) {
         Put(body, pointer.offset);
         Put(body, pointer.target);
     }
-    std::vector<u8> out;
-    Put(out, u32(body.size()));
-    Put(out, Fnv1a(body));
-    out.insert(out.end(), body.begin(), body.end());
-    return out;
+    return ListDetail::Frame(body);
+}
+
+/// A program's code, framed as an entry.
+[[nodiscard]] inline std::vector<u8> EncodeListCode(u64 hash, std::span<const u32> code) {
+    using ListDetail::Put;
+    std::vector<u8> body;
+    Put(body, ListRecord::Code);
+    Put(body, hash);
+    Put(body, u32(code.size()));
+    for (const u32 word : code) {
+        Put(body, word);
+    }
+    return ListDetail::Frame(body);
 }
 
 struct ParsedList {
@@ -297,6 +404,7 @@ struct ParsedList {
     Status status = Status::NotAList;
     u32 version = 0;
     std::vector<RecordedKey> keys;
+    std::map<u64, std::vector<u32>> code; ///< program hash -> code words, checked (CheckCode)
     u32 rejected = 0;                 ///< entries dropped: corrupt, invalid, cut off or past the cap
     std::vector<std::string> reasons; ///< why, for the first few
 };
@@ -333,8 +441,7 @@ struct ParsedList {
         }
         ++list.rejected;
     };
-    while (!in.AtEnd()) {
-        const size_t index = list.keys.size() + list.rejected;
+    for (size_t index = 0; !in.AtEnd(); ++index) {
         const u32 size = in.Get<u32>();
         const u64 checksum = in.Get<u64>();
         const auto body = in.Take(size);
@@ -342,18 +449,19 @@ struct ParsedList {
             reject("entry " + std::to_string(index) + ": cut off");
             break; // the rest cannot be framed
         }
-        RecordedKey key{};
-        const char* why = Fnv1a(body) != checksum       ? "checksum mismatch"
-                          : !ListDetail::Decode(body, key) ? "malformed"
-                                                           : ListDetail::Check(key);
-        if (!why && list.keys.size() >= max_keys) {
-            why = "past the entry cap";
+        const char* why = Fnv1a(body) != checksum ? "checksum mismatch" : nullptr;
+        ListDetail::Reader entry{body};
+        const auto kind = entry.Get<ListRecord>();
+        if (!why && kind == ListRecord::Code) {
+            why = ListDetail::AddCode(entry, list.code);
+        } else if (!why && kind == ListRecord::Key) {
+            why = ListDetail::AddKey(entry, list.keys, max_keys);
+        } else if (!why) {
+            why = "malformed";
         }
         if (why) {
             reject("entry " + std::to_string(index) + ": " + why);
-            continue;
         }
-        list.keys.push_back(std::move(key));
     }
     return list;
 }

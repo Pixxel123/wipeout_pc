@@ -43,6 +43,25 @@ std::vector<u8> File(const std::vector<RecordedKey>& keys) {
     return file;
 }
 
+/// Synthetic program code: the start token, `header - 2` filler words, then the OrbShdr
+/// header at dword `header` with `hash` and a length of `length` bytes.
+std::vector<u32> SampleCode(u64 hash, u32 header = 4, u32 length = 24) {
+    std::vector<u32> code(header + CodeHeaderWords, 0xBF810000);
+    code[0] = CodeStartToken;
+    code[1] = header / 2 - 1;
+    auto* bytes = reinterpret_cast<u8*>(code.data() + header);
+    std::memset(bytes, 0, CodeHeaderWords * 4);
+    std::memcpy(bytes, CodeSignature.data(), CodeSignature.size());
+    const u32 length_word = (length << 8) | 0x5;
+    std::memcpy(bytes + CodeHeaderLengthAt, &length_word, sizeof(length_word));
+    std::memcpy(bytes + CodeHeaderHashAt, &hash, sizeof(hash));
+    return code;
+}
+
+void Append(std::vector<u8>& file, const std::vector<u8>& entry) {
+    file.insert(file.end(), entry.begin(), entry.end());
+}
+
 void TestRoundTrip() {
     const std::vector<RecordedKey> keys = {SampleKey(1), SampleKey(2)};
     const auto list = ParseList(File(keys), 100);
@@ -135,7 +154,7 @@ void TestCorruptAndInvalid() {
     auto huge = File({SampleKey(1)});
     const size_t body = EncodeListHeader().size() + 4 + 8;
     const u32 count = 0xFFFFFFFF;
-    std::memcpy(huge.data() + body + 16, &count, sizeof(count)); // the register count
+    std::memcpy(huge.data() + body + 20, &count, sizeof(count)); // the register count
     const u64 checksum = Fnv1a(std::span<const u8>{huge.data() + body, huge.size() - body});
     std::memcpy(huge.data() + body - 8, &checksum, sizeof(checksum));
     const auto parsed = ParseList(huge, 100);
@@ -148,6 +167,77 @@ void TestCap() {
     assert(list.reasons.size() == 1 && list.reasons[0] == "entry 2: past the entry cap");
 }
 
+void TestCode() {
+    const auto key = SampleKey(1);
+    const u64 fragment = key.stages[0].hash, vertex = key.stages[1].hash;
+    auto file = EncodeListHeader();
+    Append(file, EncodeListCode(fragment, SampleCode(fragment)));
+    Append(file, EncodeListCode(vertex, SampleCode(vertex, 6, 40)));
+    Append(file, EncodeListEntry(key));
+    // Recorded again by a later key of the same program: kept once.
+    Append(file, EncodeListCode(fragment, SampleCode(fragment)));
+    const auto list = ParseList(file, 100);
+    assert(list.status == ParsedList::Status::Ok && list.rejected == 0);
+    assert(list.keys.size() == 1 && list.keys[0] == key);
+    assert(list.code.size() == 2);
+    assert(list.code.at(fragment) == SampleCode(fragment));
+    assert(list.code.at(vertex) == SampleCode(vertex, 6, 40));
+}
+
+void TestCodeRejects() {
+    static constexpr u64 Hash = 0xC0DE'0000'1111ULL;
+    const auto rejected = [](const std::vector<u8>& record, const char* why) {
+        auto file = EncodeListHeader();
+        Append(file, EncodeListCode(Hash, SampleCode(Hash)));
+        Append(file, record);
+        const auto parsed = ParseList(file, 100);
+        assert(parsed.code.size() == 1 && parsed.code.at(Hash) == SampleCode(Hash));
+        assert(parsed.rejected == 1);
+        assert(parsed.reasons[0] == std::string{"entry 1: "} + why);
+    };
+    // Another program's code under this hash: the header names the other one.
+    rejected(EncodeListCode(0xBAD, SampleCode(Hash)), "code hash mismatch");
+    // Same hash, other bytes.
+    auto other = SampleCode(Hash);
+    other[2] ^= 1;
+    rejected(EncodeListCode(Hash, other), "code differs from an earlier record");
+    auto code = SampleCode(Hash);
+    code[0] = 0;
+    rejected(EncodeListCode(Hash, code), "code without its start token");
+    rejected(EncodeListCode(Hash, std::vector<u32>{CodeStartToken}),
+             "code without its start token");
+    code = SampleCode(Hash);
+    code.pop_back(); // the header's last word
+    rejected(EncodeListCode(Hash, code), "code header out of range");
+    code = SampleCode(Hash);
+    code[1] = 0xFFFFFFFF; // (code[1] + 1) * 2 must not wrap to 0
+    rejected(EncodeListCode(Hash, code), "code header out of range");
+    code = SampleCode(Hash);
+    code[4] ^= 0xFF; // 'O' of OrbShdr
+    rejected(EncodeListCode(Hash, code), "code header without its signature");
+    rejected(EncodeListCode(Hash, SampleCode(Hash, 4, 0)), "code length out of range");
+    rejected(EncodeListCode(Hash, SampleCode(Hash, 4, 49)), "code length out of range");
+
+    // A word count past the bound or the body is malformed, without allocating for it.
+    auto huge = EncodeListCode(Hash, SampleCode(Hash));
+    const u32 count = 0xFFFFFFFF;
+    std::memcpy(huge.data() + 4 + 8 + 4 + 8, &count, sizeof(count));
+    const u64 checksum = Fnv1a(std::span<const u8>{huge.data() + 12, huge.size() - 12});
+    std::memcpy(huge.data() + 4, &checksum, sizeof(checksum));
+    rejected(huge, "malformed");
+    rejected(EncodeListCode(Hash, std::vector<u32>(MaxCodeBytes / 4 + 1, CodeStartToken)),
+             "malformed");
+}
+
+void TestOldVersion() {
+    // A version 1 list (no code) is another version: the boot needs the code.
+    auto file = File({SampleKey(1)});
+    const u32 version = 1;
+    std::memcpy(file.data() + ListMagic.size(), &version, sizeof(version));
+    const auto list = ParseList(file, 100);
+    assert(list.status == ParsedList::Status::OtherVersion && list.version == 1);
+}
+
 } // namespace
 
 int main() {
@@ -156,6 +246,9 @@ int main() {
     TestTruncated();
     TestCorruptAndInvalid();
     TestCap();
+    TestCode();
+    TestCodeRejects();
+    TestOldVersion();
     std::puts("precompile-list-test: ok");
     return 0;
 }
