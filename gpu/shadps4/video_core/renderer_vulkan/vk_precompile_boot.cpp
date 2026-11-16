@@ -63,6 +63,7 @@ using Shader::SwStage;
 
 constexpr u32 MaxEntries = 4000;
 constexpr u32 MaxDetails = 8;        ///< detail lines per reason
+constexpr auto ProgressInterval = std::chrono::seconds(1);
 constexpr size_t MaxRecordedWords = 4096, MaxRecordedPointers = 256; ///< as when recorded
 constexpr size_t MaxPermutations = 64; ///< IndexDiskShaders reads indices below 64
 /// Size of the SRT walker code generator (flatten_extended_userdata_pass.cpp).
@@ -259,7 +260,15 @@ void PrecompileBoot::Run() {
     walk_pointers.reserve(MaxRecordedPointers);
     walk_roots.reserve(ListUserDataWords);
     const u32 count = u32(std::min<size_t>(list.keys.size(), MaxEntries));
+    std::printf("Precompile boot: translating %u entries into the shader store\n", count);
+    auto last_progress = started;
     for (u32 index = 0; index < count; ++index) {
+        if (const auto now = std::chrono::steady_clock::now();
+            now - last_progress >= ProgressInterval) {
+            last_progress = now;
+            std::printf("Precompile boot: %u of %u entries, %u permutations written\n", index,
+                        count, permutations);
+        }
         const auto& key = list.keys[index];
         if (marker.Skip(key.key_hash)) {
             ++skipped;
