@@ -21,9 +21,11 @@
 
 namespace {
 
-// gow3: a pipeline binary that no build asked for in this many launches is removed at start.
-// A race uses some hundreds of them; without this the pack only grows.
-constexpr u32 UnusedLaunches = 20;
+// gow3: a pipeline binary that no build asked for in more than this many launches is removed at
+// start. A race uses some hundreds of them; without this the pack only grows. Every launch
+// counts, menu-only ones too, so the limit is generous: a track's binaries are a few MB, and
+// losing them costs one rougher first race.
+constexpr u32 UnusedLaunches = 50;
 static_assert(UnusedLaunches < Storage::CachePack::MaxAge);
 
 std::mutex submit_mutex{};
@@ -147,7 +149,7 @@ void DataBase::Open() {
     // gow3: before the rewrite decision, so the bytes of the binaries dropped here count as dead.
     if (const size_t dropped =
             loaded->EraseUnused(u32(BlobType::PipelineBinary), UnusedLaunches)) {
-        std::printf("Cache pack: %zu pipeline binaries unused for %u launches removed\n", dropped,
+        std::printf("Cache pack: %zu pipeline binaries unused for over %u launches removed\n", dropped,
                     UnusedLaunches);
     }
     // gow3: replaced and removed entries stay in the file, since it is only appended to. Once

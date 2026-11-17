@@ -45,8 +45,8 @@ public:
     bool Save(BlobType type, const std::string& name, std::vector<u8>&& data);
     bool Save(BlobType type, const std::string& name, std::vector<u32>&& data);
 
-    /// gow3: a pipeline binary that is found counts as used this launch; one not used in 20
-    /// launches is removed at start.
+    /// gow3: a pipeline binary that is found counts as used this launch; one left unused too long
+    /// (UnusedLaunches in the .cpp) is removed at start.
     void Load(BlobType type, const std::string& name, std::vector<u8>& data);
     void Load(BlobType type, const std::string& name, std::vector<u32>& data);
     /// gow3: Load without counting as a use, for a check that reads every blob.
