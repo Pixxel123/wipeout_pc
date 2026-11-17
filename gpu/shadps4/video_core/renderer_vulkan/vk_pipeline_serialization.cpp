@@ -88,7 +88,7 @@ std::vector<u8> DiskShaderMarker() {
 /// gow3: this session may number permutations by first use: no on-demand reads at next start.
 void ForgetDiskShaders() {
     auto& db = Storage::DataBase::Instance();
-    if (db.IsOpened() && db.ConcurrentReads()) {
+    if (db.IsOpened()) {
         db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", std::vector<u8>{0});
     }
 }
@@ -973,8 +973,6 @@ bool PipelineCache::CheckCacheProfile() {
     std::vector<u8> profile_data{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
     if (profile_data.empty()) {
-        Storage::DataBase::Instance().FinishPreload();
-
         profile_data.resize(sizeof(profile));
         std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
@@ -995,7 +993,6 @@ bool PipelineCache::CheckCacheProfile() {
         // Start a fresh cache for this build and GPU instead.
         LOG_WARNING(Render, "Pipeline cache isn't compatible with current system: rebuilding it");
         Storage::DataBase::Instance().Clear();
-        Storage::DataBase::Instance().FinishPreload();
         profile_data.resize(sizeof(profile));
         std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
@@ -1113,8 +1110,6 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);
     }
-
-    Storage::DataBase::Instance().FinishPreload();
 }
 
 void PipelineCache::StartOnDemand() {
@@ -1123,11 +1118,11 @@ void PipelineCache::StartOnDemand() {
     // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
     const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
                          !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
-    if (db.IsOpened() && db.ConcurrentReads() && !disk_on) {
+    if (db.IsOpened() && !disk_on) {
         // This session numbers permutations by first use again: the store is rebuilt at the
         // next start with disk shaders on.
         ForgetDiskShaders();
-    } else if (db.IsOpened() && db.ConcurrentReads()) {
+    } else if (db.IsOpened()) {
         std::vector<u8> marker;
         if (compatible) {
             db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
@@ -1160,7 +1155,6 @@ void PipelineCache::StartOnDemand() {
         }
         disk_shaders = true;
     }
-    db.FinishPreload();
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
 }
@@ -1384,9 +1378,6 @@ struct PipelineCache::BackgroundWarmup {
 };
 
 bool PipelineCache::StartBackgroundWarmUp() {
-    if (!Storage::DataBase::Instance().ConcurrentReads()) {
-        return false;
-    }
     if (!CheckCacheProfile()) {
         return true; // nothing cached yet
     }
@@ -1668,7 +1659,6 @@ void PipelineCache::PumpWarmUp() {
     // The idle threads stay parked (StopWarmUp).
     warm.finished = true;
     Gow3Overlay::SetBackgroundLoading(0, 0);
-    Storage::DataBase::Instance().FinishPreload();
 }
 
 void PipelineCache::StopWarmUp() {
