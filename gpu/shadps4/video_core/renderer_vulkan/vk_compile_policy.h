@@ -15,6 +15,9 @@ struct CompilePolicy {
     static constexpr u64 window_ns = 1'000'000'000;
 
     std::atomic<u64> background_until_ns{0};
+    /// Set on the threads of the rebuild after a driver update (StartPipelineRebuild): their
+    /// compiles are not the game's, so they must not send the game's own builds to the workers.
+    static inline thread_local bool quiet = false;
 
     static u64 Now() {
         return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -24,6 +27,9 @@ struct CompilePolicy {
 
     /// A pipeline was compiled rather than restored (any thread).
     void Compiled(u64 now_ns) {
+        if (quiet) {
+            return;
+        }
         background_until_ns.store(now_ns + window_ns, std::memory_order_relaxed);
     }
 

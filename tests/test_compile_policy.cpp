@@ -25,6 +25,14 @@ int main() {
     assert(policy.Background(200 * ms + CompilePolicy::window_ns + CompilePolicy::window_ns / 4));
     // Switched off in the settings: never background, whatever was compiled.
     assert(!policy.Background(200 * ms + 1, false));
+    // A thread of the rebuild after a driver update compiles without switching the game over.
+    CompilePolicy quiet_policy;
+    CompilePolicy::quiet = true;
+    quiet_policy.Compiled(200 * ms);
+    assert(!quiet_policy.Background(200 * ms));
+    CompilePolicy::quiet = false;
+    quiet_policy.Compiled(200 * ms);
+    assert(quiet_policy.Background(200 * ms));
     // The clock runs.
     const u64 first = CompilePolicy::Now();
     assert(CompilePolicy::Now() >= first);
