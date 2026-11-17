@@ -408,6 +408,11 @@ if (WIN32)
         -include ${CMAKE_CURRENT_SOURCE_DIR}/../src/compat_win.h)
     target_link_libraries(pipeline-binary-cache-test PRIVATE onecore)
 endif()
+add_executable(cache-pack-test EXCLUDE_FROM_ALL ../tests/test_cache_pack.cpp
+    shadps4/video_core/cache_pack.cpp)
+target_compile_options(cache-pack-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(cache-pack-test PRIVATE shadps4)
+target_link_libraries(cache-pack-test PRIVATE PkgConfig::XXHASH)
 add_executable(pipeline-binary-initialization-test EXCLUDE_FROM_ALL
     ../tests/test_pipeline_binary_initialization.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_compile_definitions(pipeline-binary-initialization-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
