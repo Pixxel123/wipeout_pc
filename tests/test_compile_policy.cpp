@@ -70,6 +70,14 @@ int main() {
         assert(load.LongGrace(t + 6 * s + CompilePolicy::after_load_ns - 1));
         assert(!load.LongGrace(t + 6 * s + CompilePolicy::after_load_ns));
     }
+    // A thread of the rebuild after a driver update compiles without switching the game over.
+    CompilePolicy quiet_policy;
+    CompilePolicy::quiet = true;
+    quiet_policy.Compiled(200 * ms);
+    assert(!quiet_policy.Background(200 * ms));
+    CompilePolicy::quiet = false;
+    quiet_policy.Compiled(200 * ms);
+    assert(quiet_policy.Background(200 * ms));
     // The clock runs.
     const u64 first = CompilePolicy::Now();
     assert(CompilePolicy::Now() >= first);

@@ -23,6 +23,9 @@
 #include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/thread.h"
+#ifdef __linux__
+#include <sys/resource.h>
+#endif
 #include "gow3_overlay.h"
 #include "gow3_toggles.h"
 #include "core/emulator_settings.h"
@@ -83,6 +86,10 @@ std::vector<u8> DiskShaderMarker() {
                                     Serialization::ShaderMetaVersion);
     return {marker.begin(), marker.end()};
 }
+/// gow3: ShaderProfile entry kept while saved pipelines wait to be built again after a driver
+/// update (StartOnDemand, PumpWarmUp).
+constexpr const char* RebuildMarker = "pipeline_rebuild";
+
 /// gow3: this session may number permutations by first use: no on-demand reads at next start.
 void ForgetDiskShaders() {
     auto& db = Storage::DataBase::Instance();
@@ -524,6 +531,11 @@ struct PipelineCache::WarmupPool {
                 if (low_priority) {
                     Common::SetCurrentThreadName("GoW3:ShaderWarmup");
                     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+#ifdef __linux__
+                    // gow3: SCHED_OTHER has one priority, so the call above changes nothing on
+                    // Linux; the nice value is per thread there (who 0: the calling thread).
+                    setpriority(PRIO_PROCESS, 0, 19);
+#endif
                 }
                 Run();
             });
@@ -1100,6 +1112,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
 
 void PipelineCache::StartOnDemand() {
     const bool compatible = CheckCacheProfile();
+    bool shaders_indexed = false; // the saved shaders are this translator's and stay numbered
     auto& db = Storage::DataBase::Instance();
     // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
     const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
@@ -1138,18 +1151,35 @@ void PipelineCache::StartOnDemand() {
                                                                   : "another translator");
         } else {
             IndexDiskShaders();
+            shaders_indexed = true;
         }
         disk_shaders = true;
     }
     // gow3: without a global key no binary was saved, so there is nothing to drop.
+    bool rebuild = false;
     if (instance.GetPipelineBinaryGlobalKey().keySize != 0) {
         if (const auto removed =
                 DropForeignPipelineBinaries(BinaryKey(instance.GetPipelineBinaryGlobalKey()))) {
             std::printf("Pipeline binaries: %zu of another driver removed\n", removed);
+            // The keys and shaders of those pipelines are still saved: the marker asks for
+            // their binaries to be built again, at this start or a later one.
+            db.Save(Storage::BlobType::ShaderProfile, RebuildMarker, std::vector<u8>{1});
         }
+        // gow3 (experiment): GOW3_PIPELINE_REBUILD=1 builds them again in the background while
+        // the marker is there; =force does it without the marker (a cache without binaries).
+        const char* env = std::getenv("GOW3_PIPELINE_REBUILD");
+        const std::string_view mode = env ? env : "";
+        std::vector<u8> marker;
+        db.Load(Storage::BlobType::ShaderProfile, RebuildMarker, marker);
+        // Only with the saved shaders in use: dropped, or renumbered by this session, they
+        // cannot be paired with the saved keys. The marker waits for a start that has them.
+        rebuild = shaders_indexed && (mode == "force" || (mode == "1" && !marker.empty()));
     }
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
+    if (rebuild) {
+        StartPipelineRebuild();
+    }
 }
 
 bool PipelineCache::DiskShadersActive() const {
@@ -1351,6 +1381,7 @@ struct PipelineCache::BackgroundWarmup {
         ComputePipelineKey compute_key{};
         std::unique_ptr<GraphicsPipeline> graphics;
         std::unique_ptr<ComputePipeline> compute;
+        bool rebuilt = false; ///< rebuild: built and already destroyed on the pool thread
     };
 
     std::unordered_map<u64, std::shared_ptr<WarmStage>> stages; ///< read job only
@@ -1365,6 +1396,8 @@ struct PipelineCache::BackgroundWarmup {
     u32 batches = 0;
     bool finished = false;
     u32 loaded = 0, threads = 0;
+    /// StartPipelineRebuild: the pipelines are built only to save their binaries again.
+    bool rebuild = false;
     std::chrono::steady_clock::time_point started, last_batch;
     std::chrono::steady_clock::time_point last_pump{}, last_report{};
     std::unique_ptr<WarmupPool> pool; ///< last: its jobs use the members above
@@ -1375,8 +1408,22 @@ bool PipelineCache::StartBackgroundWarmUp() {
         return true; // nothing cached yet
     }
     ForgetDiskShaders();
+    StartWarmUpPool(false);
+    std::printf("Pipeline warm-up: loading in the background (%u threads)\n", background->threads);
+    return true;
+}
+
+void PipelineCache::StartPipelineRebuild() {
+    StartWarmUpPool(true);
+    std::printf("Pipeline rebuild: saved pipelines are built again in the background after a "
+                "driver update (%u threads)\n",
+                background->threads);
+}
+
+void PipelineCache::StartWarmUpPool(bool rebuild) {
     background = new BackgroundWarmup;
     auto& warm = *background;
+    warm.rebuild = rebuild;
     warm.started = std::chrono::steady_clock::now();
     warm.threads = WarmupThreadCount(std::max(1u, std::thread::hardware_concurrency()));
     warm.pool = std::make_unique<WarmupPool>(warm.threads, true);
@@ -1394,8 +1441,6 @@ bool PipelineCache::StartBackgroundWarmUp() {
         warm.reading = false;
         return true;
     });
-    std::printf("Pipeline warm-up: loading in the background (%u threads)\n", warm.threads);
-    return true;
 }
 
 void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data) {
@@ -1454,7 +1499,19 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
                             spv);
                     if (!spv.empty()) {
                         const auto module_started = std::chrono::steady_clock::now();
-                        stage->module = CompileSPV(spv, stage->device);
+                        // Not CompileSPV: a blob the driver refuses leaves the stage unusable
+                        // (LoadDiskProgram rejects such a slot too) instead of stopping the game.
+                        if (spv.size() >= 5 && spv[0] == 0x07230203) {
+                            const vk::ShaderModuleCreateInfo shader_info = {
+                                .codeSize = spv.size() * sizeof(u32),
+                                .pCode = spv.data(),
+                            };
+                            const auto [result, module] =
+                                stage->device.createShaderModule(shader_info);
+                            if (result == vk::Result::eSuccess) {
+                                stage->module = module;
+                            }
+                        }
                         module_time = ElapsedNs(module_started);
                         warm.module_ns += module_time;
                         ++warm.modules;
@@ -1530,6 +1587,11 @@ void PipelineCache::PumpWarmUp() {
 
     // Built pipelines: the first one ready for a key wins (the game may have compiled it).
     for (auto& built : warm.built.Take(64)) {
+        if (warm.rebuild) {
+            warm.loaded += built.rebuilt;
+            warm.done.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
         const bool kept =
             built.graphics  ? PublishFirst(graphics_pipelines, built.graphics_key, std::move(built.graphics))
             : built.compute ? PublishFirst(compute_pipelines, built.compute_key, std::move(built.compute))
@@ -1555,6 +1617,10 @@ void PipelineCache::PumpWarmUp() {
             warm.done.fetch_add(1, std::memory_order_relaxed); // the game compiled it first
             continue;
         }
+        if (warm.rebuild && PreloadMemoryStop().Stopped()) {
+            warm.done.fetch_add(1, std::memory_order_relaxed); // out of memory: no more builds
+            continue;
+        }
         std::array<const Shader::Info*, MaxShaderStages> infos{};
         std::array<vk::ShaderModule, MaxShaderStages> modules{};
         std::optional<Shader::Gcn::FetchShaderData> fetch;
@@ -1566,6 +1632,15 @@ void PipelineCache::PumpWarmUp() {
                     continue;
                 }
                 auto& stage = *entry.stages[i];
+                if (warm.rebuild) {
+                    // Nothing is published, so the stage keeps its own program and module and
+                    // the game's programs and their permutation numbers are left alone.
+                    usable = bool(stage.module);
+                    infos[i] = &stage.program->info;
+                    modules[i] = stage.module;
+                    fetch = stage.fetch;
+                    continue;
+                }
                 if (!stage.merged) {
                     MergeWarmStage(stage);
                 }
@@ -1583,7 +1658,10 @@ void PipelineCache::PumpWarmUp() {
         warm.pool->Push([this, &warm, queued = std::chrono::steady_clock::now(),
                           compute = entry.compute, graphics_key = entry.graphics_key,
                          compute_key = entry.compute_key, sdata = entry.sdata, infos, modules,
-                         fetch]() mutable {
+                         fetch, stages = warm.rebuild ? entry.stages : decltype(entry.stages){}]()
+                            mutable {
+            // rebuild: `stages` keeps the programs and modules behind infos/modules alive.
+            CompilePolicy::quiet = warm.rebuild;
             const auto build_started = std::chrono::steady_clock::now();
             warm.build_queue_ns += ElapsedNs(queued);
             SCOPE_EXIT { warm.build_ns += ElapsedNs(build_started); ++warm.completed; };
@@ -1604,12 +1682,18 @@ void PipelineCache::PumpWarmUp() {
                     built.graphics.reset(); // the driver refused it (#72): not published
                 }
             }
+            if (warm.rebuild) {
+                // Building it saved its binary (CreateCachedGraphicsPipeline): that is all.
+                built.rebuilt = built.graphics || built.compute;
+                built.graphics.reset();
+                built.compute.reset();
+            }
             warm.built.Push(std::move(built));
             return true;
         });
     }
 
-    if (now - warm.last_report >= 1s) {
+    if (!warm.rebuild && now - warm.last_report >= 1s) {
         warm.last_report = now;
         std::printf("Warm-up progress: %.2f s, read %u, submitted %u, completed %u, done %u/%u, "
                     "batches %u, reading %u\n",
@@ -1619,6 +1703,20 @@ void PipelineCache::PumpWarmUp() {
     }
 
     if (warm.reading || !warm.read.Empty() || !warm.pool->Idle() || !warm.built.Empty()) {
+        return;
+    }
+    if (warm.rebuild) {
+        // Every saved key was tried: a later start has nothing left to do. Out of memory, the
+        // marker stays and the next start goes on (what is saved is restored, not built).
+        if (!PreloadMemoryStop().Stopped()) {
+            Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderProfile, RebuildMarker);
+        }
+        std::printf("Pipeline rebuild: %u of %u saved pipelines built again in %.1f s\n",
+                    warm.loaded, warm.total.load(),
+                    std::chrono::duration<double>(now - warm.started).count());
+        ReportPipelineBinaryCache();
+        warm.finished = true;
+        Gow3Overlay::SetBackgroundLoading(0, 0);
         return;
     }
     std::printf("Pipeline warm-up: %u of %u pipelines in %.2f s in the background (%u threads)\n",

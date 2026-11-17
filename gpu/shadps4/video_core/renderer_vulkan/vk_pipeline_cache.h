@@ -148,6 +148,10 @@ public:
     /// the results a few at a time (PumpWarmUp). Always true now; the caller still checks it.
     bool StartBackgroundWarmUp();
     void StartOnDemand();
+    /// gow3: after a driver update the saved pipeline binaries are gone but their keys and
+    /// shaders are not: builds every saved pipeline again on the warm-up pool, only to save its
+    /// binary, so the game restores it later instead of compiling it at its first draw.
+    void StartPipelineRebuild();
     void Sync();
     void ReportCompilerStats();
 
@@ -209,6 +213,7 @@ private:
     struct WarmStage;
     void ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data);
     bool MergeWarmStage(WarmStage& stage);
+    void StartWarmUpPool(bool rebuild);
     void PumpWarmUp();
     void StopWarmUp();
     bool AsyncCompilation() const;
