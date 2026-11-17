@@ -274,6 +274,13 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     // (it has its own) and leaves the compile policy alone: it is no sign of new pipelines
     // coming, so cache hits keep being built right away.
     const bool counted = build != PipelineBuild::Rebuild;
+    // gow3: a restore-only build never compiles: where the others would compile it reports that
+    // nothing usable is saved, so the caller can send the pipeline to a compile worker.
+    const bool restore_only = build == PipelineBuild::RestoreOnly;
+    const auto not_saved = [] {
+        return vk::ResultValue<vk::UniquePipeline>{vk::Result::ePipelineCompileRequired,
+                                                   vk::UniquePipeline{}};
+    };
     const auto create = [&](vk::PipelineCache used_cache, const auto& used_info, bool restored) {
         const auto started = std::chrono::steady_clock::now();
         auto result = device.createGraphicsPipelineUnique(used_cache, used_info);
@@ -304,6 +311,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         }
     };
     if (!enabled) {
+        if (restore_only) {
+            return not_saved();
+        }
         compiled(); // gow3: no cache, every build compiles
         return create_any(info);
     }
@@ -329,6 +339,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     if (key_result != vk::Result::eSuccess ||
         !ValidKey(global) || !ValidKey(BinaryKey(pipeline_key))) {
         ++binary_errors;
+        if (restore_only) {
+            return not_saved();
+        }
         binary_misses += u64(counted);
         compiled();
         return create_any(info);
@@ -408,6 +421,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     } catch (const std::exception&) {
         ++binary_errors;
         destroy();
+    }
+    if (restore_only) {
+        return not_saved();
     }
     binary_misses += u64(counted);
     compiled(); // gow3: a real compile

@@ -76,7 +76,9 @@ struct GraphicsPipelineKey {
 /// driver optimisations when the binary cache has nothing to restore. Rebuild: the optimised
 /// build that later replaces a fast one (GraphicsPipeline::AdoptOptimized); a driver error
 /// leaves it without a handle instead of stopping the game, and it stays out of the build stats.
-enum class PipelineBuild : u8 { Optimized, Fast, Rebuild };
+/// RestoreOnly: restored from the binary cache or not built at all (GraphicsPipeline::NotSaved),
+/// so a pipeline that was never saved is not compiled on the calling thread.
+enum class PipelineBuild : u8 { Optimized, Fast, Rebuild, RestoreOnly };
 
 class GraphicsPipeline : public Pipeline {
 public:
@@ -106,6 +108,12 @@ public:
     /// gow3: drawing with pipelines built without driver optimisations, until AdoptOptimized.
     bool FastBuild() const noexcept {
         return fast_build;
+    }
+
+    /// gow3: true after a RestoreOnly build found no saved binary; Handle() is then null and the
+    /// object is only to be discarded.
+    bool NotSaved() const noexcept {
+        return not_saved;
     }
 
     /// gow3: takes over the pipelines of `rebuilt`, the optimised build of the same key. The
@@ -146,6 +154,8 @@ private:
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     vk::UniquePipeline square_pipeline;
     bool fast_build = false;
+    /// gow3: set by a RestoreOnly build that found no saved binary.
+    bool not_saved = false;
     /// gow3: the adopted rebuild; kept for its layout, which its pipelines were created with.
     std::unique_ptr<GraphicsPipeline> optimized;
 };
