@@ -8,6 +8,7 @@
 #include <span>
 
 #include "shader_recompiler/frontend/fetch_shader.h"
+#include "video_core/cache_pack.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -19,14 +20,16 @@ struct Binary {
     Key key;
     std::vector<u8> data;
 };
-constexpr size_t MaxFileSize = 64 * 1024 * 1024;
+/// gow3: the pack's limit on one entry, so a binary the pack would refuse is refused here too.
+constexpr size_t MaxBytes = Storage::CachePack::MaxBlobBytes;
+constexpr u32 Magic = 0x31425047, Version = 1; // "GPB1", little-endian on Windows and Linux
 constexpr u32 MaxBinaries = 32;
 
 std::vector<u8> Encode(const Key& global, const Key& pipeline, u64 graphics_hash,
                        const std::vector<Binary>& binaries);
 std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& global,
                                           const Key& pipeline, u64 graphics_hash);
-/// True when `bytes` is an encoded binary file saved under `global`.
+/// True when `bytes` is an encoded binary saved under `global`.
 bool SavedUnder(std::span<const u8> bytes, const Key& global);
 } // namespace PipelineBinaryCache
 

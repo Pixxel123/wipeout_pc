@@ -28,8 +28,12 @@ std::optional<std::vector<u8>> ReadFile(const std::filesystem::path& file, size_
 
 void ImportFolder(const std::filesystem::path& folder, const std::filesystem::path& relative,
                   CachePack& pack, std::vector<std::filesystem::path>& imported) {
-    std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator{folder / relative, error}) {
+    // A read error on the folder ends the walk instead of throwing: the game must still start.
+    std::error_code walk;
+    for (std::filesystem::directory_iterator it{folder / relative, walk}, end; !walk && it != end;
+         it.increment(walk)) {
+        const auto& entry = *it;
+        std::error_code error;
         const auto blob = LooseBlob(relative / entry.path().filename());
         if (!blob || !entry.is_regular_file(error)) {
             continue;

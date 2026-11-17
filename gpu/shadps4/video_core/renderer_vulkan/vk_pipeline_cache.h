@@ -143,7 +143,7 @@ public:
     /// can show a loading screen; `progress(done, total)` follows the pipelines read.
     void WarmUp(const std::function<void(u32 done, u32 total)>& progress = {});
     /// gow3: the same load on low-priority threads while the game runs; the GPU thread takes
-    /// the results a few at a time (PumpWarmUp). False when it cannot (zip archive store).
+    /// the results a few at a time (PumpWarmUp). Always true now; the caller still checks it.
     bool StartBackgroundWarmUp();
     void StartOnDemand();
     void Sync();

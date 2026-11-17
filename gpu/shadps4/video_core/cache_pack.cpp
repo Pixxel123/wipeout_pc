@@ -115,6 +115,8 @@ void CachePack::Load() {
         auto bad = file;
         bad += ".bad";
         std::filesystem::remove(bad, error);
+        // gow3: if the rename fails the file stays: the cache runs empty, appends to it are
+        // never read, and every start tries again.
         std::filesystem::rename(file, bad, error);
     };
     if (size > MaxPackBytes) {

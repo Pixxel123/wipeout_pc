@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <chrono>
+#include <fstream>
 #include <xxhash.h>
 #include "common/elf_info.h"
 #include "common/path_util.h"
@@ -212,6 +213,19 @@ void TestDriverFallback() {
     dispatch = original;
 }
 
+// The first start after the update: a loose file and no pack. Open imports it.
+void TestImportAtOpen(const std::filesystem::path& directory) {
+    const auto folder = directory / "TEST00000";
+    std::filesystem::create_directories(folder);
+    std::ofstream{folder / "a.meta", std::ios::binary} << "meta";
+    assert(!std::filesystem::exists(folder / "cache.pack"));
+    OpenCacheStore(directory);
+    std::vector<u8> bytes;
+    DataBase::Instance().Load(BlobType::ShaderMeta, "a", bytes);
+    assert((bytes == std::vector<u8>{'m', 'e', 't', 'a'}));
+    DataBase::Instance().Close();
+}
+
 void TestRealDriver() {
     Vulkan::Instance instance(0, false);
     static vk::detail::DynamicLoader loader;
@@ -318,9 +332,9 @@ int main(int argc, char** argv) {
     assert(!Decode(encoded, global, pipeline, 43));
     const auto& global_a = global;
     const Key global_b{2};
-    const auto bytes = Encode(global_a, pipeline, 0, binaries);
-    assert(SavedUnder(bytes, global_a));
-    assert(!SavedUnder(bytes, global_b));
+    const auto saved = Encode(global_a, pipeline, 0, binaries);
+    assert(SavedUnder(saved, global_a));
+    assert(!SavedUnder(saved, global_b));
     assert(!SavedUnder(std::span<const u8>{}, global_a));
     const auto malformed = [&](size_t offset, u32 value) {
         auto bytes = encoded;
@@ -332,7 +346,7 @@ int main(int argc, char** argv) {
     malformed(4, 2);   // Unsupported version, with a valid checksum.
     malformed(16, 33); // Global key exceeds Vulkan's bound.
     malformed(28, MaxBinaries + 1);
-    malformed(37, u32(MaxFileSize + 1)); // Binary data length must be bounded.
+    malformed(37, u32(MaxBytes + 1)); // Binary data length must be bounded.
     auto trailing = encoded;
     trailing.insert(trailing.end() - 8, 0);
     const auto trailing_checksum = XXH3_64bits(trailing.data(), trailing.size() - 8);
@@ -360,7 +374,14 @@ int main(int argc, char** argv) {
     assert(Decode(StoredBinary("pipeline"), global, pipeline, 42)->size() == 1);
     db.Remove(BlobType::PipelineBinary, "pipeline");
     assert(StoredBinary("pipeline").empty());
-    TestDriverFallback();
+    // Only the binary saved under this driver's global key is kept.
+    assert(db.Save(BlobType::PipelineBinary, "native", Encode(global, pipeline, 0, binaries)));
+    assert(db.Save(BlobType::PipelineBinary, "foreign", Encode(global_b, pipeline, 0, binaries)));
+    assert(Vulkan::DropForeignPipelineBinaries(global) == 1);
+    assert(!StoredBinary("native").empty() && StoredBinary("foreign").empty());
+    db.Remove(BlobType::PipelineBinary, "native");
+    TestDriverFallback(); // closes the store
+    TestImportAtOpen(root / "import");
     std::filesystem::remove_all(root);
     std::puts("pipeline-binary-cache-test: passed");
 }

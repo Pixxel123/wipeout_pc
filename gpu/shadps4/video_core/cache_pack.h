@@ -16,7 +16,8 @@
 namespace Storage {
 
 /// gow3: the whole disk cache of one game in a single append-only file, read into memory at
-/// start. Thousands of loose files made every start pay for thousands of file opens.
+/// start. A file read mid-game can wait tens of ms for a drive that went to sleep; from memory,
+/// the GPU thread never waits on the disk.
 ///
 /// File: u32 magic, u32 version, then records of u32 type, u32 name_size, u32 data_size
 /// (Removed = the entry was removed, no data follows), the name, the data, and the u64
