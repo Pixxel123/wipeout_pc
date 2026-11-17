@@ -23,6 +23,9 @@
 #include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/thread.h"
+#ifdef __linux__
+#include <sys/resource.h>
+#endif
 #include "gow3_overlay.h"
 #include "gow3_toggles.h"
 #include "core/emulator_settings.h"
@@ -487,6 +490,11 @@ struct PipelineCache::WarmupPool {
                 if (low_priority) {
                     Common::SetCurrentThreadName("GoW3:ShaderWarmup");
                     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+#ifdef __linux__
+                    // gow3: SCHED_OTHER has one priority, so the call above changes nothing on
+                    // Linux; the nice value is per thread there (who 0: the calling thread).
+                    setpriority(PRIO_PROCESS, 0, 19);
+#endif
                 }
                 Run();
             });
@@ -1063,6 +1071,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
 
 void PipelineCache::StartOnDemand() {
     const bool compatible = CheckCacheProfile();
+    bool shaders_indexed = false; // the saved shaders are this translator's and stay numbered
     auto& db = Storage::DataBase::Instance();
     // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
     const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
@@ -1101,6 +1110,7 @@ void PipelineCache::StartOnDemand() {
                                                                   : "another translator");
         } else {
             IndexDiskShaders();
+            shaders_indexed = true;
         }
         disk_shaders = true;
     }
@@ -1120,7 +1130,9 @@ void PipelineCache::StartOnDemand() {
         const std::string_view mode = env ? env : "";
         std::vector<u8> marker;
         db.Load(Storage::BlobType::ShaderProfile, RebuildMarker, marker);
-        rebuild = db.IsOpened() && (mode == "force" || (mode == "1" && !marker.empty()));
+        // Only with the saved shaders in use: dropped, or renumbered by this session, they
+        // cannot be paired with the saved keys. The marker waits for a start that has them.
+        rebuild = shaders_indexed && (mode == "force" || (mode == "1" && !marker.empty()));
     }
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
@@ -1446,7 +1458,19 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
                             spv);
                     if (!spv.empty()) {
                         const auto module_started = std::chrono::steady_clock::now();
-                        stage->module = CompileSPV(spv, stage->device);
+                        // Not CompileSPV: a blob the driver refuses leaves the stage unusable
+                        // (LoadDiskProgram rejects such a slot too) instead of stopping the game.
+                        if (spv.size() >= 5 && spv[0] == 0x07230203) {
+                            const vk::ShaderModuleCreateInfo shader_info = {
+                                .codeSize = spv.size() * sizeof(u32),
+                                .pCode = spv.data(),
+                            };
+                            const auto [result, module] =
+                                stage->device.createShaderModule(shader_info);
+                            if (result == vk::Result::eSuccess) {
+                                stage->module = module;
+                            }
+                        }
                         module_time = ElapsedNs(module_started);
                         warm.module_ns += module_time;
                         ++warm.modules;
@@ -1552,6 +1576,10 @@ void PipelineCache::PumpWarmUp() {
             warm.done.fetch_add(1, std::memory_order_relaxed); // the game compiled it first
             continue;
         }
+        if (warm.rebuild && PreloadMemoryStop().Stopped()) {
+            warm.done.fetch_add(1, std::memory_order_relaxed); // out of memory: no more builds
+            continue;
+        }
         std::array<const Shader::Info*, MaxShaderStages> infos{};
         std::array<vk::ShaderModule, MaxShaderStages> modules{};
         std::optional<Shader::Gcn::FetchShaderData> fetch;
@@ -1637,8 +1665,11 @@ void PipelineCache::PumpWarmUp() {
         return;
     }
     if (warm.rebuild) {
-        // Every saved key was tried: a later start has nothing left to do.
-        Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderProfile, RebuildMarker);
+        // Every saved key was tried: a later start has nothing left to do. Out of memory, the
+        // marker stays and the next start goes on (what is saved is restored, not built).
+        if (!PreloadMemoryStop().Stopped()) {
+            Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderProfile, RebuildMarker);
+        }
         std::printf("Pipeline rebuild: %u of %u saved pipelines built again in %.1f s\n",
                     warm.loaded, warm.total.load(),
                     std::chrono::duration<double>(now - warm.started).count());
