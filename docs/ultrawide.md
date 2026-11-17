@@ -2,8 +2,7 @@
 
 **English** | [Português (Brasil)](#português-brasil)
 
-The ultrawide sizes are **built in**: choose one in **Render resolution** (launcher or in-game menu); they are
-marked "(beta)". Before that they were a **mod**, still available for older versions: the folder
+The ultrawide sizes are **built in**: choose one in **Resolution** (launcher or in-game menu). Before that they were a **mod**, still available for older versions: the folder
 [`extras/mods/Ultrawide`](../extras/mods/Ultrawide)
 (install steps in its README). It uses the patch support of mods: a mod folder can carry game patches
 (XML files with signatures, in its `patches/` folder), applied while the mod is ticked on the Mods
@@ -46,9 +45,8 @@ They come from the game, which is built for 16:9, and are already known; they wi
 
 ## Using it
 
-Choose a size in **Render resolution** (launcher, **Home** and **Performance**) or in the in-game menu (Insert or
-R3+L2 → Performance → Render resolution). Each one shows its exact size and aspect ratio, for example
-`3440 × 1440 · 21:9 (beta)`. Pick one and **PLAY** (in the game menu: "Apply and restart"). The **Engine frame
+Choose a size in **Resolution** (launcher, **Graphics**) or in the in-game menu (Insert or
+R3+L2 → Performance → Resolution). Each one shows its exact size, for example `3440 × 1440`. Pick one and **PLAY** (in the game menu: "Apply and restart"). The **Engine frame
 rate** (60, 100, 120 or 240) is a separate choice that works with any resolution.
 
 **Older versions (before 2.4.0):** put `Ultrawide.zip` (made with `python tools/zip_mod.py extras/mods/Ultrawide`)
@@ -102,6 +100,59 @@ The two numbers are the width and the height. A new size is marked "not tested" 
 is added to `TESTED_IN_GAME` in the tool. A mod's resolutions are listed by the launcher and the game menu from
 its patch file; to make a size built in, also add its entry to `patches/God_of_War_III_Remastered.xml` and its
 name to the resolution lists (`scripts/graphics_options.py`, `gpu/shim/gow3_graphics.h`, `gow3_overlay.cpp`).
+
+## WipEout: the monitor's size, any size, render scale
+
+For WipEout Omega Collection the resolution patch is a function of width and height, so `run.py` can make it for
+any even size (`scripts/resolution_patch.py`, `resolution_patch_lines`): the output size, the half-resolution
+buffers, the camera aspect ratio (wider than 16:9 shows more at the sides, narrower keeps the width and shows
+more on top and bottom) and 1, 2 or 4 GB more of the game's video memory from 4.5, 12 and 24 megapixels.
+`tests/test_resolution_patch.py` keeps it equal, byte for byte, to every hand-made entry of
+`patches/WipEout_Omega_Collection.xml`.
+
+Two keys of `gow3.ini` use it; `run.py` works the size out at every start and logs it
+(`Render resolution: display 3440x1440 at 100 % -> 3440x1440`):
+
+| Key | Values | Meaning |
+|---|---|---|
+| `render_resolution` | `display` (default) | The primary monitor's desktop size, read at every start, so it follows a new monitor or a DSR/DLDSR desktop |
+| `render_resolution` | any even `<width>x<height>` | That size, generated when no hand-made entry or mod has it |
+| `render_scale` | `100` (default), `150`, `200` | Percent of the render resolution the game renders at. Above 100 is supersampling: a larger picture shown at the window's size |
+
+In the launcher (**Graphics**) and the in-game menu they are **Resolution** and **Resolution scale**, listed as a PC
+game lists them: plain sizes, the monitor's own size first (`display`), then the others largest first. Sizes
+equal to the monitor's or larger are left out, since Resolution scale goes above the monitor, except the
+game's own 1920 × 1080, which a smaller screen (a Steam Deck) lists too. A saved size stays
+listed. A new install starts at `display`; God of War III has no `display` and starts at its own 1920 × 1080.
+
+- A size with a hand-made entry uses that entry (a 2560 × 1440 monitor runs "Resolution Patch - 1440p").
+- Sizes run from 1920 × 1080 to 7680 × 4320 as a resolution patch: below that the game keeps its 1920 × 1080
+  buffers (measured on the Steam Deck with 720p, 900p and 1280 × 800). Below it, WipEout uses its output size
+  instead: **1280 × 720** in the Resolution list, and `display` on a smaller screen (the Steam Deck's
+  1280 × 800, a 1366 × 768 laptop), draw the race at 1280 × 720 with the HUD and menus at the game's own size
+  (`run.py` passes `GOW3_OUTPUT_SIZE`; the Steam Deck's races went from 47-53 to 58-60 FPS with it, #148).
+  An older `gow3.ini` with `output_res=1280x720` and the game's own render resolution becomes `720p` at the
+  next start. 1600 × 900 is not offered: the game has no output size for it. A scale that would pass
+  7680 × 4320 becomes the largest one that fits.
+- The monitor's size comes from Windows, or from `xrandr` on Linux; when neither answers, `display` is
+  1920 × 1080. `GOW3_DISPLAY_SIZE=<width>x<height>` says it instead.
+- The upscaling presets render below any render resolution and upscale back to it.
+- Generated sizes are not tested in game one by one; above 3840 × 2160 they need a lot of video memory.
+
+### What `run.py` tells the game
+
+`gow3.ini` keeps the player's choice; `run.py` works out what it means at every start and passes it on. The
+game never works a size out itself.
+
+| Variable | Example | Meaning |
+|---|---|---|
+| `GOW3_DISPLAY_SIZE` | `3440x1440` | The monitor's size. Set it yourself to say it instead of asking the system |
+| `GOW3_DISPLAY_HZ` | `165` | The monitor's refresh rate, for the launcher's Frame rate limit list (set it to say it) |
+| `GOW3_RENDER_SIZE` | `5160x2160` | The size this start renders at, when `display` or a render scale decided it |
+| `GOW3_OUTPUT_SIZE` | `1280x720` | The size the race is drawn at below 1920 × 1080; `1920x1080` follows the render resolution |
+| `GOW3_EXTRA_RESOLUTIONS` | `display;2256x1504` | Names the game accepts beside its built-in ones |
+| `GOW3_RESOLUTION_LIST` | `display=3440 × 1440;1440p=2560 × 1440` | The in-game Resolution list, in order, as the launcher shows it |
+| `GOW3_RENDER_SCALES` | `100;150` | The scales the in-game Resolution scale row offers |
 
 ## Reference build addresses
 

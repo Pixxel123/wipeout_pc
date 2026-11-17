@@ -145,7 +145,9 @@ class NoMsaaLauncherTest(unittest.TestCase):
         app = build('pt')
         texts = {widget.cget('text') for widget in widgets(app.pages['performance'])
                  if isinstance(widget, ttk.Label)}
-        self.assertIn(table[launcher.NO_MSAA_HINT], texts)
+        # The hint is the row's help line (shown in the status bar on hover or focus).
+        hints = {getattr(widget, 'hint', None) for widget in widgets(app.pages['performance'])}
+        self.assertIn(table[launcher.NO_MSAA_HINT], hints)
         self.assertTrue(any(text.startswith(table['Game multisampling']) for text in texts))
         boxes = multisampling_boxes(app.pages['performance'], table['Off (fixes black lines)'])
         self.assertEqual(tuple(boxes[0]['values']),

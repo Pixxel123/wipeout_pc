@@ -46,6 +46,7 @@ if WINDOWS:
 FROZEN = getattr(sys, 'frozen', False)
 PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
+import display_info  # noqa: E402  (scripts/)
 import graphics_options  # noqa: E402  (scripts/)
 import online_host  # noqa: E402  (scripts/)
 import save_backup  # noqa: E402  (scripts/)
@@ -420,19 +421,19 @@ def heading_font(size, fallback=None, every_language=False):
 # launcher's own settings.json (passed to run.py as environment variables).
 
 INI_FLAGS = {'cheat_double_jumps', 'cheat_very_hard', 'object_motion', 'show_fps', 'vsync', 'async_shaders', 'deferred_readback',
-             'stale_readback', 'music', 'music_shuffle', 'music_continue'}
+             'stale_readback', 'music', 'music_shuffle', 'music_continue', 'rcas'}
 # The graphics keys are also in the in-game menu (Insert / R3+L2); run.py reads the startup ones.
-INI_DEFAULTS = {'upscaler': 'fsr3', 'preset': '0', 'dlss_preset': '0',
+INI_DEFAULTS = {'upscaler': 'fsr3', 'preset': '0', 'dlss_preset': '0', 'rcas': '1', 'rcas_strength': '75',
                 'object_motion': '1', 'show_fps': '1', 'output_res': '1920x1080',
                 'live_resolution': 'auto', 'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
                 'async_shaders': '1', 'deferred_readback': '1', 'stale_readback': '1',
-                'render_resolution': 'native', 'engine_fps': '120',
+                'render_resolution': 'display', 'render_scale': '100', 'engine_fps': '120',
                 'frames_queued': '1', 'cheat_very_hard': '0', 'cheat_double_jumps': '0',
                 'anisotropy': '0', 'vibration': '100', 'stick_deadzone': '0', 'mouse_prompt_distance': '48', 'mouse_lock': '1',
                 'mouse_aim_style': '0', 'mouse_aim_sensitivity': '100', 'music': '1', 'music_shuffle': '1', 'music_continue': '0',
                 'music_volume': '100', 'game_music_volume': '100'}
 DISPLAY_MODES = [('windowed', ('Windowed',)), ('borderless', ('Borderless',)), ('fullscreen', ('Fullscreen',))]
-ANISOTROPY = [('0', ('Game default',)), ('2', ('2x',)), ('4', ('4x',)), ('8', ('8x',)), ('16', ('16x',))]
+ANISOTROPY = [('0', ('Game (default)',)), ('2', ('2x',)), ('4', ('4x',)), ('8', ('8x',)), ('16', ('16x',))]
 FPS_LIMITS = [('30', ('30',)), ('40', ('40',)), ('60', ('60',)), ('100', ('100',)), ('120', ('120',)), ('144', ('144',)), ('165', ('165',)), ('240', ('240',)), ('0', ('Unlimited',))]
 # The sidebar's pages, top to bottom, and the methods that refresh a page's lists when it is shown.
 PAGES = ('home', 'graphics', 'performance', 'game', 'online', 'cheats', 'music', 'controls', 'mods', 'advanced')
@@ -770,19 +771,27 @@ UPSCALERS = [('fsr3', ('FSR 3.1 (every GPU)', 'FSR 3.1 (любая видеок�
              ('off', ('Off', 'Выключен'))]
 # WipEout's anti-aliasing (Graphics page): native size only, fed by the game's own motion vectors.
 # TAA reprojects with God of War III's camera and is left out.
-AA_CHOICES = [('off', ('Off',)), ('fsr3', ('FSR 3.1 (every GPU)',))]
-DLSS_CHOICE = ('dlss', ('DLAA (NVIDIA RTX)',))
-DLSS_PRESETS = [('0', ('Driver default (K)',)), ('11', ('K (transformer)',)),
+# The Graphics page's Upscaling list (upscaler_var; DLSS_CHOICE is added once installed), and its Anti-aliasing
+# list (anti_aliasing_var): the game's own multisampling or none, for when no upscaler runs.
+UPSCALING_CHOICES = [('off', ('Off',)), ('fsr3', ('AMD FSR 3.1',))]
+ANTI_ALIASING = [('msaa', ('MSAA (default)',)), ('off', ('Off',))]
+# The Graphics mode row: the ps4_pro setting as a choice.
+GRAPHICS_MODES = [('ps4', ('PS4 (default)',)), ('pro', ('PS4 Pro (experimental)',))]
+DLSS_CHOICE = ('dlss', ('NVIDIA DLSS',))
+DLSS_PRESETS = [('0', ('Driver (default)',)), ('11', ('K (transformer)',)),
                 ('13', ('M (transformer 2, DLSS 4.5)',)), ('12', ('L (transformer 2, cleanest, slowest)',)),
                 ('10', ('J (less ghosting, more flicker)',))]
 PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('Balanced (×1.7)',)),
            ('3', ('Performance (×2)',)), ('4', ('Ultra Performance (×3)',))]
 # The upscaling choice of the Anti-aliasing section (#51): the scene at 1/x of the render
 # resolution per axis, scaled up by FSR 3.1 or DLSS; the HUD stays at full size.
-UPSCALE_PRESETS = [('0', ('Off (full resolution)',)), ('1', ('Quality (scene at 1/1.5)',)),
-                   ('2', ('Balanced (scene at 1/1.7)',)), ('3', ('Performance (scene at 1/2)',))]
-OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
-           ('2560x1440', ('2560 × 1440',)), ('3840x2160', ('3840 × 2160 (4K)',))]
+UPSCALE_PRESETS = [('0', ('Native AA',)), ('1', ('Quality',)), ('2', ('Balanced',)), ('3', ('Performance',))]
+# The Sharpening row: the game's RCAS switch and strength as one choice (sharpening_var).
+SHARPENING = [('0', ('Off',)), ('25', ('25 %',)), ('50', ('50 %',)), ('75', ('75 % (default)',)), ('100', ('100 %',))]
+# What Restore defaults on the Graphics page puts back (applied on Save, like any change).
+GRAPHICS_INI_KEYS = ('display_mode', 'render_resolution', 'render_scale', 'fps_limit', 'vsync', 'upscaler', 'preset',
+                     'dlss_preset', 'rcas', 'rcas_strength', 'anisotropy')
+GRAPHICS_APP_KEYS = ('hdr', 'experimental_upscaler', 'texture_limit', 'ps4_pro')
 LIVE = [('auto', ('Auto (by graphics card)', 'Авто (по видеокарте)')), ('0', ('Off (faster)', 'Выключена (быстрее)')),
         ('1', ('On (change without restarting)', 'Включена (без перезапуска)'))]
 # (PS4 system language ID, name, regions): the game's own table (eboot.bin 0x9B89A0) only takes a
@@ -835,8 +844,7 @@ STREAM_MEMORY = [('cached', ('System RAM (cached, default)',)),
                  ('device', ('GPU memory (previous behavior)',))]
 FRAMES_QUEUED = [('1', ('1 (lowest latency)',)), ('2', ('2',)), ('0', ('Unlimited',))]
 # GOW3_TEXTURE_LIMIT (texture_cache.h LimitTextureSize): the largest textures load at most this big.
-TEXTURE_LIMITS = [('', ('Full (default)',)), ('4096', ('Medium (largest textures at 4096)',)),
-                  ('2048', ('Low (for 4 GB graphics cards)',))]
+TEXTURE_LIMITS = [('', ('Full (default)',)), ('4096', ('Medium',)), ('2048', ('Low',))]
 # The Cheats page: (setting, patch in the game's patch file, title, hint).
 CHEATS = (('cheat_events', 'Cheat - Unlock all HD and Fury events', 'Unlock all HD and HD Fury events',
            ('Every event of the HD and HD Fury campaigns is open; the campaign screen shows 99998 points. '
@@ -1487,6 +1495,13 @@ class Launcher:
         self.root = root
         self.app = {**APP_DEFAULTS, **migrate_controls(load_json(CONFIG_FILE, {}))}
         self.ini, self.ini_lines = load_ini()
+        from patches import game_title_id
+        title_id = game_title_id(self.app.get('game_dir')) if self.app.get('game_dir') else None
+        if not title_id or title_id in graphics_options.GENERATED_TITLES:
+            # An older Deck's (or Output resolution row's) 1280 x 720 output is the 1280 x 720 resolution,
+            # as run.py writes it into gow3.ini at the next start.
+            self.ini = graphics_options.legacy_low_output(self.ini)
+        display_info.this_display()  # the monitor's size for the Resolution list, read once at start
         self.vars = {}
         self.process = self.job = None
         self.output = queue.Queue()
@@ -1654,8 +1669,12 @@ class Launcher:
         s.map('TRadiobutton', background=[('active', PANEL)], indicatorcolor=[('selected', ACCENT)])
         s.configure('Warning.TLabel', background='#2a1414', foreground='#e0a0a0', padding=self.px((10, 6)))
         s.configure('TCombobox', arrowcolor=MUTED, foreground=TEXT, padding=self.px(4), arrowsize=self.px(14))
-        s.map('TCombobox', fieldbackground=[('readonly', CARD)], foreground=[('readonly', TEXT)],
-              selectbackground=[('readonly', CARD)], selectforeground=[('readonly', TEXT)])
+        # A disabled list (Quality without an upscaler) is greyed out, not drawn like an active one.
+        s.map('TCombobox', fieldbackground=[('disabled', PANEL), ('readonly', CARD)],
+              foreground=[('disabled', MUTED), ('readonly', TEXT)], arrowcolor=[('disabled', LINE)],
+              bordercolor=[('disabled', LINE)],
+              selectbackground=[('disabled', PANEL), ('readonly', CARD)],
+              selectforeground=[('disabled', MUTED), ('readonly', TEXT)])
         s.configure('TEntry', foreground=TEXT, insertcolor=TEXT, padding=self.px(4))
         s.configure('TSpinbox', foreground=TEXT, arrowcolor=MUTED, insertcolor=TEXT, padding=self.px(4),
                     arrowsize=self.px(10))
@@ -1767,20 +1786,30 @@ class Launcher:
             resolution.trace_add('write', resolution_chosen)
         return self.aspect
 
-    def game_resolution_options(self):
-        """The render resolutions with a patch for the chosen game (its profile's
-        GOW3_ALLOWED_RESOLUTIONS), else all built-in ones."""
+    def game_resolution_names(self):
+        """The render resolutions of the chosen game: those with a patch (its profile's
+        GOW3_ALLOWED_RESOLUTIONS, else all built-in ones) and those of the enabled mods."""
         import game_profiles
         from patches import game_title_id
         folder = self.var('game_dir', 'app').get()
         title_id = game_title_id(folder) if folder else None
-        allowed = game_profiles.PROFILES.get(title_id, {}).get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS')
-        if not allowed:
-            return RESOLUTION_CHOICES
-        names = allowed.split(';')
-        return [(n, t) for n, t in RESOLUTION_CHOICES if n in names] + \
-            [(n, (graphics_options.resolution_label(n),)) for n in names
-             if n not in dict(RESOLUTION_CHOICES)]
+        # No game chosen yet: WipEout's list, the game this launcher ships for.
+        profile = game_profiles.PROFILES.get(title_id or graphics_options.GENERATED_TITLES[0], {})
+        allowed = profile.get('env', {}).get('GOW3_ALLOWED_RESOLUTIONS')
+        names = allowed.split(';') if allowed else [n for n, _t in RESOLUTION_CHOICES]
+        return names + [n for n, _t in self.mod_resolutions() if n not in names]
+
+    def game_resolution_options(self):
+        """The Resolution list as a PC game's (graphics_options.resolution_choices): the monitor's size first
+        when the game has "display", then largest first and none above the monitor. The saved one stays."""
+        names = self.game_resolution_names()
+        saved = self.var('render_resolution', 'ini').get()
+        choices = [(n, (label,)) for n, label in
+                   graphics_options.resolution_choices(names, display_info.this_display(), keep=(saved,))]
+        if saved == graphics_options.DISPLAY and graphics_options.DISPLAY not in names:
+            # A game without "display" (God of War III) runs the default at its own size: shown first.
+            choices.sort(key=lambda choice: choice[0] != 'native')
+        return choices
 
     def aspect_options(self):
         """The aspect ratios the render resolutions have (built-in and mods)."""
@@ -1792,33 +1821,74 @@ class Launcher:
         options = dict(self.resolution_options())
         names = graphics_options.resolutions_for(self.aspect_var().get(), list(options))
         mod = ' (mod)'
-        return [(n, (graphics_options.resolution_label(n, aspect=False) + (mod if options[n][0].endswith(mod) else ''),))
+        return [(n, (graphics_options.resolution_label(n) + (mod if options[n][0].endswith(mod) else ''),))
                 for n in names]
 
     def next_row(self, parent):
         return parent.grid_size()[1]
 
     def title_cell(self, parent, title, restart=False):
-        """The name of a row; `restart` adds a mark: changing it needs a new start of the game."""
+        """The name of a row; `restart` adds a mark: changing it needs a new start of the game. The mark
+        shows only while the game runs: from the launcher, every setting applies at the next PLAY."""
         cell = self.ttk.Frame(parent)
         self.ttk.Label(cell, text=title).pack(side='left')
         if restart:
-            self.ttk.Label(cell, text=_('restart'), style='Restart.TLabel').pack(side='left', padx=self.px((8, 0)))
+            mark = self.ttk.Label(cell, text=_('restart'), style='Restart.TLabel')
+            self.__dict__.setdefault('restart_marks', []).append(mark)
+            if getattr(self, 'process', None):
+                mark.pack(side='left', padx=self.px((8, 0)))
         return cell
 
-    def row(self, parent, title, widget, hint=None, restart=False):
-        """Name on the left, control on the right, an optional note below."""
+    def show_restart_marks(self):
+        """The restart marks follow the game: shown while it runs, hidden otherwise."""
+        running = bool(getattr(self, 'process', None))
+        if running == getattr(self, 'restart_marks_shown', False):
+            return
+        self.restart_marks_shown = running
+        for mark in getattr(self, 'restart_marks', []):
+            if mark.winfo_exists():
+                mark.pack(side='left', padx=self.px((8, 0))) if running else mark.pack_forget()
+
+    def row(self, parent, title, widget, hint=None, restart=False, hover=True):
+        """Name on the left, control on the right. Its note shows in the status bar while the pointer or the
+        focus is on the row, as a game's help line; `hover=False` puts it under the row instead."""
         r = self.next_row(parent)
-        self.title_cell(parent, title, restart).grid(row=r, column=0, sticky='w', padx=self.px((0, 18)), pady=self.px((8, 0)))
+        cell = self.title_cell(parent, title, restart)
+        cell.grid(row=r, column=0, sticky='w', padx=self.px((0, 18)), pady=self.px((8, 0)))
         widget.grid(row=r, column=1, sticky='w', pady=self.px((5, 0)))
-        if hint:
+        if hint and hover:
+            cell.hint = hint  # what the help line shows for this row
+            self.hover_hint(hint, cell, widget)
+        elif hint:
             self.ttk.Label(parent, text=hint, style='Muted.TLabel', wraplength=self.px(640), justify='left').grid(
                 row=r + 1, column=0, columnspan=2, sticky='w', pady=self.px((1, 2)))
         return widget
 
-    def check(self, parent, key, store, title, hint=None, var=None, restart=False):
+    def hover_hint(self, hint, *widgets):
+        """The hint in the status bar while the pointer is over `widgets` or one has the focus (keyboard,
+        gamepad); the status bar's own text comes back after, unless something else changed it."""
+        def show(_e=None):
+            if getattr(self, 'hinted', None) is None:
+                self.hinted = (self.status['text'], self.status['fg'])
+            self.status.configure(text=hint, fg=MUTED)
+
+        def hide(_e=None):
+            if getattr(self, 'hinted', None) is not None and self.status['text'] == hint:
+                self.status.configure(text=self.hinted[0], fg=self.hinted[1])
+            self.hinted = None
+        def family(widget):  # a row's control can be a holder of several: each part shows the hint
+            yield widget
+            for child in widget.winfo_children():
+                yield from family(child)
+        for widget in [part for widget in widgets for part in family(widget)]:
+            for event in ('<Enter>', '<FocusIn>'):
+                widget.bind(event, show, add='+')
+            for event in ('<Leave>', '<FocusOut>'):
+                widget.bind(event, hide, add='+')
+
+    def check(self, parent, key, store, title, hint=None, var=None, restart=False, hover=True):
         box = self.ttk.Checkbutton(parent, variable=var if var is not None else self.var(key, store))
-        return self.row(parent, title, box, hint, restart)
+        return self.row(parent, title, box, hint, restart, hover)
 
     def note(self, parent, text, top=12):
         self.ttk.Label(parent, text=text, style='Muted.TLabel', wraplength=self.px(680), justify='left').grid(
@@ -1837,6 +1907,10 @@ class Launcher:
         amount.trace_add('write', show)
         show()
         return holder
+
+    def gap(self, parent, height=16):
+        """Space between groups of rows on a page that needs no headings."""
+        self.tk.Frame(parent, bg=PANEL, height=self.px(height)).grid(row=self.next_row(parent), column=0, columnspan=2)
 
     def section(self, parent, title, top=20):
         """A section heading with a line under it."""
@@ -1862,14 +1936,13 @@ class Launcher:
             var.trace_add('write', lambda *_a: on_change())
         return self.row(parent, title, holder, hint)
 
-    def scrolled_page(self, name, title, subtitle):
-        """A settings page: a heading and content that scrolls vertically."""
+    def scrolled_page(self, name, title):
+        """A settings page: its title and content that scrolls vertically."""
         tk, ttk = self.tk, self.ttk
         outer = ttk.Frame(self.content)
         head = ttk.Frame(outer, padding=self.px((28, 22, 28, 6)))
         head.pack(fill='x')
         ttk.Label(head, text=title.upper(), background=PANEL, foreground=TEXT, font=self.heading_font(20)).pack(anchor='w')
-        ttk.Label(head, text=subtitle, style='Muted.TLabel').pack(anchor='w')
         canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0, bd=0)
         bar = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
         inner = ttk.Frame(canvas, padding=self.px((28, 0, 28, 24)))
@@ -1935,7 +2008,6 @@ class Launcher:
         bar.pack(fill='x', side='bottom')
         bar.pack_propagate(False)
         self.status = tk.Label(bar, text='', bg=BG, fg=MUTED, font=self.font(UI_FONT, 10), anchor='w', justify='left')
-        self.status.pack(side='left', padx=self.px(24))
         self.play_button = ttk.Button(bar, text=_('PLAY', 'ИГРАТЬ'), style='Play.TButton', command=self.play)
         self.play_button.pack(side='right', padx=(self.px(10), self.px(24)), pady=self.px(11))
         self.save_button = ttk.Button(bar, text=_('Save', 'Сохранить'), command=self.save, state='disabled')
@@ -1944,10 +2016,16 @@ class Launcher:
             ttk.Button(bar, text=_('Check for updates', 'Проверить обновления'),
                        command=lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
                        ).pack(side='right', padx=self.px((0, 6)), pady=self.px(11))
+        # Packed after the bar's buttons, the status takes the room they leave and wraps to it: a setting's
+        # help line (hover_hint) can be longer than one line of the bar.
+        self.status.pack(side='left', fill='x', expand=True, padx=self.px((24, 12)))
+        self.status.bind('<Configure>', lambda e: self.status.configure(wraplength=max(self.px(200), e.width - 4)))
         self.content = tk.Frame(right, bg=PANEL)
         self.content.pack(fill='both', expand=True)
 
         self.pages = {}
+        self.restart_marks = []
+        self.restart_marks_shown = bool(self.process)
         self.build_home()
         self.build_graphics()
         self.build_performance()
@@ -2062,15 +2140,17 @@ class Launcher:
         ttk.Label(quick, text=_('Quick settings', 'Основное').upper(), style='Section.TLabel').grid(
             row=0, column=0, columnspan=4, sticky='w')
         tk.Frame(quick, bg=LINE, height=self.px(1)).grid(row=1, column=0, columnspan=4, sticky='we', pady=self.px((2, 6)))
-        # WipEout renders 1080p at 60 FPS: no engine frame rate or render resolution patches.
-        items = ((0, 0, _('Display mode'), 'display_mode', DISPLAY_MODES),
-                 (1, 0, _('Frame rate limit'), 'fps_limit', FPS_LIMITS),
-                 (0, 2, _('Frames queued'), 'frames_queued', FRAMES_QUEUED),
-                 (1, 2, _('Anisotropic filtering'), 'anisotropy', ANISOTROPY))
-        for row, c, title, key, options in items:
+        # What a player sets first, as a game's display menu: the Graphics page has the same rows.
+        items = ((0, 0, _('Display mode'), lambda: self.choice(quick, 'display_mode', 'ini', DISPLAY_MODES, width=18)),
+                 (1, 0, _('Resolution'), lambda: self.choice(quick, 'render_resolution', 'ini',
+                                                             self.game_resolution_options, width=18)),
+                 (0, 2, _('Upscaling'), lambda: self.choice(quick, None, None, self.upscaler_options, width=18,
+                                                            var=self.upscaler_var())),
+                 (1, 2, _('Frame rate limit'), lambda: self.choice(quick, 'fps_limit', 'ini', FPS_LIMITS, width=18)))
+        for row, c, title, box in items:
             r = 2 + row
             ttk.Label(quick, text=title).grid(row=r, column=c, sticky='w', pady=self.px(6), padx=self.px((0, 12)))
-            self.choice(quick, key, 'ini', options, width=18).grid(row=r, column=c + 1, sticky='w', padx=self.px((0, 40)))
+            box().grid(row=r, column=c + 1, sticky='w', padx=self.px((0, 40)))
 
     def draw_banner(self):
         """The cover art of the selected dump (sce_sys/pic0.png, else pic1.png) under the title."""
@@ -2119,107 +2199,231 @@ class Launcher:
             return self.banner_image.subsample(factor) if factor > 1 else self.banner_image
 
     def build_graphics(self):
-        """Window and overlay controls, render resolution and WipEout's anti-aliasing; God of War III's
-        upscaler presets stay commented out."""
-        f = self.scrolled_page('graphics', _('Graphics', 'Графика'), _('How the game appears on your screen.'))
-        self.build_display(f)
-        self.section(f, _('Resolution'))
-        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options()),
-                 _('Sizes with a resolution patch for this game. Wider than 16:9 keeps the HUD at 16:9.'),
+        """The Graphics page in a PC game's order, one list: display, upscaling, image quality. Each row's note shows
+        in the status bar while the pointer or the focus is on it, as a game's help line; only a warning
+        stays on the page."""
+        f = self.scrolled_page('graphics', _('Graphics', 'Графика'))
+        self.gap(f, 4)
+        self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
+                 _('Borderless covers the screen without changing the display mode.'))
+        self.row(f, _('Resolution'), self.choice(f, 'render_resolution', 'ini', self.game_resolution_options),
+                 _('The first size is your monitor\'s and follows it. Wider than 16:9 keeps the HUD at 16:9.'),
                  restart=True)
-        self.row(f, _('Output resolution', 'Разрешение вывода'), self.choice(f, 'output_res', 'ini', OUTPUTS),
-                 _('From 1920x1080 up it follows Render resolution, which sets how sharp the race is; Upscaling divides that.',
-                   'От 1920x1080 и выше следует разрешению рендера, которое задаёт чёткость гонки; апскейлинг делит его.'), restart=True)
-        self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
-                 _('Low loads the largest textures at half size or less: about 1 GB less video memory in a race. '
-                   'For graphics cards with 4 GB that crash or freeze in races.'), restart=True)
-        self.check(f, 'ps4_pro', 'app', _('PS4 Pro mode (experimental)'),
-                   _('The game runs as on a PS4 Pro, with its Pro graphics. Menus and a race start work; other events '
-                     'are not tested yet. Turn it off if something looks wrong.'), restart=True)
-        self.section(f, _('Anti-aliasing (experimental)'))
-        self.check(f, 'experimental_upscaler', 'app', _('Temporal anti-aliasing'),
-                   _('Off (default): the game\'s own image. On: FSR 3.1 or DLAA smooth edges at the render '
-                     'resolution, from the game\'s own motion vectors, in place of the game\'s multisampling. '
-                     'The method can also be changed while playing: in-game menu (Insert / R3+L2) > Image.'),
-                   restart=True)
-        # DLAA is listed once NVIDIA's runtime is installed (the list is asked again when it opens).
-        self.row(f, _('Method'), self.choice(f, 'upscaler', 'ini',
-                                             lambda: AA_CHOICES + ([DLSS_CHOICE] if dlss_installed() else [])),
+        self.row(f, _('Resolution scale'), self.choice(f, 'render_scale', 'ini', self.render_scale_options),
+                 _('Above 100 % draws a larger picture and scales it down to the screen: sharper, slower. With '
+                   'FSR 3.1 or DLSS on they draw below that size, as DLDSR with DLSS does.'), restart=True)
+        scale, resolution = self.var('render_scale', 'ini'), self.var('render_resolution', 'ini')
+        # The warning sits in a holder that keeps its grid row, so hiding it never lets the next row slide in.
+        holder = self.ttk.Frame(f)
+        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w')
+        heavy = self.ttk.Label(holder, text='', style='Warning.TLabel', wraplength=self.px(640), justify='left')
+
+        def scale_fits(*_args):
+            # A larger resolution can leave the chosen scale past 7680 × 4320: back to the largest that fits,
+            # as run.py would render it, so the box never shows a scale the game does not use.
+            offered = dict(self.render_scale_options())
+            if scale.get() not in offered:
+                scale.set(list(offered)[-1])
+                return
+            # The one note that stays on the page: a warning for a size past 3840 × 2160.
+            label = offered[scale.get()][0]
+            if label.endswith(graphics_options.HEAVY_MARK):
+                size = label.split(' · ')[-1].replace(graphics_options.HEAVY_MARK, '')
+                heavy.configure(text=_('⚠ {} needs more than 8 GB of video memory.').format(size))
+                heavy.pack(anchor='w', pady=self.px((4, 2)))
+            else:
+                heavy.pack_forget()
+        resolution.trace_add('write', scale_fits)
+        scale.trace_add('write', scale_fits)
+        scale_fits()
+        self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', 'ini', self.frame_rate_options),
+                 _("Unlimited: up to 240 FPS. With VSync on, your monitor's refresh rate is the highest it goes."))
+        self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'))
+        self.check(f, 'hdr', 'app', _('HDR'), _('When HDR is on in Windows and the display supports it.'))
+        # Upscaling, then image quality, as PC games with FSR and DLSS lay them out: the upscaler and its
+        # quality mode together, anti-aliasing for the game's own image when no upscaler runs. One list, a
+        # gap between the groups, no headings: the rows say what they are.
+        self.gap(f)
+        upscaler = self.upscaler_var()
+        self.row(f, _('Upscaling'), self.choice(f, None, None, self.upscaler_options, var=upscaler),
+                 _('FSR 3.1 and DLSS draw the race smaller and scale it up, smoothing edges from the game\'s own '
+                   'motion vectors: more FPS. The HUD and menus stay sharp. Also in the game: Insert > Image.'),
                  restart=True)
         if WINDOWS:
             self.build_dlss_row(f)
-        self.row(f, _('Upscaling'), self.choice(f, 'preset', 'ini', UPSCALE_PRESETS),
-                 _('Draws the race at a lower resolution and scales it up with the method above: more FPS, a '
-                   'softer picture. The HUD and menus stay sharp. Off: smooth edges only, at full resolution. '
-                   'Also in the game: Insert > Image.'))
-        # Only DLAA has presets; FSR 3.1 at native size has none (its quality modes choose
-        # an upscaling ratio). The row (title, box, note) hides with another method.
+        preset = self.var('preset', 'ini')
+        quality = self.row(f, _('Quality'), self.choice(f, 'preset', 'ini', self.quality_options),
+                           _('Native AA (DLAA with DLSS) keeps the full resolution and only smooths edges. Quality, '
+                             'Balanced and Performance draw the race at 67, 59 and 50 % of it for more FPS.'))
+        # Only DLSS has presets. The row (title, box) hides with another upscaler.
         first = self.next_row(f)
-        self.row(f, _('DLAA preset'), self.choice(f, 'dlss_preset', 'ini', DLSS_PRESETS),
-                 _('K is the driver\'s default for DLAA. M and L are the newer second-generation '
-                   'models; L costs a few percent more.'), restart=True)
+        self.row(f, _('DLSS preset'), self.choice(f, 'dlss_preset', 'ini', DLSS_PRESETS),
+                 _('K is the driver\'s default. M and L are the newer second-generation models; L costs a few '
+                   'percent more.'), restart=True)
         preset_widgets = [w for r in range(first, self.next_row(f)) for w in f.grid_slaves(row=r)]
-        method = self.var('upscaler', 'ini')
+        self.row(f, _('Sharpening'), self.choice(f, None, None, SHARPENING, var=self.sharpening_var()),
+                 _("Sharpens the final image (AMD RCAS). No effect while the game's picture is scaled to a window "
+                   'of another size. Also in the game: Insert > Image.'))
+        self.gap(f)
+        aa = self.anti_aliasing_var()
+        anti_aliasing = self.row(f, _('Anti-aliasing'), self.choice(f, None, None, self.anti_aliasing_options, var=aa),
+                                 _('The game\'s own multisampling, or none. With FSR 3.1 or DLSS on, they smooth the '
+                                   'edges instead.'), restart=True)
 
-        def preset_visible(*_args):
+        def follow_upscaler(*_args):
+            on = upscaler.get() != 'off'
+            quality.configure(state='readonly' if on else 'disabled')
+            if on:
+                preset.set(preset.get())  # the box shows the saved quality again (DLAA or Native AA)
+            else:
+                quality.set(_('Off'))  # as a game shows a quality setting that does not apply
+            anti_aliasing.configure(state='disabled' if on else 'readonly')
             for widget in preset_widgets:
-                widget.grid() if method.get() == 'dlss' and dlss_installed() else widget.grid_remove()
-        method.trace_add('write', preset_visible)
-        self.dlss_preset_visible = preset_visible
-        preset_visible()
-        # Temporal upscaling is parked until its image quality is validated.
-        # self.section(f, _('Experimental'))
-        # self.check(f, 'experimental_upscaler', 'app', _('Enable the upscaler (experimental)'),
-        #            _('Off (default): the game runs without temporal upscaling; FSR 3.1 and TAA need this switch on. '
-        #              'FSR 3.1 is not calibrated for this game yet: expect ghosting or flicker. The remaining options require this switch; '
-        #              'leave it off for normal gameplay.',
-        #              'Выкл. (по умолчанию): игра без временного апскейлинга; FSR 3.1 и TAA нужен этот переключатель. '
-        #              'FSR 3.1 ещё не откалиброван для этой игры: возможны гостинг и мерцание.'), restart=True)
-        # self.section(f, _('Upscaling', 'Апскейлинг'))
-        # self.row(f, _('Upscaler', 'Апскейлер'), self.choice(f, 'upscaler', 'ini', UPSCALERS))
-        # self.row(f, _('Quality preset', 'Пресет'), self.choice(f, 'preset', 'ini', PRESETS),
-        #          _('Render scale per axis: Quality renders at 1/1.5 of the output size.',
-        #            'Масштаб рендера по каждой оси: Quality рисует в 1/1.5 размера вывода.'))
-        # self.row(f, _('Live resolution changes', 'Смена разрешения на лету'), self.choice(f, 'live_resolution', 'ini', LIVE),
-        #          _('Off: outputs other than 1080p are set by a patch at start (fastest; changing them in the '
-        #            'game restarts it). On: change output and preset in the game without a restart, at a cost.',
-        #            'Выкл.: разрешения кроме 1080p задаются патчем при запуске (быстрее). Вкл.: менять в игре '
-        #            'без перезапуска, но медленнее.'))
-        # self.check(f, 'object_motion', 'ini', _('Object motion vectors', 'Векторы движения объектов'),
-        #            _('Less ghosting on characters, cloth and weapons; costs about 10% FPS.',
-        #              'Меньше гостинга на персонажах и одежде; стоит около 10% FPS.'))
-
-    def build_display(self, f):
-        """Window and overlay: the top of the Graphics page."""
-        self.section(f, _('Window', 'Окно'), top=4)
-        self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
-                 _('Borderless covers the screen without changing the display mode.'))
-        self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'))
-        self.check(f, 'hdr', 'app', _('Allow HDR output', 'Разрешить HDR'),
-                   _('When HDR is on in Windows and the display supports it.',
-                     'Если HDR включён в Windows и монитор его поддерживает.'))
-        self.section(f, _('Textures'))
+                widget.grid() if upscaler.get() == 'dlss' and dlss_installed() else widget.grid_remove()
+        upscaler.trace_add('write', follow_upscaler)
+        self.dlss_preset_visible = follow_upscaler
+        follow_upscaler()
+        self.row(f, _('Texture quality'), self.choice(f, 'texture_limit', 'app', TEXTURE_LIMITS),
+                 _('Medium loads the largest textures at 4096 at most, Low at half size or less: about 1 GB less '
+                   'video memory in a race, for graphics cards with 4 GB that crash or freeze in races.'),
+                 restart=True)
         self.row(f, _('Anisotropic filtering'), self.choice(f, 'anisotropy', 'ini', ANISOTROPY),
                  _('Sharper floors and walls seen at an angle, at little cost on most graphics cards.'),
                  restart=True)
-        self.section(f, _('Overlay'))
-        self.check(f, 'show_fps', 'ini', _('Show performance overlay'),
-                   _('Items, size and corner: in-game menu (Insert / R3+L2) > Overlay.'))
-        self.section(f, _('Screenshots'))
-        shots = self.ttk.Button(f, text=_('Open the screenshots folder'),
-                           command=lambda: self.open_path(
-                               Path(self.var('user_dir', 'app').get() or DATA_DIR / 'user') / 'screenshots'))
-        self.row(f, _('F12 in the game'), shots,
-                 _("Saves the game's image, without the overlay, as a PNG in the screenshots folder of the saves."))
-        self.check(f, 'photo_flare', 'app', _('Lens flare in photo mode'),
-                   _("Off: no colour flare over the ship and its exhaust in the game's photo mode."),
-                   restart=True)
+        self.row(f, _('Graphics mode'), self.choice(f, None, None, GRAPHICS_MODES, var=self.graphics_mode_var()),
+                 _('PS4 Pro runs the game with its Pro graphics. Menus and a race start work; other events are not '
+                   'tested yet. Switch back if something looks wrong.'), restart=True)
+        restore = self.ttk.Button(f, text=_('Restore defaults'), command=self.restore_graphics_defaults)
+        restore.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((18, 4)))
+        self.hover_hint(_('Puts every setting on this page back to its default. Save keeps them.'), restore)
+
+    def restore_graphics_defaults(self):
+        """Restore defaults on the Graphics page: its settings back to their defaults, kept on Save."""
+        for key in GRAPHICS_INI_KEYS:
+            var = self.var(key, 'ini')
+            value = INI_DEFAULTS[key]
+            var.set(value == '1' if key in INI_FLAGS else value)
+        for key in GRAPHICS_APP_KEYS:
+            self.var(key, 'app').set(APP_DEFAULTS[key])
+
+    def quality_options(self):
+        """The Quality list: its first entry is DLAA with DLSS, Native AA with FSR 3.1, as the makers call it."""
+        dlss = getattr(self, 'upscaler_choice', None) is not None and self.upscaler_choice.get() == 'dlss'
+        return [('0', ('DLAA',))] + UPSCALE_PRESETS[1:] if dlss else UPSCALE_PRESETS
+
+    def frame_rate_options(self):
+        """The Frame rate limit list; the entry equal to the display's refresh rate says so."""
+        hz = str(display_info.this_refresh() or '')
+        return [(value, (_('{} · refresh rate').format(text[0]),) if value == hz else text) for value, text in FPS_LIMITS]
+
+    def linked_var(self, name, shown, chosen, *sources):
+        """The variable of a list that is not a setting itself (kept as self.<name>, made once): it shows
+        `shown()` of the saved `sources` and follows them; choosing an entry calls `chosen(value)`, which
+        sets the sources. A choice the sources do not take is put back."""
+        if getattr(self, name, None) is None:
+            var = self.tk.StringVar(value=shown())
+
+            def follow(*_args):
+                if var.get() != shown():
+                    var.set(shown())
+
+            def choose(*_args):
+                chosen(var.get())
+                follow()
+            var.trace_add('write', choose)
+            for source in sources:
+                source.trace_add('write', follow)
+            setattr(self, name, var)
+        return getattr(self, name)
+
+    def sharpening_var(self):
+        """Sharpening: Off is the game's RCAS switch off, a percent turns it on at that strength. A strength
+        the list lacks (set in the game) is shown as it is."""
+        on, strength = self.var('rcas', 'ini'), self.var('rcas_strength', 'ini')
+
+        def chosen(value):
+            if on.get() != (value != '0'):
+                on.set(value != '0')
+            if value != '0' and str(strength.get()) != value:
+                strength.set(value)
+        return self.linked_var('sharpening', lambda: str(strength.get()) if on.get() else '0', chosen, on, strength)
+
+    def graphics_mode_var(self):
+        """The Graphics mode row over the ps4_pro switch."""
+        pro = self.var('ps4_pro', 'app')
+        return self.linked_var('graphics_mode', lambda: 'pro' if pro.get() else 'ps4',
+                               lambda value: pro.get() == (value == 'pro') or pro.set(value == 'pro'), pro)
+
+    def upscaler_options(self):
+        """The Upscaling list; DLSS once NVIDIA's runtime is installed (asked again when it opens)."""
+        choices = UPSCALING_CHOICES + ([DLSS_CHOICE] if dlss_installed() else [])
+        # A saved method the list lacks (an older build's, DLSS without its file) is shown as it is.
+        saved = self.var('upscaler', 'ini').get()
+        if self.var('experimental_upscaler', 'app').get() and saved not in dict(choices):
+            choices = choices + [(saved, (saved.upper(),))]
+        return choices
+
+    def anti_aliasing_options(self):
+        """The Anti-aliasing list; while an upscaler runs, its name too (the row is greyed out then)."""
+        upscaler = self.upscaler_var().get()
+        return ANTI_ALIASING + ([(upscaler, dict(self.upscaler_options()).get(upscaler, (upscaler,)))]
+                                if upscaler != 'off' else [])
+
+    def temporal_vars(self):
+        """The two settings the Upscaling and Anti-aliasing rows show: the launcher's switch that lets the
+        game's temporal methods run (experimental_upscaler) and the method (gow3.ini upscaler)."""
+        return self.var('experimental_upscaler', 'app'), self.var('upscaler', 'ini')
+
+    def upscaler_var(self):
+        """Upscaling: FSR 3.1 or DLSS turns the switch on with that method; Off leaves anti-aliasing to the
+        Anti-aliasing row."""
+        switch, method = self.temporal_vars()
+
+        def chosen(value):
+            if value == 'off':
+                if switch.get() and method.get() != 'off':
+                    switch.set(False)  # back to the game's own anti-aliasing, as a PC game turns its upscaler off
+                return
+            was_off = not switch.get() or method.get() == 'off'
+            if not switch.get():
+                switch.set(True)
+            if method.get() != value:
+                method.set(value)
+            preset = self.var('preset', 'ini')
+            if was_off and preset.get() == '0':
+                # Turned on from Off: at Quality, as games turn DLSS and FSR on, for more FPS straight
+                # away; Native AA stays a choice.
+                preset.set('1')
+        return self.linked_var('upscaler_choice', lambda: method.get() if switch.get() and method.get() != 'off' else 'off',
+                               chosen, switch, method)
+
+    def anti_aliasing_var(self):
+        """Anti-aliasing: the game's own multisampling (the switch off) or none (the switch on with no
+        method). While an upscaler runs it shows that upscaler and a choice does nothing."""
+        switch, method = self.temporal_vars()
+
+        def chosen(value):
+            if switch.get() and method.get() != 'off':
+                return  # an upscaler runs: the row only shows it
+            if value == 'msaa' and switch.get():
+                switch.set(False)
+            elif value == 'off' and not switch.get():
+                method.set('off')
+                switch.set(True)
+        return self.linked_var('anti_aliasing', lambda: method.get() if switch.get() else 'msaa', chosen, switch, method)
+
+    def render_scale_options(self):
+        """The Resolution scale list: 100, 150 and 200 % while the result stays within 7680 × 4320; 100 %
+        alone for a game without "display" (run.py scales WipEout only)."""
+        name = self.var('render_resolution', 'ini').get()
+        base = graphics_options.shown_size(name, display_info.this_display())
+        offered = graphics_options.DISPLAY in self.game_resolution_names()
+        return [(value, (label,)) for value, label in graphics_options.render_scale_choices(base, offered)]
 
     def build_performance(self):
-        f = self.scrolled_page('performance', _('Performance'), _('Frame rate and speed options.'))
-        self.section(f, _('Frame rate', 'Частота кадров'), top=4)
-        self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', 'ini', FPS_LIMITS),
-                 _("Unlimited: up to 240 FPS. With VSync on, your monitor's refresh rate is the highest it goes."))
+        f = self.scrolled_page('performance', _('Performance'))
+        # Frame rate limit is on the Graphics page, next to VSync.
+        self.gap(f, 4)
         self.check(f, 'menu_fps_cap', 'app', _('Menus at 60 FPS'),
                    _('On: the menus and the pause menu run at 60 FPS like on PS4. Off: at the frame rate limit '
                      '(some menu animations then run faster).'))
@@ -2228,7 +2432,7 @@ class Launcher:
                      'half as often, as it does with two players. Off: always at the full rate.'))
         self.row(f, _('Frames queued'), self.choice(f, 'frames_queued', 'ini', FRAMES_QUEUED),
                  _('1 is the lowest input latency; more can raise FPS when the graphics card is the limit.'))
-        self.section(f, _('Shaders'))
+        self.gap(f)
         self.check(f, 'pipeline_binary_cache', 'app', _('Use pipeline binary cache (A/B test)'),
                    _('Reuse saved Vulkan pipelines. Disable to compare FPS with normal compilation. '
                      'Takes effect on the next launch; saved caches are preserved.'))
@@ -2241,7 +2445,7 @@ class Launcher:
                      'or effect may appear a moment later. Switch it off if something stays missing.'))
         self.check(f, 'parallel_warmup', 'app', _('Fast shader cache loading (parallel)'),
                    _('Loading screen only: builds the cached pipelines on several CPU threads.'))
-        self.section(f, _('GPU data'))
+        self.gap(f)
         gpus = list_gpus()
         cards = [('', ('Automatic',))] + [(row[0], (row[1],)) for row in gpus]
         self.row(f, _('Graphics card'), self.choice(f, 'gpu_id', 'app', cards),
@@ -2276,15 +2480,15 @@ class Launcher:
 
     def build_cheats(self):
         """Cheats: game patches that open parts of the game while they are on (CHEATS)."""
-        f = self.scrolled_page('cheats', _('Cheats'), _('Open parts of the game without playing for them. Your saves keep your own progress.'))
-        self.section(f, _('Unlocks'), top=4)
+        f = self.scrolled_page('cheats', _('Cheats'))
+        self.gap(f, 4)
         for key, _patch, title, hint in CHEATS:
             self.check(f, key, 'app', _(title), _(hint), restart=True)
         self.note(f, _('Not yet: the 2049 and 2050 cups of 2048 (they open when you finish the cup before them).'))
 
     def build_game(self):
-        f = self.scrolled_page('game', _('Game', 'Игра'), _('Your game dump, saves and the game patches.'))
-        self.section(f, _('Folders'), top=4)
+        f = self.scrolled_page('game', _('Game', 'Игра'))
+        self.gap(f, 4)
         self.folder(f, 'game_dir', _('Game folder', 'Папка игры'),
                     _('Choose the folder with eboot.bin', 'Выберите папку с eboot.bin'),
                     _('Your own dump of the game (eboot.bin, sce_module, sce_sys): WipEout Omega Collection, '
@@ -2303,9 +2507,9 @@ class Launcher:
         self.folder(f, 'savedata_dir', _('Save data folder (optional)'), _('Choose the save data folder'),
                     _('Only the saves, in a folder of their own: for example a network share two PCs play '
                       'from (not both at once). Empty: savedata in the saves folder.'), on_change=self.refresh_status)
-        self.section(f, _('Saves'))
+        self.gap(f)
         self.build_save_backups(f)
-        self.section(f, _('Language'))
+        self.gap(f)
         self.row(f, _('Game language', 'Язык игры'), self.choice(f, 'language', 'app',
                                                                   lambda: game_languages(self.meta_dir())))
         name = self.ttk.Entry(f, textvariable=self.var('player_name', 'app'), width=20, validate='key',
@@ -2328,6 +2532,17 @@ class Launcher:
                  _("The highest target of the Eliminator slider in the race setup (the game's own: 600 points).",
                    'Наибольшая цель ползунка Eliminator в настройке гонки (в самой игре: 600 очков).'),
                  restart=True)
+        self.gap(f)
+        self.check(f, 'show_fps', 'ini', _('Show performance overlay'),
+                   _('Items, size and corner: in-game menu (Insert / R3+L2) > Overlay.'))
+        shots = self.ttk.Button(f, text=_('Open the screenshots folder'),
+                                command=lambda: self.open_path(
+                                    Path(self.var('user_dir', 'app').get() or DATA_DIR / 'user') / 'screenshots'))
+        self.row(f, _('F12 in the game'), shots,
+                 _("Saves the game's image, without the overlay, as a PNG in the screenshots folder of the saves."))
+        self.check(f, 'photo_flare', 'app', _('Lens flare in photo mode'),
+                   _("Off: no colour flare over the ship and its exhaust in the game's photo mode."),
+                   restart=True)
 
     def savedata_dir(self):
         return Path(self.var('savedata_dir', 'app').get() or self.user_dir() / 'savedata')
@@ -2338,7 +2553,7 @@ class Launcher:
     def build_online(self):
         """The Online switch; on, PLAY hosts or joins (scripts/online_host.py, docs/online-multiplayer.md)."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('online', _('Online', 'Онлайн'), _('Races with other players over the internet.'))
+        f = self.scrolled_page('online', _('Online', 'Онлайн'))
         enabled = self.var('online_enabled', 'app')
         self.check(f, 'online_enabled', 'app', _('Play online', 'Играть онлайн'),
                    _("Off: the game plays offline. On: PLAY connects it, and its ONLINE menu works."))
@@ -2511,8 +2726,8 @@ class Launcher:
         """Your own music: a guide, the folder, the switches (gow3.ini, also in the in-game Music tab)
         and the songs found."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('music', _('Music'), _("Play your own songs in the game instead of its music."))
-        self.section(f, _('How it works'), top=4)
+        f = self.scrolled_page('music', _('Music'))
+        self.gap(f, 4)
         self.note(f, _("1. Put your songs in the music folder below: MP3, OGG, FLAC, WAV or M4A. Subfolders are fine.\n"
                        "2. Click PLAY. Your songs play in menus and races instead of the game's music. The sound "
                        "effects stay. Set how loud with Music volume below.\n"
@@ -2522,7 +2737,7 @@ class Launcher:
                        "menus, and the other songs play in races."), top=8)
         self.note(f, _("Mode songs: songs in subfolders named zone, eliminator or detonator play only in that "
                        "mode. A mode without its own folder plays the race songs."), top=4)
-        self.section(f, _('Settings'))
+        self.gap(f)
         self.folder(f, 'music_dir', _('Music folder'), _('Choose your music folder'),
                     _('Empty: the music folder next to your saves.'), on_change=self.refresh_music)
         self.check(f, 'music', 'ini', _('Play my music'), _("Off: the game's own music, even with songs in the folder."))
@@ -2657,8 +2872,7 @@ class Launcher:
         """Loose-file mods layered over the game at start: the switch, the load order with a details
         panel for the selected mod, presets, third-party patches and the folders."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('mods', _('Mods', 'Моды'),
-                               _('Change textures, sounds and text. Your game files stay untouched.', 'Меняйте текстуры, звуки и тексты. Файлы игры не изменяются.'))
+        f = self.scrolled_page('mods', _('Mods', 'Моды'))
         top = ttk.Frame(f)
         top.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=self.px((14, 0)))
         ttk.Checkbutton(top, text=_('Load mods', 'Загружать моды'), variable=self.var('mods_enabled', 'app')).pack(side='left')
@@ -2698,7 +2912,7 @@ class Launcher:
                               (_('Delete', 'Удалить'), self.delete_mod_preset)):
             ttk.Button(presets, text=text, command=command).pack(side='left', padx=self.px((6, 0)))
         self.build_third_party_patches(f)
-        self.section(f, _('Folders'), top=28)
+        self.gap(f, 24)
         self.folder(f, 'mods_dir', _('Mods folder', 'Папка модов'), _('Choose the mods folder', 'Выберите папку модов'),
                     on_change=self.refresh_lists)
         self.folder(f, 'patches_dir', _('Patches folder', 'Папка патчей'), _('Choose the patches folder', 'Выберите папку патчей'),
@@ -2708,8 +2922,7 @@ class Launcher:
         """The Controls page: the keyboard & mouse table, button icons and the gamepad remapping of
         the PS4 buttons (run.py passes GOW3_KEY_MAP and GOW3_PAD_MAP to the game)."""
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('controls', _('Controls', 'Управление'),
-                               _('Keyboard and mouse, button icons and gamepad mapping.'))
+        f = self.scrolled_page('controls', _('Controls', 'Управление'))
         saved = {kind: control_values(self.app.get('controls'), kind) for kind in ('key', 'pad')}
         style = self.app.get('pad_style') if self.app.get('pad_style') in PAD_STYLES else 'playstation'
         self.pad_style = tk.StringVar(value=style)
@@ -2757,7 +2970,6 @@ class Launcher:
         f.grid(row=self.next_row(page), column=0, columnspan=2, sticky='we')
         f.columnconfigure(1, weight=1)
         self.section(f, _('Keyboard & Mouse Mapping'), top=12)
-        self.note(f, _('Which key or mouse input presses each button of the game.'), top=4)
         table = mapping_table()
         r = 0
         for row in CONTROLS:
@@ -2787,7 +2999,6 @@ class Launcher:
         f.grid(row=self.next_row(page), column=0, columnspan=2, sticky='we')
         f.columnconfigure(1, weight=1)
         self.section(f, _('Gamepad Mapping'), top=12)
-        self.note(f, _('Which gamepad button presses each button of the game.'), top=4)
         names = ttk.Frame(f)
         for value in PAD_STYLES:
             ttk.Radiobutton(names, text=PAD_STYLE_NAMES[value], value=value, variable=self.pad_style,
@@ -2955,7 +3166,7 @@ class Launcher:
     def build_linux_options(self, f):
         """Wayland / X11, GameMode and MangoHud: only the ones this system has can be turned on."""
         tools = linux_tools()
-        self.section(f, _('Linux'), top=4)
+        self.gap(f, 4)
         self.check(f, 'desktop_integration', 'app', _('Menu entry and icon (AppImage)'),
                    _('Creates gow3.desktop in ~/.local/share/applications so the launcher and the game show their '
                      'icon in the dock and the menu. Turning it off removes the entry.'))
@@ -2973,9 +3184,8 @@ class Launcher:
 
     def build_advanced(self):
         tk, ttk = self.tk, self.ttk
-        f = self.scrolled_page('advanced', _('Advanced', 'Дополнительно'),
-                               _('Launcher options, files and diagnostics.'))
-        self.section(f, _('Launcher', 'Лаунчер'), top=4)
+        f = self.scrolled_page('advanced', _('Advanced', 'Дополнительно'))
+        self.gap(f, 4)
         self.row(f, _('Launcher language', 'Язык лаунчера'), self.choice(f, 'ui_language', 'app', UI_LANGUAGES),
                  _('Applies when the launcher opens again.', 'Применится при следующем открытии лаунчера.'))
         self.row(f, _('GUI Scale'), self.choice(f, 'ui_scale', 'app', UI_SCALES),
@@ -2998,6 +3208,8 @@ class Launcher:
         ttk.Label(holder, text=f'v{VERSION}', style='Muted.TLabel').pack(side='left', padx=self.px(10))
         if not WINDOWS:
             self.build_linux_options(f)
+        # No Output resolution row: in WipEout every output from 1920 × 1080 up follows the Resolution, and
+        # the one that matters, 1280 × 720 on the Steam Deck, is set by itself (load_ini, write_deck_defaults).
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=self.px((6, 0)))
@@ -3025,7 +3237,7 @@ class Launcher:
         self.check(body, 'frame_capture_key', 'app', _('F11 captures a frame for analysis'),
                    _('Records how the next frame is drawn into the captures folder.'))
         self.check(body, 'upscaler_key', 'app', _('F10 switches the anti-aliasing (off, FSR 3.1, DLAA)'),
-                   _('For comparing them in the same scene. Needs Graphics > Temporal anti-aliasing on; '
+                   _('For comparing them in the same scene. Needs Graphics > Anti-aliasing on FSR 3.1 or DLSS; '
                      'DLAA only where the game found DLSS working.'))
         self.check(body, 'vk_validation', 'app', _('Vulkan validation layers (needs the Vulkan SDK; much slower)',
                                                    'Слои валидации Vulkan (нужен Vulkan SDK; сильно замедляет)'))
@@ -3088,7 +3300,8 @@ class Launcher:
         self.store_game_patches()
         title_id, _profile = game_profile_of(self.meta_dir())
         names = self.app.get('game_patches', {}).get(title_id) or []
-        resolution = dict((v, _(*t)) for v, t in self.resolution_options()).get(self.var('render_resolution', 'ini').get(), '?')
+        choices = self.resolution_options() + self.game_resolution_options()
+        resolution = dict((v, _(*t)) for v, t in choices).get(self.var('render_resolution', 'ini').get(), '?')
         from patches import game_patchable, patch_status
         if not game_patchable(self.meta_dir()):
             return _('{} · 60 FPS · no patches for this game').format(resolution)
@@ -3441,6 +3654,7 @@ class Launcher:
 
     def watch_changes(self):
         self.refresh_save_button()
+        self.show_restart_marks()
         self.root.after(500, self.watch_changes)
 
     # ---- game process ------------------------------------------------------------------------
@@ -3839,12 +4053,12 @@ class Launcher:
                 if error:
                     self.messagebox.showerror(APP_NAME, _('Could not download NVIDIA DLSS: {}').format(error))
                     return
-                # DLAA needs the temporal anti-aliasing switch: both are set, Save keeps them.
+                # Anti-aliasing goes to DLSS (the switch and the method): Save keeps them.
                 self.var('experimental_upscaler', 'app').set(True)
                 self.var('upscaler', 'ini').set('dlss')
                 self.dlss_preset_visible()
-                self.messagebox.showinfo(APP_NAME, _('NVIDIA DLSS is installed. Temporal anti-aliasing is on with '
-                                                     'DLAA: click Save, then PLAY.'))
+                self.messagebox.showinfo(APP_NAME, _('NVIDIA DLSS is installed. Anti-aliasing is set to '
+                                                     'DLSS: click Save, then PLAY.'))
             self.ui_calls.put(finished)
         threading.Thread(target=work, daemon=True).start()
 

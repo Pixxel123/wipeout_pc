@@ -545,14 +545,27 @@ void PerformanceTab() {
     }
     ImGui::SeparatorText("Applied on restart");
     if (BeginRows("##restart")) {
-        // The built-in sizes, then those of the enabled mods' patch files (ultrawide, for one).
-        const std::vector<std::string> resolution_names = G::ResolutionNames();
+        // The built-in sizes and those of the enabled mods' patch files (ultrawide, for one), listed as
+        // the launcher lists them (run.py says how): the monitor's size first, then largest first.
+        const std::vector<G::ResolutionChoice> resolutions = G::ResolutionChoices(G::ResolutionNames(), s.render_resolution);
         std::vector<const char*> resolution_labels;
-        for (const auto& name : resolution_names) {
-            resolution_labels.push_back(G::ResolutionLabel(name));
+        std::vector<int> resolution_values;
+        for (const auto& choice : resolutions) {
+            resolution_labels.push_back(choice.label.c_str());
+            resolution_values.push_back(choice.index);
         }
-        ChoiceRow("Render resolution", s.render_resolution, resolution_labels.data(), nullptr,
-                  int(resolution_labels.size()), "The resolution the game draws at. Higher is sharper and slower.");
+        ChoiceRow("Resolution", s.render_resolution, resolution_labels.data(), resolution_values.data(),
+                  int(resolution_labels.size()),
+                  "The first size is your monitor's and follows it. Higher is sharper and slower.");
+        // Only where run.py applies a scale (WipEout), and only the scales that fit.
+        if (const std::vector<int> scales = G::RenderScaleChoices(); scales.size() > 1) {
+            std::vector<std::string> scale_texts;
+            for (const int scale : scales) scale_texts.push_back(std::to_string(scale) + " %");
+            std::vector<const char*> scale_labels;
+            for (const auto& text : scale_texts) scale_labels.push_back(text.c_str());
+            ChoiceRow("Resolution scale", s.render_scale, scale_labels.data(), scales.data(), int(scales.size()),
+                      "Above 100 % draws a larger picture and scales it down to the screen: sharper, slower.");
+        }
         static const char* const engine_labels[] = {"60 (original)", "100", "120", "240"};
         ChoiceRow("Engine frame rate", s.engine_fps, engine_labels, G::EngineFps.data(), int(G::EngineFps.size()),
                   "The highest frame rate the game itself runs at.");
@@ -705,9 +718,22 @@ void MusicTab() {
 // Startup options changed since this launch (applied by "Apply and restart").
 int RestartChanges() {
     const auto& s = Gow3Settings::Get();
-    return (s.render_resolution != s.startup_render_resolution) + (s.engine_fps != s.startup_engine_fps) +
+    return (s.render_resolution != s.startup_render_resolution) + (s.render_scale != s.startup_render_scale) +
+           (s.engine_fps != s.startup_engine_fps) +
            (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback) +
            (s.anisotropy != s.startup_anisotropy);
+}
+
+// "Revert": the settings applied on restart back to what this launch started with, as a game's Revert.
+void RevertRestartChanges() {
+    auto& s = Gow3Settings::Get();
+    s.render_resolution = s.startup_render_resolution;
+    s.render_scale = s.startup_render_scale;
+    s.engine_fps = s.startup_engine_fps;
+    s.deferred_readback = s.startup_deferred_readback;
+    s.stale_readback = s.startup_stale_readback;
+    s.anisotropy = s.startup_anisotropy;
+    dirty = true;
 }
 
 void Menu() {
@@ -790,6 +816,9 @@ void Menu() {
             runtime_restart();
         }
         ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Revert")) RevertRestartChanges();
+        Help("Puts these settings back to what this launch started with.");
     } else {
         ImGui::NewLine();
     }

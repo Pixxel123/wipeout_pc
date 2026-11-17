@@ -116,6 +116,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.frames_queued = Gow3Graphics::ParseFramesQueued(value.empty() ? -1 : i);
     } else if (key == "render_resolution") {
         v.render_resolution = Gow3Graphics::ParseResolution(value);
+    } else if (key == "render_scale") {
+        v.render_scale = Gow3Graphics::ParseRenderScale(i);
     } else if (key == "engine_fps") {
         v.engine_fps = Gow3Graphics::ParseEngineFps(i);
     } else if (key == "deferred_readback") {
@@ -188,6 +190,9 @@ Values& Get() {
 
 void Load() {
     auto& v = Get();
+    // A gow3.ini without render_resolution: the monitor's size where the game lists it (WipEout), as
+    // run.py does (graphics_options.DEFAULTS), else the game's own size.
+    v.render_resolution = Gow3Graphics::ParseResolution("display");
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
         while (std::fgets(line, sizeof(line), file)) {
@@ -203,6 +208,14 @@ void Load() {
         std::printf("Settings: %s\n", Path());
     }
     // Environment overrides (scripts, A/B tests).
+    // run.py's output size (WipEout): 1280x720 below the game's own size (the Resolution list's 1280 x 720,
+    // a Steam Deck's screen), else 1920x1080, which follows the render resolution. Over gow3.ini's output_res.
+    if (const char* env = std::getenv("GOW3_OUTPUT_SIZE"); env && env[0]) {
+        for (int r = 0; r < OutputCount; ++r) {
+            if (std::string(env) == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r]))
+                v.output_res = r;
+        }
+    }
     if (const char* env = std::getenv("GOW3_UPSCALER")) {
         v.upscaler = UpscalerOff;
         for (int u = 0; u < UpscalerCount; ++u) {
@@ -233,6 +246,7 @@ void Load() {
     v.startup_output_res = v.output_res;
     v.startup_live_resolution = v.live_resolution;
     v.startup_render_resolution = v.render_resolution;
+    v.startup_render_scale = v.render_scale;
     v.startup_engine_fps = v.engine_fps;
     const char* applied = std::getenv("GOW3_ENGINE_FPS");
     v.applied_engine_fps = applied && applied[0] ? Gow3Graphics::ParseEngineFps(std::atoi(applied))
@@ -245,6 +259,7 @@ void Load() {
 bool GraphicsNeedRestart() {
     const auto& v = Get();
     return v.render_resolution != v.startup_render_resolution ||
+           v.render_scale != v.startup_render_scale ||
            v.engine_fps != v.startup_engine_fps ||
            v.deferred_readback != v.startup_deferred_readback ||
            v.stale_readback != v.startup_stale_readback ||
@@ -343,13 +358,13 @@ void Save() {
     std::fprintf(file,
                  "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
                  "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
-                 "render_resolution=%s\nengine_fps=%d\ndeferred_readback=%d\nstale_readback=%d\n"
+                 "render_resolution=%s\nrender_scale=%d\nengine_fps=%d\ndeferred_readback=%d\nstale_readback=%d\n"
                  "restart_unconfirmed=%d\n",
                  Gow3Graphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)].data(),
                  int(v.vsync.load()), v.fps_limit.load(), int(v.async_shaders.load()),
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
                  resolution_names[std::clamp(v.render_resolution.load(), 0, int(resolution_names.size()) - 1)].c_str(),
-                 v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
+                 v.render_scale.load(), v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
     std::fprintf(file, "anisotropy=%d\nvibration=%d\nmouse_prompt_distance=%d\nmouse_lock=%d\nmouse_aim_style=%d\n"
                        "mouse_aim_sensitivity=%d\nmusic=%d\nmusic_shuffle=%d\nmusic_volume=%d\n"
