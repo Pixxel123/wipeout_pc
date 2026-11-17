@@ -2,6 +2,8 @@
 
 #include <bit>
 #include <cstring>
+#include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <xxhash.h>
 #ifdef _WIN32
@@ -308,7 +310,18 @@ bool CachePack::Rewrite(std::span<const u8> image) {
     temp += ".tmp";
     std::error_code error;
     bool renamed = false;
-    if (WriteBytes(temp, std::ios::trunc, image) && SyncToDisk(temp)) {
+    // Diagnostic: the three parts of a rewrite.
+    const auto ms = [](std::chrono::steady_clock::time_point start) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    };
+    auto t = std::chrono::steady_clock::now();
+    const bool wrote = WriteBytes(temp, std::ios::trunc, image);
+    const double write_ms = ms(t);
+    t = std::chrono::steady_clock::now();
+    const bool synced = wrote && SyncToDisk(temp);
+    std::printf("Cache pack rewrite timing: %.1f MB; write %.0f ms, sync %.0f ms\n",
+                image.size() / 1048576.0, write_ms, ms(t));
+    if (synced) {
 #ifdef _WIN32
         renamed = MoveFileExW(temp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 #else

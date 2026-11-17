@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 
@@ -17,6 +19,12 @@ constexpr const char* PipelineBinaries = "pipeline-binaries";
 
 // nullopt when the file cannot be read whole. The original is deleted after the import, so a
 // failed read must never turn into an empty entry.
+// Diagnostic: where the one-time import spends its time.
+double g_read_ms = 0, g_put_ms = 0;
+double MsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
 std::optional<std::vector<u8>> ReadFile(const std::filesystem::path& file, size_t size) {
     std::vector<u8> data(size);
     std::ifstream in{file, std::ios::binary};
@@ -44,10 +52,14 @@ void ImportFolder(const std::filesystem::path& folder, const std::filesystem::pa
         if (error || size == 0 || size > CachePack::MaxBlobBytes) {
             continue;
         }
+        auto t = std::chrono::steady_clock::now();
         const auto data = ReadFile(entry.path(), size);
+        g_read_ms += MsSince(t);
+        t = std::chrono::steady_clock::now();
         if (data && !pack.Put(blob->first, blob->second, *data).empty()) {
             imported.push_back(entry.path());
         }
+        g_put_ms += MsSince(t);
     }
 }
 } // namespace
@@ -82,8 +94,22 @@ std::vector<std::filesystem::path> ImportLoose(const std::filesystem::path& fold
 
 std::optional<std::vector<std::filesystem::path>> ImportLooseAndWrite(
     const std::filesystem::path& folder, CachePack& pack) {
+    auto t = std::chrono::steady_clock::now();
     auto imported = ImportLoose(folder, pack);
-    if (!imported.empty() && !pack.Rewrite(pack.Image())) {
+    const double walk_ms = MsSince(t);
+    if (imported.empty()) {
+        return imported;
+    }
+    t = std::chrono::steady_clock::now();
+    const auto image = pack.Image();
+    const double image_ms = MsSince(t);
+    t = std::chrono::steady_clock::now();
+    const bool written = pack.Rewrite(image);
+    std::printf("Cache import timing: %zu files; walk and stat %.0f ms, read %.0f ms, put (copy + "
+                "checksum) %.0f ms, image %.0f ms, rewrite %.0f ms\n",
+                imported.size(), walk_ms - g_read_ms - g_put_ms, g_read_ms, g_put_ms, image_ms,
+                MsSince(t));
+    if (!written) {
         return std::nullopt;
     }
     return imported;
