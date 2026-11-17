@@ -89,6 +89,14 @@ void Run(State& state) {
         if (!bytes) {
             continue;
         }
+        // Diagnostic: GOW3_PRELOAD_DISCARD=1 reads the file and drops the bytes, so only the OS
+        // file cache holds them.
+        static const bool discard = EmulatorSettingsImpl::Flag("GOW3_PRELOAD_DISCARD", false);
+        if (discard) {
+            ++loaded;
+            loaded_bytes += bytes->size();
+            continue;
+        }
         std::scoped_lock lock{state.mutex};
         // A file the game already asked for was read from the disk then, and may have been
         // written again since this thread read it: its bytes here are not kept.
