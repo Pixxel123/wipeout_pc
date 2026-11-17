@@ -49,7 +49,10 @@ class PageManager;
 /// larger than N pixels is bound from its first level of at most N pixels, an image of its own
 /// over that level's guest memory (#72, #16: 4 GB cards). Left whole when the levels would lie
 /// elsewhere in a standalone layout.
-void LimitTextureSize(ImageInfo& info, ImageViewInfo& view);
+/// `sampled` false (the shader reads with integer coordinates): counted only, never shrunk.
+void LimitTextureSize(ImageInfo& info, ImageViewInfo& view, bool sampled = true);
+/// Diagnostic: every 10 s, the textures the limit saw and what it would do at 2048 and 4096.
+void ReportTextureLimit();
 
 class TextureCache {
     // Default values for garbage collection
@@ -89,8 +92,8 @@ public:
             : info{image, desc}, view_info{image, desc},
               type{desc.is_written ? BindingType::Storage : BindingType::Texture},
               needs_native{desc.needs_native} {
-            if (type == BindingType::Texture && !needs_native) {
-                LimitTextureSize(info, view_info);
+            if (type == BindingType::Texture) {
+                LimitTextureSize(info, view_info, !needs_native);
             }
         }
         ImageDesc(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
