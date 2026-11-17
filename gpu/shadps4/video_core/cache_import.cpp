@@ -15,9 +15,15 @@ constexpr u32 ShaderMeta = 0, ShaderBinary = 1, PipelineKey = 2, ShaderProfile =
 
 constexpr const char* PipelineBinaries = "pipeline-binaries";
 
-std::vector<u8> ReadFile(const std::filesystem::path& file) {
+// nullopt when the file cannot be read whole. The original is deleted after the import, so a
+// failed read must never turn into an empty entry.
+std::optional<std::vector<u8>> ReadFile(const std::filesystem::path& file, size_t size) {
+    std::vector<u8> data(size);
     std::ifstream in{file, std::ios::binary};
-    return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    if (!in.read(reinterpret_cast<char*>(data.data()), std::streamsize(size))) {
+        return std::nullopt;
+    }
+    return data;
 }
 
 void ImportFolder(const std::filesystem::path& folder, const std::filesystem::path& relative,
@@ -28,11 +34,14 @@ void ImportFolder(const std::filesystem::path& folder, const std::filesystem::pa
         if (!blob || !entry.is_regular_file(error)) {
             continue;
         }
-        // Checked before reading so that a huge file is not read into memory for nothing.
-        if (entry.file_size(error) > CachePack::MaxBlobBytes) {
+        // Checked before reading so that a huge file is not read into memory for nothing. An
+        // empty file is never a valid entry.
+        const auto size = entry.file_size(error);
+        if (error || size == 0 || size > CachePack::MaxBlobBytes) {
             continue;
         }
-        if (!pack.Put(blob->first, blob->second, ReadFile(entry.path())).empty()) {
+        const auto data = ReadFile(entry.path(), size);
+        if (data && !pack.Put(blob->first, blob->second, *data).empty()) {
             imported.push_back(entry.path());
         }
     }
