@@ -43,6 +43,14 @@ public:
         }
         return tick;
     }
+    /// gow3 (GOW3_PERF_DIAG): the pending copy RequiredTick asks to wait for, or null.
+    const Entry* Blocking(std::uint64_t address, std::uint64_t size) const {
+        const Entry* found = nullptr;
+        for (const auto& entry : entries) {
+            if (entry.valid && entry.watched && OverlapsPage(entry, address, size)) found = &entry;
+        }
+        return found;
+    }
     template <typename Callback>
     void Cancel(std::uint64_t address, std::uint64_t size, Callback&& cancel) {
         if (!MayOverlap(address, size)) return;

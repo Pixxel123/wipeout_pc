@@ -203,10 +203,32 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
             waited = !scheduler.IsFree(tick);
             const auto start = diag ? std::chrono::steady_clock::now()
                                     : std::chrono::steady_clock::time_point{};
+            // gow3 (experiment, GOW3_PERF_DIAG): which pending copy a long wait was for, and
+            // whether the request overlaps its bytes or only shares a 4 KiB page with it.
+            u64 copy_address = 0, copy_size = 0;
+            if (diag) {
+                if (const auto* copy = pending_readbacks.Blocking(address, size)) {
+                    copy_address = copy->address;
+                    copy_size = copy->size;
+                }
+            }
             scheduler.Wait(tick);
             if (diag) {
                 wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                               std::chrono::steady_clock::now() - start).count();
+                static u32 shown = 0;
+                if (wait_ns >= 2'000'000 && shown < 64) {
+                    ++shown;
+                    const bool bytes_overlap =
+                        address < copy_address + copy_size && copy_address < address + size;
+                    std::printf("Readback wait: %s of 0x%llx (%llu bytes) waited %.1f ms for the "
+                                "copy of 0x%llx (%llu bytes); the bytes %s\n",
+                                ReadbackSourceName(source), static_cast<unsigned long long>(address),
+                                static_cast<unsigned long long>(size), wait_ns / 1e6,
+                                static_cast<unsigned long long>(copy_address),
+                                static_cast<unsigned long long>(copy_size),
+                                bytes_overlap ? "overlap" : "only share a page");
+                }
             }
             RetireReadbacks();
         }
