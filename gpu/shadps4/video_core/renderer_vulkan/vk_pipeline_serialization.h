@@ -26,15 +26,11 @@ std::vector<u8> Encode(const Key& global, const Key& pipeline, u64 graphics_hash
                        const std::vector<Binary>& binaries);
 std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& global,
                                           const Key& pipeline, u64 graphics_hash);
-bool Save(const std::filesystem::path& file, std::span<const u8> bytes);
-std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const Key& global,
-                                        const Key& pipeline, u64 graphics_hash);
 } // namespace PipelineBinaryCache
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
-    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key,
-    const std::filesystem::path& directory);
+    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key);
 void ReportPipelineBinaryCache();
 
 void RegisterPipelineData(const ComputePipelineKey& key,

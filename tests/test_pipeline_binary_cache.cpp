@@ -2,8 +2,10 @@
 #include <cassert>
 #include <cstdio>
 #include <chrono>
-#include <fstream>
 #include <xxhash.h>
+#include "common/elf_info.h"
+#include "common/path_util.h"
+#include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 
@@ -11,7 +13,38 @@
 #undef NDEBUG
 #include <cassert>
 
+// ElfInfo's fields are private to Core::Emulator; the test fills the serial the same way the
+// port does (gow3gpu.cpp), so the cache store opens on a folder of its own.
+namespace Core {
+class Emulator {
+public:
+    static void SetSerial(const char* serial) {
+        auto& info = Common::ElfInfo::Instance();
+        info.initialized = true;
+        info.game_serial = serial;
+    }
+};
+} // namespace Core
+
 namespace {
+using Storage::BlobType;
+using Storage::DataBase;
+
+// Opens the cache store on `directory` instead of the user's cache folder.
+void OpenCacheStore(const std::filesystem::path& directory) {
+    std::filesystem::create_directories(directory);
+    Common::FS::SetUserPath(Common::FS::PathType::CacheDir, directory);
+    Core::Emulator::SetSerial("TEST00000");
+    DataBase::Instance().Open();
+    assert(DataBase::Instance().IsOpened());
+}
+
+std::vector<u8> StoredBinary(const std::string& name) {
+    std::vector<u8> bytes;
+    DataBase::Instance().Load(BlobType::PipelineBinary, name, bytes);
+    return bytes;
+}
+
 unsigned compiled{}, restored{}, destroyed{}, released{};
 bool reject_binary{}, reject_pipeline{}, fail_capture{}, fail_compile{};
 VKAPI_ATTR VkResult VKAPI_CALL GetKey(VkDevice, const VkPipelineCreateInfoKHR* info,
@@ -98,7 +131,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreatePipeline(VkDevice, VkPipelineCache cache, u
 }
 VKAPI_ATTR void VKAPI_CALL DestroyPipeline(VkDevice, VkPipeline, const VkAllocationCallbacks*) {}
 
-void TestDriverFallback(const std::filesystem::path& root) {
+void TestDriverFallback() {
     auto& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER;
     const auto original = dispatch;
     dispatch.vkGetPipelineKeyKHR = GetKey;
@@ -114,32 +147,32 @@ void TestDriverFallback(const std::filesystem::path& root) {
     const Vulkan::GraphicsPipelineKey key;
     const vk::PipelineBinaryKeyKHR global{.keySize = 2, .key = std::array<u8, 32>{1, 2}};
     const auto create = [&] {
-        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, global, root);
+        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, global);
         assert(result.result == vk::Result::eSuccess && result.value);
     };
-    const auto legacy = root / "legacy";
-    assert(Vulkan::PipelineBinaryCache::Save(
-        legacy / "000000000000002a_0304.bin",
-        Vulkan::PipelineBinaryCache::Encode({1, 2}, {3, 4}, 42,
-                                            {{{5}, {6, 7}}, {{8}, {9, 10}}})));
-    {
-        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, global,
-                                                           legacy);
-        assert(result.result == vk::Result::eSuccess);
-    }
+    auto& db = DataBase::Instance();
+    // The blob name is the driver key in hex: {3, 4} is "0304".
+    assert(StoredBinary("0304").empty());
+    assert(db.Save(BlobType::PipelineBinary, "0304",
+                   Vulkan::PipelineBinaryCache::Encode({1, 2}, {3, 4}, 0,
+                                                       {{{5}, {6, 7}}, {{8}, {9, 10}}})));
+    create();
     assert(compiled == 0 && restored == 1 && destroyed == 2);
-    assert(Vulkan::PipelineBinaryCache::Load(legacy / "0304.bin", {1, 2}, {3, 4}, 0));
+    assert(!StoredBinary("0304").empty());
+    db.Remove(BlobType::PipelineBinary, "0304");
+    assert(StoredBinary("0304").empty());
     restored = destroyed = 0;
     create();
     assert(compiled == 1 && restored == 0 && destroyed == 2 && released == 1);
+    assert(!StoredBinary("0304").empty());
     create();
     assert(compiled == 1 && restored == 1 && destroyed == 4 && released == 1);
     // The exact driver key must survive changes to the emulator's graphics key.
     auto other_key = key;
     other_key.stage_hashes[0] = 123;
     {
-        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, other_key, global,
-                                                           root);
+        auto result =
+            Vulkan::CreateCachedGraphicsPipeline(device, cache, info, other_key, global);
         assert(result.result == vk::Result::eSuccess);
     }
     assert(compiled == 1 && restored == 2);
@@ -153,35 +186,33 @@ void TestDriverFallback(const std::filesystem::path& root) {
     create();
     assert(compiled == 3 && restored == 2 && destroyed == 11 && released == 3);
     reject_pipeline = false;
-    const auto file = std::filesystem::directory_entry(root / "0304.bin");
-    {
-        std::ofstream corrupt(file.path(), std::ios::binary);
-        corrupt << "broken";
-    }
+    // A binary that does not decode is removed, and a failed capture does not save a new one.
+    assert(db.Save(BlobType::PipelineBinary, "0304", std::vector<u8>{'b', 'r', 'o', 'k', 'e', 'n'}));
     fail_capture = true;
     create();
     assert(compiled == 4 && released == 4 && destroyed == 11);
+    assert(StoredBinary("0304").empty());
     fail_capture = false;
     fail_compile = true;
     create();
     assert(compiled == 6 && released == 4);
     fail_compile = false;
     {
-        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, {}, root);
+        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, {});
         assert(result.result == vk::Result::eSuccess);
     }
     assert(compiled == 7 && released == 4);
-    // A path below a file cannot be written, but pipeline creation must still succeed.
+    // A closed store cannot save, but pipeline creation must still succeed.
+    db.Close();
     {
-        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, global,
-                                                           file.path() / "blocked");
+        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, global);
         assert(result.result == vk::Result::eSuccess);
     }
     assert(compiled == 8 && released == 5 && destroyed == 13);
     dispatch = original;
 }
 
-void TestRealDriver(const std::filesystem::path& directory) {
+void TestRealDriver() {
     Vulkan::Instance instance(0, false);
     static vk::detail::DynamicLoader loader;
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
@@ -252,7 +283,7 @@ void TestRealDriver(const std::filesystem::path& directory) {
         for (int run = 0; run < 2; ++run) {
             const auto started = std::chrono::steady_clock::now();
             auto pipeline =
-                Vulkan::CreateCachedGraphicsPipeline(device, {}, info, key, global, directory);
+                Vulkan::CreateCachedGraphicsPipeline(device, {}, info, key, global);
             assert(pipeline.result == vk::Result::eSuccess && pipeline.value);
             std::printf("Real driver: variant %d run %d %.3f ms\n", variant, run,
                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -260,11 +291,7 @@ void TestRealDriver(const std::filesystem::path& directory) {
                             .count());
         }
     }
-    unsigned files = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-        files += entry.path().extension() == ".bin";
-    }
-    assert(files == 2);
+    assert(DataBase::Instance().CountBlobs(BlobType::PipelineBinary) == 2);
     Vulkan::ReportPipelineBinaryCache();
 }
 } // namespace
@@ -274,7 +301,9 @@ int main(int argc, char** argv) {
     _set_error_mode(_OUT_TO_STDERR);
 #endif
     if (argc == 3 && std::string_view(argv[1]) == "--gpu") {
-        TestRealDriver(argv[2]);
+        OpenCacheStore(argv[2]);
+        TestRealDriver();
+        DataBase::Instance().Close();
         return 0;
     }
     using namespace Vulkan::PipelineBinaryCache;
@@ -315,26 +344,17 @@ int main(int argc, char** argv) {
     const auto root = std::filesystem::temp_directory_path() /
                       ("gow3-binary-test-" +
                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    const auto file = root / "pipeline.bin";
-    assert(!Load(file, global, pipeline, 42));
-    assert(Save(file, encoded));
-    assert(Load(file, global, pipeline, 42));
-    const auto replacement = Encode(global, pipeline, 42, {binaries[1]});
-    assert(Save(file, replacement));
-    assert(Load(file, global, pipeline, 42)->size() == 1);
-    assert(!Save(file / "blocked.bin", encoded));
-    assert(Load(file, global, pipeline, 42)->size() == 1);
-    {
-        std::ofstream partial(file.string() + ".tmp");
-        partial << "partial";
-    }
-    assert(Load(file, global, pipeline, 42)->size() == 1);
-    {
-        std::ofstream corrupt(file, std::ios::binary);
-        corrupt << "broken";
-    }
-    assert(!Load(file, global, pipeline, 42));
-    TestDriverFallback(root / "driver");
+    OpenCacheStore(root);
+    auto& db = DataBase::Instance();
+    assert(StoredBinary("pipeline").empty());
+    assert(db.Save(BlobType::PipelineBinary, "pipeline", std::vector<u8>(encoded)));
+    assert(Decode(StoredBinary("pipeline"), global, pipeline, 42));
+    assert(db.Save(BlobType::PipelineBinary, "pipeline",
+                   Encode(global, pipeline, 42, {binaries[1]})));
+    assert(Decode(StoredBinary("pipeline"), global, pipeline, 42)->size() == 1);
+    db.Remove(BlobType::PipelineBinary, "pipeline");
+    assert(StoredBinary("pipeline").empty());
+    TestDriverFallback();
     std::filesystem::remove_all(root);
     std::puts("pipeline-binary-cache-test: passed");
 }

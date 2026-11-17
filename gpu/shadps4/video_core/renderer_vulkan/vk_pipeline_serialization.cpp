@@ -14,8 +14,6 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
-#include <fstream>
-#include <map>
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
@@ -194,62 +192,6 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
     }
     return offset == bytes.size() ? std::optional{std::move(binaries)} : std::nullopt;
 }
-bool Save(const std::filesystem::path& file, std::span<const u8> bytes) {
-    if (bytes.empty() || bytes.size() > MaxFileSize) {
-        return false;
-    }
-    std::error_code error;
-    std::filesystem::create_directories(file.parent_path(), error);
-    if (error) {
-        return false;
-    }
-    // Unique siblings avoid concurrent writers truncating one another's temporary data.
-    static std::atomic<u64> sequence{0};
-    auto temp = file;
-    temp += "." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-            "." + std::to_string(sequence++) + ".tmp";
-    bool written = false;
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (stream) {
-            stream.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-            stream.flush();
-            written = bool(stream);
-            stream.close();
-            written = written && !stream.fail();
-        }
-    }
-    bool renamed = false;
-    if (written) {
-#ifdef _WIN32
-        renamed = MoveFileExW(temp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-#else
-        std::filesystem::rename(temp, file, error);
-        renamed = !error;
-#endif
-    }
-    if (!renamed) {
-        std::filesystem::remove(temp, error);
-    }
-    return renamed;
-}
-std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const Key& global,
-                                        const Key& pipeline, u64 graphics_hash) {
-    std::ifstream stream(file, std::ios::binary | std::ios::ate);
-    if (!stream) {
-        return std::nullopt;
-    }
-    const auto size = stream.tellg();
-    if (size <= 0 || size > std::streamoff(MaxFileSize)) {
-        return std::nullopt;
-    }
-    std::vector<u8> bytes(static_cast<size_t>(size));
-    stream.seekg(0);
-    if (!stream.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) {
-        return std::nullopt;
-    }
-    return Decode(bytes, global, pipeline, graphics_hash);
-}
 } // namespace PipelineBinaryCache
 
 namespace {
@@ -266,47 +208,6 @@ PipelineBinaryCache::Key BinaryKey(const vk::PipelineBinaryKeyKHR& key) {
         return {};
     }
     return {key.key.begin(), key.key.begin() + key.keySize};
-}
-
-std::optional<std::vector<PipelineBinaryCache::Binary>> LoadLegacyBinary(
-    const std::filesystem::path& directory, const std::string& name,
-    const PipelineBinaryCache::Key& global, const PipelineBinaryCache::Key& pipeline) {
-    using Index = std::unordered_multimap<std::string, std::pair<std::filesystem::path, u64>>;
-    static std::mutex mutex;
-    static std::map<std::filesystem::path, Index> indexes;
-    std::vector<std::pair<std::filesystem::path, u64>> candidates;
-    {
-        std::scoped_lock lock{mutex};
-        auto [it, inserted] = indexes.try_emplace(directory);
-        if (inserted) {
-            std::error_code error;
-            for (std::filesystem::directory_iterator files(directory, error), end;
-                 !error && files != end; files.increment(error)) {
-                const auto stem = files->path().stem().string();
-                if (files->path().extension() != ".bin" || stem.size() < 18 || stem[16] != '_') {
-                    continue;
-                }
-                try {
-                    size_t used = 0;
-                    const auto hash = std::stoull(stem.substr(0, 16), &used, 16);
-                    if (used == 16) {
-                        it->second.emplace(stem.substr(17), std::pair{files->path(), hash});
-                    }
-                } catch (const std::exception&) {
-                }
-            }
-        }
-        const auto [first, last] = it->second.equal_range(name);
-        for (auto entry = first; entry != last; ++entry) {
-            candidates.push_back(entry->second);
-        }
-    }
-    for (const auto& [file, hash] : candidates) {
-        if (auto binaries = PipelineBinaryCache::Load(file, global, pipeline, hash)) {
-            return binaries;
-        }
-    }
-    return std::nullopt;
 }
 } // namespace
 
@@ -325,8 +226,7 @@ void ReportPipelineBinaryCache() {
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
-    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key,
-    const std::filesystem::path& directory) {
+    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key) {
     using namespace PipelineBinaryCache;
     const auto& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER;
     const bool enabled = global_key.keySize && EmulatorSettings.IsPipelineCacheEnabled();
@@ -387,7 +287,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         name += fmt::format("{:02x}", byte);
     }
     // The driver key identifies the pipeline independently of emulator draw-state keys.
-    const auto file = directory / (name + ".bin");
+    auto& db = Storage::DataBase::Instance();
     std::vector<VkPipelineBinaryKHR> handles;
     const auto destroy = [&] {
         for (auto handle : handles) {
@@ -400,11 +300,15 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     SCOPE_EXIT { destroy(); };
     try {
         const auto load_started = std::chrono::steady_clock::now();
-        auto binaries = Load(file, global, pipeline_id, 0);
-        if (!binaries) {
-            binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
-            if (binaries) {
-                Save(file, Encode(global, pipeline_id, 0, *binaries));
+        std::vector<u8> stored;
+        db.Load(Storage::BlobType::PipelineBinary, name, stored);
+        std::optional<std::vector<Binary>> binaries;
+        if (!stored.empty()) {
+            binaries = Decode(stored, global, pipeline_id, 0);
+            if (!binaries) {
+                // Written by another driver or damaged: drop it, the compile below saves a new one.
+                db.Remove(Storage::BlobType::PipelineBinary, name);
+                ++binary_rejected;
             }
         }
         binary_load_ns += ElapsedNs(load_started);
@@ -515,8 +419,8 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             binary.data.resize(size);
             binaries.push_back(std::move(binary));
         }
-        const auto encoded = Encode(global, pipeline_id, 0, binaries);
-        if (Save(file, encoded)) {
+        if (db.Save(Storage::BlobType::PipelineBinary, name,
+                    Encode(global, pipeline_id, 0, binaries))) {
             ++binary_saved;
         } else {
             ++binary_errors;
