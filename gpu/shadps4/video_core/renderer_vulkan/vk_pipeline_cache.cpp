@@ -830,10 +830,26 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
 
+        extern thread_local u64 g_gow3_binary_phase_ns[5];
+        std::fill(std::begin(g_gow3_binary_phase_ns), std::end(g_gow3_binary_phase_ns), 0);
+        const auto build_started = std::chrono::steady_clock::now();
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
             sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, false);
+        // Diagnostic: where a slow build on the GPU thread spends its time.
+        const double build_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - build_started)
+                                    .count();
+        if (build_ms > 5.0) {
+            const auto* phase = g_gow3_binary_phase_ns;
+            const u64 cached = phase[0] + phase[1] + phase[2] + phase[3] + phase[4];
+            std::printf("Slow pipeline build: %016llx %.1f ms on the GPU thread; key %.1f, disk %.1f, "
+                        "handles %.1f, driver restore %.1f, driver compile %.1f, rest %.1f ms\n",
+                        static_cast<unsigned long long>(pipeline_hash), build_ms, phase[0] / 1e6,
+                        phase[1] / 1e6, phase[2] / 1e6, phase[3] / 1e6, phase[4] / 1e6,
+                        build_ms - cached / 1e6);
+        }
 
         if (NewPipelineKey(fmt::format("g_{:#018x}", pipeline_hash))) {
             RegisterPipelineData(sel.graphics_key, pipeline_hash, sdata);

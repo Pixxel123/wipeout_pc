@@ -252,6 +252,10 @@ std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const
 }
 } // namespace PipelineBinaryCache
 
+// Diagnostic: this thread's binary cache time for the pipeline being built (key, disk, handles,
+// driver restore, driver compile), read by the GPU thread's slow-build report.
+thread_local u64 g_gow3_binary_phase_ns[5];
+
 namespace {
 std::atomic<u64> binary_hits{}, binary_misses{}, binary_rejected{}, binary_saved{}, binary_errors{};
 std::atomic<u64> binary_restore_ns{}, binary_compile_ns{};
@@ -340,6 +344,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         g_gow3_pipeline_driver_ns += ns;
         if (enabled) {
             (restored ? binary_restore_ns : binary_compile_ns) += ns;
+            g_gow3_binary_phase_ns[restored ? 3 : 4] += ns;
             ++(restored ? binary_restore_calls : binary_compile_calls);
         }
         return result;
@@ -373,7 +378,11 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::PipelineBinaryKeyKHR pipeline_key;
     const auto key_started = std::chrono::steady_clock::now();
     const auto key_result = device.getPipelineKeyKHR(&key_info, &pipeline_key);
-    binary_key_ns += ElapsedNs(key_started);
+    {
+        const u64 ns = ElapsedNs(key_started);
+        binary_key_ns += ns;
+        g_gow3_binary_phase_ns[0] += ns;
+    }
     if (key_result != vk::Result::eSuccess ||
         !ValidKey(global) || !ValidKey(BinaryKey(pipeline_key))) {
         ++binary_errors;
@@ -407,7 +416,11 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                 Save(file, Encode(global, pipeline_id, 0, *binaries));
             }
         }
-        binary_load_ns += ElapsedNs(load_started);
+        {
+        const u64 ns = ElapsedNs(load_started);
+        binary_load_ns += ns;
+        g_gow3_binary_phase_ns[1] += ns;
+    }
         if (binaries) {
             std::vector<VkPipelineBinaryKeyKHR> keys(binaries->size());
             std::vector<VkPipelineBinaryDataKHR> data(binaries->size());
@@ -429,7 +442,11 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             const auto handles_started = std::chrono::steady_clock::now();
             const auto handles_result =
                 dispatch.vkCreatePipelineBinariesKHR(device, &binary_info, nullptr, &output);
-            binary_handles_ns += ElapsedNs(handles_started);
+            {
+        const u64 ns = ElapsedNs(handles_started);
+        binary_handles_ns += ns;
+        g_gow3_binary_phase_ns[2] += ns;
+    }
             if (handles_result == VK_SUCCESS) {
                 VkPipelineBinaryInfoKHR restored{VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR};
                 restored.pNext = &flags;
