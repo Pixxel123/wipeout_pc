@@ -30,6 +30,7 @@
 #include "video_core/renderer_vulkan/vk_depth_stencil_state.h"
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
+#include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -434,6 +435,19 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         // held a race intro's first frame for about 1.4 s. GOW3_LOAD_GRACE=0 turns it off.
         const char* grace_env = std::getenv("GOW3_LOAD_GRACE");
         g_compile_policy.load_grace = fast_first_builds && (!grace_env || grace_env[0] != '0');
+        // gow3: a missing pipeline is restored on the GPU thread or, when it was never saved,
+        // built on a worker (GetGraphicsPipeline). It needs what fast first builds need: the
+        // binary cache to restore from and a worker for the build. Off unless the switch is 1.
+        const char* new_env = std::getenv("GOW3_NEW_PIPELINE_WORKER");
+        const bool new_switch = new_env && new_env[0] == '1';
+        new_pipeline_worker = new_switch && fast_first_builds;
+        new_pipeline_off = new_switch ? "no binary cache" : "switch off";
+        if (new_pipeline_worker) {
+            std::printf("New pipelines: on a worker when their target is drawn every frame "
+                        "(GOW3_NEW_PIPELINE_WORKER=1)\n");
+        } else {
+            std::printf("New pipelines: on the GPU thread (%s)\n", new_pipeline_off);
+        }
         rebuild_limit = std::max(1u, count / 2);
         LOG_INFO(Render_Vulkan,
                  "gow3: async graphics compilation ready ({} capture, {} compile workers, fast "
@@ -522,6 +536,23 @@ struct CompileTimer {
         ++g_gow3_compiles;
     }
 };
+
+// gow3: the render target a draw writes, as a TargetStreaks key: the first colour buffer that
+// is bound and written, else the depth buffer, else 0 (nothing to track).
+u64 DrawTarget(const AmdGpu::Regs& regs) {
+    if (regs.color_control.mode != AmdGpu::ColorControl::OperationMode::Disable) {
+        for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+            const auto& buffer = regs.color_buffers[cb];
+            if (buffer && regs.color_target_mask.GetMask(cb)) {
+                return TargetStreaks::Key(buffer.Address(), buffer.view.slice_start);
+            }
+        }
+    }
+    if (regs.depth_buffer.DepthValid()) {
+        return TargetStreaks::Key(regs.depth_buffer.DepthAddress(), regs.depth_view.slice_start);
+    }
+    return 0;
+}
 } // namespace
 
 bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage,
@@ -813,13 +844,18 @@ void PipelineCache::ReportCompilerStats() {
     if (compiler) {
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; fast first builds "
-                    "%u, optimised rebuilds: %u queued, %u swapped in, %zu pending, %.1f ms\n",
+                    "%u, optimised rebuilds: %u queued, %u swapped in, %zu pending, %.1f ms; "
+                    "new pipelines: %llu to workers, %llu kept on the GPU thread, %llu draws "
+                    "skipped on targets not drawn every frame\n",
                     capture_compiler->Depth(), compiler->Depth(),
                     capture_compiler->QueueWaitNs() / 1e6, compiler->QueueWaitNs() / 1e6,
                     compiler_pools.Retained(), g_gow3_pool_reuses.exchange(0),
                     g_gow3_fast_builds.exchange(0), g_gow3_rebuilds_queued.exchange(0),
                     g_gow3_rebuild_swaps.exchange(0), g_gow3_rebuilds_pending.load(),
-                    g_gow3_rebuild_ns.exchange(0) / 1e6);
+                    g_gow3_rebuild_ns.exchange(0) / 1e6,
+                    static_cast<unsigned long long>(new_to_workers.exchange(0)),
+                    static_cast<unsigned long long>(new_kept.exchange(0)),
+                    static_cast<unsigned long long>(skipped_off_frame.exchange(0)));
     }
 }
 
@@ -871,6 +907,11 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     PublishGraphics();
     PumpWarmUp();
     ReportDiskShaders();
+    // gow3: every draw marks its render target as drawn in this frame, also one that leaves
+    // through the prepared path below (sel.regs always points at the live registers).
+    const u64 flip = FrameCapture::Flips();
+    const u64 target = DrawTarget(*sel.regs);
+    target_streaks.Drawn(target, flip);
     used_prepared = nullptr;
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
@@ -905,39 +946,53 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         return found->second.get();
     }
     // gow3: the policy decides only for a missing build; one a worker already has stays with it.
-    const bool background =
+    bool background =
         AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect();
-    if (background || pending_graphics.contains(sel.graphics_key)) {
-        if (background && !pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
-            PhaseTimer capture{g_gow3_snapshot_ns};
-            auto build = std::make_shared<AsyncGraphicsCompilation>();
-            build->selection = sel;
-            build->selection.regs = nullptr;
-            build->live_infos = sel.infos;
-            for (u32 i = 0; i < MaxShaderStages; ++i) {
-                if (sel.infos[i]) {
-                    build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
-                    build->user_data[i].assign(sel.infos[i]->user_data.begin(), sel.infos[i]->user_data.end());
-                    build->infos[i]->user_data = build->user_data[i];
-                    build->selection.infos[i] = build->infos[i].get();
-                    build->fetch[i].Capture(*build->infos[i]);
-                }
+    const bool on_worker = pending_graphics.contains(sel.graphics_key);
+    // gow3: a build at once stalls the frame when the driver has to compile (about 50 ms), and
+    // only trying tells a compile from a restore. So the restore is tried first, and a pipeline
+    // that was never saved goes to a worker; its draw is left out meanwhile, which only a
+    // target redrawn every frame hides. `reason` says why the build stays on this thread.
+    const char* reason = "switch off";
+    std::unique_ptr<GraphicsPipeline> restored;
+    GraphicsPipeline::SerializationSupport sdata{};
+    std::chrono::steady_clock::time_point build_start{};
+    if (!background && !on_worker) {
+        if (!new_pipeline_worker) {
+            reason = new_pipeline_off;
+        } else if (!Gow3Settings::Get().async_shaders.load(std::memory_order_relaxed)) {
+            reason = "background compiles off";
+        } else if (sel.regs->stage_enable.hs_en) {
+            reason = "tessellation";
+        } else if (EmulatorSettings.IsShaderCollect()) {
+            reason = "switch off"; // gow3: a developer mode; its builds stay on this thread
+        } else if (!compiler->HasCapacity()) {
+            reason = "workers busy";
+        } else if (!target_streaks.EveryFrame(target, flip)) {
+            reason = "target not drawn every frame";
+        } else {
+            build_start = std::chrono::steady_clock::now();
+            restored = std::make_unique<GraphicsPipeline>(
+                instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache,
+                sel.infos, sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, false,
+                PipelineBuild::RestoreOnly);
+            if (restored->NotSaved()) {
+                // gow3: nothing was built and the object has no pipeline: it is dropped. The
+                // policy hears of a real compile, so the draws that follow within a second go
+                // to the workers as well instead of each trying a restore first.
+                restored.reset();
+                ++new_to_workers;
+                g_compile_policy.Compiled(CompilePolicy::Now());
+                // gow3: the setting, tessellation and collect mode were checked above.
+                background = true;
+            } else {
+                reason = "restored from the binary cache";
             }
-            const bool queued = build->job.Start(*compiler, [this, build] {
-                // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
-                Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
-                PhaseTimer compile{g_gow3_async_ns};
-                auto& s = build->selection;
-                build->pipeline = std::make_unique<GraphicsPipeline>(
-                    instance, scheduler, desc_heap, profile, s.graphics_key,
-                    *worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
-                    s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false,
-                    fast_first_builds ? PipelineBuild::Fast : PipelineBuild::Optimized);
-                return build;
-            });
-            if (queued) {
-                pending_graphics.emplace(sel.graphics_key, std::move(build));
-            }
+        }
+    }
+    if (background || on_worker) {
+        if (background && !on_worker && compiler->HasCapacity()) {
+            QueueGraphicsBuild(sel);
         }
         if (const auto pending = pending_graphics.find(sel.graphics_key);
             pending != pending_graphics.end() && GraceWait(pending->second->job)) {
@@ -948,6 +1003,11 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             }
         }
         ++g_gow3_pending_draws;
+        // gow3: counted for the stats: a draw left out of a target that is not redrawn every
+        // frame stays missing until that target is drawn again.
+        if (!target_streaks.EveryFrame(target, flip)) {
+            ++skipped_off_frame;
+        }
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
@@ -956,14 +1016,17 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
 
-        GraphicsPipeline::SerializationSupport sdata{};
-        // gow3: why this build was not sent to a worker; only the log line reads it for now.
-        const char* reason = "switch off";
         // gow3: time only the build, so a mid-race compile that stalls the frame is visible in the log.
-        const auto build_start = std::chrono::steady_clock::now();
-        it.value() = std::make_unique<GraphicsPipeline>(
-            instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
-            sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, false);
+        if (restored) {
+            // gow3: restored above and published like any build; its time counts from there.
+            timer.start = build_start;
+            it.value() = std::move(restored);
+        } else {
+            build_start = std::chrono::steady_clock::now();
+            it.value() = std::make_unique<GraphicsPipeline>(
+                instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache,
+                sel.infos, sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, false);
+        }
         const double build_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - build_start)
                                     .count();
@@ -974,6 +1037,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 g_compile_policy.long_grace_until_ns.load(std::memory_order_relaxed)) {
             std::printf("Pipelines: built on the GPU thread while playing, %.1f ms (%s)\n",
                         build_ms, reason);
+            ++new_kept;
         }
 
         if (NewPipelineKey(fmt::format("g_{:#018x}", pipeline_hash))) {
@@ -992,6 +1056,38 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         sel.fetch_shader.reset();
     }
     return it->second.get();
+}
+
+void PipelineCache::QueueGraphicsBuild(const PipelineSelection& sel) {
+    PhaseTimer capture{g_gow3_snapshot_ns};
+    auto build = std::make_shared<AsyncGraphicsCompilation>();
+    build->selection = sel;
+    build->selection.regs = nullptr;
+    build->live_infos = sel.infos;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (sel.infos[i]) {
+            build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
+            build->user_data[i].assign(sel.infos[i]->user_data.begin(), sel.infos[i]->user_data.end());
+            build->infos[i]->user_data = build->user_data[i];
+            build->selection.infos[i] = build->infos[i].get();
+            build->fetch[i].Capture(*build->infos[i]);
+        }
+    }
+    const bool queued = build->job.Start(*compiler, [this, build] {
+        // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
+        Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
+        PhaseTimer compile{g_gow3_async_ns};
+        auto& s = build->selection;
+        build->pipeline = std::make_unique<GraphicsPipeline>(
+            instance, scheduler, desc_heap, profile, s.graphics_key,
+            *worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
+            s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false,
+            fast_first_builds ? PipelineBuild::Fast : PipelineBuild::Optimized);
+        return build;
+    });
+    if (queued) {
+        pending_graphics.emplace(sel.graphics_key, std::move(build));
+    }
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {

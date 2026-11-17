@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <unordered_map>
@@ -18,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
+#include "video_core/renderer_vulkan/vk_target_streak.h"
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
 
 template <>
@@ -197,6 +199,8 @@ private:
                      std::optional<Shader::StageSpecialization> specialization = {});
     void PublishShaders(bool wait = false);
     void PublishGraphics(bool wait = false);
+    /// gow3: hands the first build of the selected pipeline to a compile worker (GPU thread).
+    void QueueGraphicsBuild(const PipelineSelection& sel);
     void StartRebuilds(size_t running);
     void FinishCompilations();
     void SeedWorkerCaches();
@@ -253,6 +257,17 @@ private:
     std::vector<std::shared_ptr<AsyncGraphicsCompilation>> rebuilds;
     size_t rebuild_limit = 1;
     bool fast_first_builds = false; ///< gow3: first builds on the workers skip optimisations
+    /// gow3 (GOW3_NEW_PIPELINE_WORKER=1): a missing pipeline is first restored from the binary
+    /// cache on the GPU thread; one that was never saved goes to a compile worker when its
+    /// render target is drawn every frame, so the frame does not stall on a driver compile.
+    bool new_pipeline_worker = false;
+    /// gow3: why new_pipeline_worker is off, for the log line of a build kept on the GPU thread.
+    const char* new_pipeline_off = "switch off";
+    /// gow3: which render targets are drawn every frame; a draw left out of one heals itself.
+    TargetStreaks target_streaks;
+    /// gow3: for ReportCompilerStats, which another thread calls: counted on the GPU thread,
+    /// read and reset there, hence atomic like the other compiler counters.
+    std::atomic<u64> new_to_workers{0}, new_kept{0}, skipped_off_frame{0};
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     std::vector<Program*> pending_programs;
     /// gow3: exclusive for program/permutation insertions, shared for worker lookups.
