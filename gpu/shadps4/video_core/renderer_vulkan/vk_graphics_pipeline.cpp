@@ -439,6 +439,12 @@ GraphicsPipeline::GraphicsPipeline(
     auto [pipeline_result, pipe] =
         CreateCachedGraphicsPipeline(device, pipeline_cache, pipeline_info, key,
                                      instance.GetPipelineBinaryGlobalKey(), build, &fast_build);
+    // gow3: a restore-only build found no saved binary: nothing was built, the caller decides.
+    const bool restore_only = build == PipelineBuild::RestoreOnly;
+    if (restore_only && pipeline_result == vk::Result::ePipelineCompileRequired) {
+        not_saved = true;
+        return;
+    }
     // gow3: a cached pipeline the driver refuses at the start (a damaged cache after a crash, or a
     // driver error) stays out of the warm-up (Handle() is null) instead of stopping the game (#72).
     if (pipeline_result != vk::Result::eSuccess && preloading) {
@@ -473,6 +479,12 @@ GraphicsPipeline::GraphicsPipeline(
             CreateCachedGraphicsPipeline(device, pipeline_cache, square_info, key,
                                          instance.GetPipelineBinaryGlobalKey(), build, &square_fast);
         fast_build |= square_fast;
+        // gow3: the main pipeline was saved but its squaring pass was not: none is published.
+        if (restore_only && square_result == vk::Result::ePipelineCompileRequired) {
+            pipeline.reset();
+            not_saved = true;
+            return;
+        }
         // gow3: a refused squaring pass leaves the whole cached pipeline out (#72, #149).
         if (square_result != vk::Result::eSuccess && preloading) {
             LOG_WARNING(Render_Vulkan,

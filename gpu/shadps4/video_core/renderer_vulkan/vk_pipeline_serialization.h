@@ -35,6 +35,9 @@ bool SavedUnder(std::span<const u8> bytes, const Key& global);
 
 /// `unoptimized`, when given, is set when a PipelineBuild::Fast build compiled without driver
 /// optimisations (a binary cache miss); such a pipeline is never stored in the cache.
+/// PipelineBuild::RestoreOnly restores a saved binary or returns vk::Result::ePipelineCompileRequired
+/// without compiling anything: the binary cache is off, the key is invalid, nothing is saved, or
+/// the saved binary is refused. A restore counts as a hit, a miss is left for the caller to count.
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
     const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key,
