@@ -196,6 +196,133 @@ void ImageRoundTrip(const std::filesystem::path& file) {
     }
     assert(!std::filesystem::exists(file.string() + ".tmp"));
 }
+
+void StartLaunches(CachePack& p, int count) {
+    for (int i = 0; i < count; ++i) {
+        assert(p.Append(p.StartLaunch()));
+    }
+}
+
+void AgesSurviveReopen(const std::filesystem::path& file) {
+    {
+        CachePack p{file};
+        assert(p.Append(p.Put(1, "a", Bytes("one"))));
+        StartLaunches(p, 3);
+        const auto used = p.Use(1, "a");
+        assert(!used.empty());
+        assert(p.Append(used));
+        StartLaunches(p, 2);
+        assert(p.Append(p.Put(1, "b", Bytes("two"))));
+        assert(p.Age(1, "a") == 2u);
+        assert(p.Age(1, "b") == 0u);
+    }
+    {
+        CachePack p{file};
+        assert(p.Age(1, "a") == 2u);
+        assert(p.Age(1, "b") == 0u);
+        assert(!p.Age(1, "c"));
+        // Launch and used records count as dead: the file is still header + live + dead.
+        assert(8 + p.LiveBytes() + p.DeadBytes() == std::filesystem::file_size(file));
+    }
+}
+
+void UnusedEntriesAreErased(const std::filesystem::path& file) {
+    CachePack p{file};
+    p.Put(1, "other type", Bytes("x"));
+    StartLaunches(p, 9);
+    p.Put(4, "aged 21", Bytes("x"));
+    StartLaunches(p, 1);
+    p.Put(4, "aged 20", Bytes("x"));
+    StartLaunches(p, 20);
+    p.Put(4, "aged 0", Bytes("x"));
+    assert(p.Age(1, "other type") == 30u);
+    const size_t dead = p.DeadBytes();
+    assert(p.EraseUnused(4, 20) == 1);
+    assert(!p.Find(4, "aged 21"));
+    assert(p.Find(4, "aged 20"));
+    assert(p.Find(4, "aged 0"));
+    assert(p.Find(1, "other type"));
+    assert(p.Count(4) == 2);
+    assert(p.DeadBytes() > dead);
+    assert(p.EraseUnused(4, 20) == 0);
+}
+
+void ImageKeepsAges(const std::filesystem::path& file) {
+    {
+        CachePack p{file};
+        p.Put(1, "capped", Bytes("old"));
+        StartLaunches(p, CachePack::MaxAge - 7);
+        p.Put(1, "aged 12", Bytes("twelve"));
+        StartLaunches(p, 7);
+        p.Put(2, "aged 5", Bytes("five"));
+        StartLaunches(p, 5);
+        p.Put(1, "aged 0", Bytes("zero"));
+        assert(p.Age(1, "capped") == CachePack::MaxAge + 5);
+        assert(p.Rewrite(p.Image()));
+    }
+    {
+        CachePack p{file};
+        assert(p.Age(1, "capped") == CachePack::MaxAge);
+        assert(p.Age(1, "aged 12") == 12u);
+        assert(p.Age(2, "aged 5") == 5u);
+        assert(p.Age(1, "aged 0") == 0u);
+        assert(*p.Find(1, "capped") == Bytes("old"));
+        assert(*p.Find(1, "aged 12") == Bytes("twelve"));
+        assert(*p.Find(2, "aged 5") == Bytes("five"));
+        assert(*p.Find(1, "aged 0") == Bytes("zero"));
+        // Launches with nothing used since still count.
+        StartLaunches(p, 2);
+        assert(p.Rewrite(p.Image()));
+    }
+    {
+        CachePack p{file};
+        assert(p.Age(1, "aged 12") == 14u);
+        assert(p.Age(2, "aged 5") == 7u);
+        assert(p.Age(1, "aged 0") == 2u);
+    }
+}
+
+void UsedRecordForMissingEntryIsIgnored(const std::filesystem::path& root) {
+    const auto file = root / "used_missing.pack";
+    std::vector<u8> never_existed;
+    {
+        // A used record for a name this pack never had, taken from another pack.
+        CachePack other{root / "other.pack"};
+        other.Put(1, "ghost", Bytes("x"));
+        other.StartLaunch();
+        never_existed = other.Use(1, "ghost");
+        assert(!never_existed.empty());
+    }
+    {
+        CachePack p{file};
+        assert(p.Append(p.Put(1, "a", Bytes("one"))));
+        StartLaunches(p, 1);
+        assert(p.Append(p.Use(1, "a")));
+        assert(p.Append(p.Erase(1, "a")));
+        assert(p.Append(never_existed));
+        assert(p.Append(p.Put(1, "b", Bytes("two"))));
+    }
+    {
+        CachePack p{file};
+        assert(!p.Find(1, "a"));
+        assert(!p.Find(1, "ghost"));
+        assert(*p.Find(1, "b") == Bytes("two"));
+        assert(p.Count(1) == 1);
+        assert(8 + p.LiveBytes() + p.DeadBytes() == std::filesystem::file_size(file));
+    }
+}
+
+void UseIsRecordedOncePerLaunch() {
+    CachePack p{std::filesystem::path{}};
+    p.Put(1, "a", Bytes("one"));
+    assert(p.Use(1, "a").empty()); // the put already marks this launch
+    p.StartLaunch();
+    assert(!p.Use(1, "a").empty());
+    assert(p.Use(1, "a").empty());
+    p.StartLaunch();
+    assert(!p.Use(1, "a").empty());
+    assert(p.Use(1, "missing").empty());
+}
 } // namespace
 
 int main() {
@@ -211,6 +338,11 @@ int main() {
     FailedRewriteLeavesTheOldFile(root);
     Limits(root / "limits.pack");
     ImageRoundTrip(root / "image.pack");
+    AgesSurviveReopen(root / "ages.pack");
+    UnusedEntriesAreErased(root / "unused.pack");
+    ImageKeepsAges(root / "image_ages.pack");
+    UsedRecordForMissingEntryIsIgnored(root);
+    UseIsRecordedOncePerLaunch();
     std::filesystem::remove_all(root);
     std::puts("cache pack: all tests passed");
 }

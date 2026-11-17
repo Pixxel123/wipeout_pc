@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <bit>
 #include <cstring>
 #include <fstream>
@@ -46,11 +47,11 @@ void AppendHeader(std::vector<u8>& out) {
     Write(out, &CachePack::Version, sizeof(u32));
 }
 
+// `data_size` is data.size(), or one of the marks of a record without data.
 void AppendRecord(std::vector<u8>& out, u32 type, std::string_view name,
-                  std::span<const u8> data, bool removed) {
+                  std::span<const u8> data, u32 data_size) {
     const size_t start = out.size();
     const u32 name_size = u32(name.size());
-    const u32 data_size = removed ? CachePack::Removed : u32(data.size());
     Write(out, &type, sizeof(u32));
     Write(out, &name_size, sizeof(u32));
     Write(out, &data_size, sizeof(u32));
@@ -146,11 +147,12 @@ void CachePack::Load() {
         const u32 type = Read<u32>(rest, 0);
         const u32 name_size = Read<u32>(rest, 4);
         const u32 data_size = Read<u32>(rest, 8);
-        const bool removed = data_size == Removed;
-        if (name_size == 0 || name_size > MaxNameBytes || (!removed && data_size > MaxBlobBytes)) {
+        const bool has_data = data_size < Launch; // the marks are the highest values
+        if ((name_size == 0) != (data_size == Launch) || name_size > MaxNameBytes ||
+            (has_data && data_size > MaxBlobBytes)) {
             break;
         }
-        const size_t record_size = RecordBytes(name_size, removed ? 0 : data_size);
+        const size_t record_size = RecordBytes(name_size, has_data ? data_size : 0);
         if (rest.size() < record_size ||
             Read<u64>(rest, record_size - ChecksumBytes) !=
                 XXH3_64bits(rest.data(), record_size - ChecksumBytes)) {
@@ -158,11 +160,17 @@ void CachePack::Load() {
         }
         const std::string_view name(reinterpret_cast<const char*>(rest.data()) + RecordHeadBytes,
                                     name_size);
-        if (removed) {
-            Remove(type, name);
-            dead_bytes += record_size;
-        } else {
+        if (has_data) {
             Store(type, name, rest.subspan(RecordHeadBytes + name_size, data_size));
+        } else {
+            if (data_size == Removed) {
+                Remove(type, name);
+            } else if (data_size == Launch) {
+                ++launch;
+            } else if (Entry* entry = FindEntry(type, name)) { // Used; ignored once removed
+                entry->last_launch = launch;
+            }
+            dead_bytes += record_size;
         }
         good += record_size;
     }
@@ -176,12 +184,12 @@ void CachePack::Store(u32 type, std::string_view name, std::span<const u8> data)
     auto& entries = types[type];
     auto it = entries.find(name);
     if (it != entries.end()) {
-        const size_t old_size = RecordBytes(name.size(), it->second.size());
+        const size_t old_size = RecordBytes(name.size(), it->second.data.size());
         live_bytes -= old_size;
         dead_bytes += old_size;
-        it->second.assign(data.begin(), data.end());
+        it->second = {{data.begin(), data.end()}, launch};
     } else {
-        entries.emplace(std::string(name), std::vector<u8>(data.begin(), data.end()));
+        entries.emplace(std::string(name), Entry{{data.begin(), data.end()}, launch});
     }
     live_bytes += RecordBytes(name.size(), data.size());
 }
@@ -195,14 +203,14 @@ bool CachePack::Remove(u32 type, std::string_view name) {
     if (it == entries->second.end()) {
         return false;
     }
-    const size_t size = RecordBytes(name.size(), it->second.size());
+    const size_t size = RecordBytes(name.size(), it->second.data.size());
     live_bytes -= size;
     dead_bytes += size;
     entries->second.erase(it);
     return true;
 }
 
-const std::vector<u8>* CachePack::Find(u32 type, std::string_view name) const {
+const CachePack::Entry* CachePack::FindEntry(u32 type, std::string_view name) const {
     const auto entries = types.find(type);
     if (entries == types.end()) {
         return nullptr;
@@ -211,11 +219,16 @@ const std::vector<u8>* CachePack::Find(u32 type, std::string_view name) const {
     return it == entries->second.end() ? nullptr : &it->second;
 }
 
+const std::vector<u8>* CachePack::Find(u32 type, std::string_view name) const {
+    const Entry* entry = FindEntry(type, name);
+    return entry ? &entry->data : nullptr;
+}
+
 std::vector<std::string> CachePack::Names(u32 type) const {
     std::vector<std::string> names;
     if (const auto entries = types.find(type); entries != types.end()) {
         names.reserve(entries->second.size());
-        for (const auto& [name, data] : entries->second) {
+        for (const auto& [name, entry] : entries->second) {
             names.push_back(name);
         }
     }
@@ -225,6 +238,11 @@ std::vector<std::string> CachePack::Names(u32 type) const {
 size_t CachePack::Count(u32 type) const {
     const auto entries = types.find(type);
     return entries == types.end() ? 0 : entries->second.size();
+}
+
+std::optional<u32> CachePack::Age(u32 type, std::string_view name) const {
+    const Entry* entry = FindEntry(type, name);
+    return entry ? std::optional<u32>(launch - entry->last_launch) : std::nullopt;
 }
 
 size_t CachePack::LiveBytes() const {
@@ -241,7 +259,7 @@ std::vector<u8> CachePack::Put(u32 type, std::string_view name, std::span<const 
     }
     Store(type, name, data);
     std::vector<u8> record;
-    AppendRecord(record, type, name, data, false);
+    AppendRecord(record, type, name, data, u32(data.size()));
     return record;
 }
 
@@ -250,7 +268,7 @@ std::vector<u8> CachePack::Erase(u32 type, std::string_view name) {
         return {};
     }
     std::vector<u8> record;
-    AppendRecord(record, type, name, {}, true);
+    AppendRecord(record, type, name, {}, Removed);
     dead_bytes += record.size();
     return record;
 }
@@ -261,8 +279,8 @@ void CachePack::EraseIf(const std::function<bool(u32 type)>& keep) {
             ++it;
             continue;
         }
-        for (const auto& [name, data] : it->second) {
-            const size_t size = RecordBytes(name.size(), data.size());
+        for (const auto& [name, entry] : it->second) {
+            const size_t size = RecordBytes(name.size(), entry.data.size());
             live_bytes -= size;
             dead_bytes += size;
         }
@@ -270,14 +288,74 @@ void CachePack::EraseIf(const std::function<bool(u32 type)>& keep) {
     }
 }
 
+std::vector<u8> CachePack::StartLaunch() {
+    ++launch;
+    std::vector<u8> record;
+    AppendRecord(record, 0, {}, {}, Launch);
+    dead_bytes += record.size();
+    return record;
+}
+
+std::vector<u8> CachePack::Use(u32 type, std::string_view name) {
+    Entry* entry = FindEntry(type, name);
+    if (!entry || entry->last_launch == launch) {
+        return {};
+    }
+    entry->last_launch = launch;
+    std::vector<u8> record;
+    AppendRecord(record, type, name, {}, Used);
+    dead_bytes += record.size();
+    return record;
+}
+
+size_t CachePack::EraseUnused(u32 type, u32 max_age) {
+    const auto entries = types.find(type);
+    if (entries == types.end()) {
+        return 0;
+    }
+    return std::erase_if(entries->second, [&](const auto& item) {
+        const auto& [name, entry] = item;
+        if (launch - entry.last_launch <= max_age) {
+            return false;
+        }
+        const size_t size = RecordBytes(name.size(), entry.data.size());
+        live_bytes -= size;
+        dead_bytes += size;
+        return true;
+    });
+}
+
 std::vector<u8> CachePack::Image() const {
+    struct Item {
+        u32 age;
+        u32 type;
+        const std::string* name;
+        const std::vector<u8>* data;
+    };
+    std::vector<Item> items;
+    for (const auto& [type, entries] : types) {
+        for (const auto& [name, entry] : entries) {
+            const u32 age = std::min(launch - entry.last_launch, MaxAge);
+            items.push_back({age, type, &name, &entry.data});
+        }
+    }
+    std::ranges::sort(items, std::ranges::greater{}, &Item::age);
+
+    // The oldest entries come first. Each launch record after them makes them one launch
+    // older, until the newest ones, which reopen with the age they have now.
     std::vector<u8> image;
     image.reserve(HeaderBytes + live_bytes);
     AppendHeader(image);
-    for (const auto& [type, entries] : types) {
-        for (const auto& [name, data] : entries) {
-            AppendRecord(image, type, name, data, false);
+    u32 age = items.empty() ? 0 : items.front().age;
+    for (const Item& item : items) {
+        for (; age > item.age; --age) {
+            AppendRecord(image, 0, {}, {}, Launch);
         }
+        AppendRecord(image, item.type, *item.name, *item.data, u32(item.data->size()));
+    }
+    // Launches since anything was last used count too.
+    for (; age > 0; --age) {
+        AppendRecord(image, 0, {}, {}, Launch);
     }
     return image;
 }

@@ -21,6 +21,11 @@
 
 namespace {
 
+// gow3: a pipeline binary that no build asked for in this many launches is removed at start.
+// A race uses some hundreds of them; without this the pack only grows.
+constexpr u32 UnusedLaunches = 20;
+static_assert(UnusedLaunches < Storage::CachePack::MaxAge);
+
 std::mutex submit_mutex{};
 std::atomic<u32> num_requests{};
 std::condition_variable_any request_cv{};
@@ -137,12 +142,18 @@ void DataBase::Open() {
     for (u32 type = 0; type <= u32(BlobType::PipelineBinary); ++type) {
         entries += loaded->Count(type);
     }
-    const size_t live = loaded->LiveBytes();
-    const size_t dead = loaded->DeadBytes();
     std::printf("Cache pack: %zu entries, %.1f MB live, %.1f MB dead, read in %.0f ms\n", entries,
-                live / 1048576.0, dead / 1048576.0, read_ms.count());
+                loaded->LiveBytes() / 1048576.0, loaded->DeadBytes() / 1048576.0, read_ms.count());
+    // gow3: before the rewrite decision, so the bytes of the binaries dropped here count as dead.
+    if (const size_t dropped =
+            loaded->EraseUnused(u32(BlobType::PipelineBinary), UnusedLaunches)) {
+        std::printf("Cache pack: %zu pipeline binaries unused for %u launches removed\n", dropped,
+                    UnusedLaunches);
+    }
     // gow3: replaced and removed entries stay in the file, since it is only appended to. Once
     // they outweigh the live ones and are worth a write, the file is written again without them.
+    const size_t live = loaded->LiveBytes();
+    const size_t dead = loaded->DeadBytes();
     if (dead > (size_t{8} << 20) && dead > live) {
         loaded->Rewrite(loaded->Image());
     }
@@ -156,6 +167,8 @@ void DataBase::Open() {
     {
         std::scoped_lock lock{pack_mutex};
         pack = std::move(loaded);
+        // gow3: after any rewrite above, which writes the ages as they were before this launch.
+        QueueAppend(pack->StartLaunch());
     }
     io_worker = std::jthread{ProcessIO};
     opened = true;
@@ -218,12 +231,29 @@ void DataBase::Remove(BlobType type, const std::string& name) {
     }
 }
 
+const std::vector<u8>* DataBase::FindUsed(BlobType type, const std::string& name) {
+    if (!pack) {
+        return nullptr;
+    }
+    // gow3: only the pipeline binaries age out; the shader store is bounded by the build stamp.
+    // The record is queued, so the lookup never waits on the disk.
+    if (type == BlobType::PipelineBinary) {
+        QueueAppend(pack->Use(u32(type), name));
+    }
+    return pack->Find(u32(type), name);
+}
+
 void DataBase::Load(BlobType type, const std::string& name, std::vector<u8>& data) {
     std::scoped_lock lock{pack_mutex};
-    CopyBlob(pack ? pack->Find(u32(type), name) : nullptr, data);
+    CopyBlob(FindUsed(type, name), data);
 }
 
 void DataBase::Load(BlobType type, const std::string& name, std::vector<u32>& data) {
+    std::scoped_lock lock{pack_mutex};
+    CopyBlob(FindUsed(type, name), data);
+}
+
+void DataBase::Peek(BlobType type, const std::string& name, std::vector<u8>& data) {
     std::scoped_lock lock{pack_mutex};
     CopyBlob(pack ? pack->Find(u32(type), name) : nullptr, data);
 }

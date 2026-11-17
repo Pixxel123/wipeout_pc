@@ -45,8 +45,12 @@ public:
     bool Save(BlobType type, const std::string& name, std::vector<u8>&& data);
     bool Save(BlobType type, const std::string& name, std::vector<u32>&& data);
 
+    /// gow3: a pipeline binary that is found counts as used this launch; one not used in 20
+    /// launches is removed at start.
     void Load(BlobType type, const std::string& name, std::vector<u8>& data);
     void Load(BlobType type, const std::string& name, std::vector<u32>& data);
+    /// gow3: Load without counting as a use, for a check that reads every blob.
+    void Peek(BlobType type, const std::string& name, std::vector<u8>& data);
     /// gow3: deletes one blob. The file records the removal after the writes already submitted,
     /// so an earlier Save of the same name is undone and a later one is kept.
     void Remove(BlobType type, const std::string& name);
@@ -61,6 +65,8 @@ public:
 
 private:
     bool SaveBytes(BlobType type, const std::string& name, std::span<const u8> data);
+    /// gow3: Find that marks a pipeline binary used; the caller holds pack_mutex.
+    const std::vector<u8>* FindUsed(BlobType type, const std::string& name);
     /// gow3: hands a record to the IO thread; the caller holds pack_mutex (see the .cpp).
     void QueueAppend(std::vector<u8>&& record);
 

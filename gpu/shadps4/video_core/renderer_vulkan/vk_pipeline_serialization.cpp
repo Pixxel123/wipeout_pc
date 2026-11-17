@@ -249,12 +249,13 @@ void ReportPipelineBinaryCache() {
 }
 
 size_t DropForeignPipelineBinaries(const PipelineBinaryCache::Key& global) {
-    // gow3: a binary from another driver can never be restored, so it only takes up space.
+    // gow3: a binary from another driver can never be restored, so it only takes up space. Peek,
+    // since reading every binary here is no use of them: Load would keep them all from aging.
     auto& db = Storage::DataBase::Instance();
     size_t removed = 0;
     for (const auto& name : db.ListBlobs(Storage::BlobType::PipelineBinary)) {
         std::vector<u8> bytes;
-        db.Load(Storage::BlobType::PipelineBinary, name, bytes);
+        db.Peek(Storage::BlobType::PipelineBinary, name, bytes);
         if (!PipelineBinaryCache::SavedUnder(bytes, global)) {
             db.Remove(Storage::BlobType::PipelineBinary, name);
             ++removed;
