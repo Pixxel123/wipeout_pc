@@ -14,8 +14,6 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
-#include <fstream>
-#include <map>
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
@@ -75,7 +73,7 @@ namespace Vulkan {
 
 namespace {
 u32 CurrentShaderBinaryVersion();
-/// gow3: ShaderProfile/disk_shaders holds this when the store's permutation files may be read
+/// gow3: ShaderProfile/disk_shaders holds this when the store's permutation entries may be read
 /// at on-demand startup: the hash of the recompiler's sources (ShaderBuildStamp) and the store's
 /// format versions. A translator change, or a format bump, drops the saved permutations once; a
 /// build that changes neither (most releases) keeps them.
@@ -88,7 +86,7 @@ std::vector<u8> DiskShaderMarker() {
 /// gow3: this session may number permutations by first use: no on-demand reads at next start.
 void ForgetDiskShaders() {
     auto& db = Storage::DataBase::Instance();
-    if (db.IsOpened() && db.ConcurrentReads()) {
+    if (db.IsOpened()) {
         db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", std::vector<u8>{0});
     }
 }
@@ -130,15 +128,15 @@ std::vector<u8> Encode(const Key& global, const Key& pipeline, u64 graphics_hash
         append(u32(data.size()));
         bytes.insert(bytes.end(), data.begin(), data.end());
     };
-    append(u32{0x31425047}); // GPB1, little-endian Windows/Linux cache format.
-    append(u32{1});
+    append(Magic);
+    append(Version);
     append(graphics_hash);
     blob(global);
     blob(pipeline);
     append(u32(binaries.size()));
     for (const auto& binary : binaries) {
-        if (!ValidKey(binary.key) || binary.data.empty() || binary.data.size() > MaxFileSize ||
-            bytes.size() + binary.key.size() + binary.data.size() + 16 > MaxFileSize) {
+        if (!ValidKey(binary.key) || binary.data.empty() || binary.data.size() > MaxBytes ||
+            bytes.size() + binary.key.size() + binary.data.size() + 16 > MaxBytes) {
             return {};
         }
         blob(binary.key);
@@ -149,7 +147,7 @@ std::vector<u8> Encode(const Key& global, const Key& pipeline, u64 graphics_hash
 }
 std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& global,
                                           const Key& pipeline, u64 graphics_hash) {
-    if (bytes.size() < 8 || bytes.size() > MaxFileSize || !ValidKey(global) ||
+    if (bytes.size() < 8 || bytes.size() > MaxBytes || !ValidKey(global) ||
         !ValidKey(pipeline)) {
         return std::nullopt;
     }
@@ -180,7 +178,7 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
     u32 magic, version, count;
     u64 stored_hash;
     Key stored_global, stored_pipeline;
-    if (!read(magic) || magic != 0x31425047 || !read(version) || version != 1 ||
+    if (!read(magic) || magic != Magic || !read(version) || version != Version ||
         !read(stored_hash) || stored_hash != graphics_hash || !blob(stored_global, 32) ||
         stored_global != global || !blob(stored_pipeline, 32) || stored_pipeline != pipeline ||
         !read(count) || !count || count > MaxBinaries) {
@@ -188,67 +186,35 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
     }
     std::vector<Binary> binaries(count);
     for (auto& binary : binaries) {
-        if (!blob(binary.key, 32) || !blob(binary.data, MaxFileSize)) {
+        if (!blob(binary.key, 32) || !blob(binary.data, MaxBytes)) {
             return std::nullopt;
         }
     }
     return offset == bytes.size() ? std::optional{std::move(binaries)} : std::nullopt;
 }
-bool Save(const std::filesystem::path& file, std::span<const u8> bytes) {
-    if (bytes.empty() || bytes.size() > MaxFileSize) {
+
+bool SavedUnder(std::span<const u8> bytes, const Key& global) {
+    // Reads only the header: the checksum is left to Decode, which runs when the binary is used.
+    if (!ValidKey(global)) {
         return false;
     }
-    std::error_code error;
-    std::filesystem::create_directories(file.parent_path(), error);
-    if (error) {
-        return false;
-    }
-    // Unique siblings avoid concurrent writers truncating one another's temporary data.
-    static std::atomic<u64> sequence{0};
-    auto temp = file;
-    temp += "." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-            "." + std::to_string(sequence++) + ".tmp";
-    bool written = false;
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (stream) {
-            stream.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-            stream.flush();
-            written = bool(stream);
-            stream.close();
-            written = written && !stream.fail();
+    size_t offset = 0;
+    const auto read = [&](auto& value) {
+        if (sizeof(value) > bytes.size() - offset) {
+            return false;
         }
+        std::memcpy(&value, bytes.data() + offset, sizeof(value));
+        offset += sizeof(value);
+        return true;
+    };
+    u32 magic, version, size;
+    u64 graphics_hash;
+    if (!read(magic) || magic != Magic || !read(version) || version != Version ||
+        !read(graphics_hash) || !read(size) || size != global.size() ||
+        size > bytes.size() - offset) {
+        return false;
     }
-    bool renamed = false;
-    if (written) {
-#ifdef _WIN32
-        renamed = MoveFileExW(temp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-#else
-        std::filesystem::rename(temp, file, error);
-        renamed = !error;
-#endif
-    }
-    if (!renamed) {
-        std::filesystem::remove(temp, error);
-    }
-    return renamed;
-}
-std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const Key& global,
-                                        const Key& pipeline, u64 graphics_hash) {
-    std::ifstream stream(file, std::ios::binary | std::ios::ate);
-    if (!stream) {
-        return std::nullopt;
-    }
-    const auto size = stream.tellg();
-    if (size <= 0 || size > std::streamoff(MaxFileSize)) {
-        return std::nullopt;
-    }
-    std::vector<u8> bytes(static_cast<size_t>(size));
-    stream.seekg(0);
-    if (!stream.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) {
-        return std::nullopt;
-    }
-    return Decode(bytes, global, pipeline, graphics_hash);
+    return std::equal(global.begin(), global.end(), bytes.begin() + offset);
 }
 } // namespace PipelineBinaryCache
 
@@ -267,47 +233,6 @@ PipelineBinaryCache::Key BinaryKey(const vk::PipelineBinaryKeyKHR& key) {
     }
     return {key.key.begin(), key.key.begin() + key.keySize};
 }
-
-std::optional<std::vector<PipelineBinaryCache::Binary>> LoadLegacyBinary(
-    const std::filesystem::path& directory, const std::string& name,
-    const PipelineBinaryCache::Key& global, const PipelineBinaryCache::Key& pipeline) {
-    using Index = std::unordered_multimap<std::string, std::pair<std::filesystem::path, u64>>;
-    static std::mutex mutex;
-    static std::map<std::filesystem::path, Index> indexes;
-    std::vector<std::pair<std::filesystem::path, u64>> candidates;
-    {
-        std::scoped_lock lock{mutex};
-        auto [it, inserted] = indexes.try_emplace(directory);
-        if (inserted) {
-            std::error_code error;
-            for (std::filesystem::directory_iterator files(directory, error), end;
-                 !error && files != end; files.increment(error)) {
-                const auto stem = files->path().stem().string();
-                if (files->path().extension() != ".bin" || stem.size() < 18 || stem[16] != '_') {
-                    continue;
-                }
-                try {
-                    size_t used = 0;
-                    const auto hash = std::stoull(stem.substr(0, 16), &used, 16);
-                    if (used == 16) {
-                        it->second.emplace(stem.substr(17), std::pair{files->path(), hash});
-                    }
-                } catch (const std::exception&) {
-                }
-            }
-        }
-        const auto [first, last] = it->second.equal_range(name);
-        for (auto entry = first; entry != last; ++entry) {
-            candidates.push_back(entry->second);
-        }
-    }
-    for (const auto& [file, hash] : candidates) {
-        if (auto binaries = PipelineBinaryCache::Load(file, global, pipeline, hash)) {
-            return binaries;
-        }
-    }
-    return std::nullopt;
-}
 } // namespace
 
 void ReportPipelineBinaryCache() {
@@ -323,10 +248,24 @@ void ReportPipelineBinaryCache() {
                 binary_compile_ns.load() / 1e6 / std::max(u64{1}, binary_compile_calls.load()));
 }
 
+size_t DropForeignPipelineBinaries(const PipelineBinaryCache::Key& global) {
+    // gow3: a binary from another driver can never be restored, so it only takes up space.
+    auto& db = Storage::DataBase::Instance();
+    size_t removed = 0;
+    for (const auto& name : db.ListBlobs(Storage::BlobType::PipelineBinary)) {
+        std::vector<u8> bytes;
+        db.Load(Storage::BlobType::PipelineBinary, name, bytes);
+        if (!PipelineBinaryCache::SavedUnder(bytes, global)) {
+            db.Remove(Storage::BlobType::PipelineBinary, name);
+            ++removed;
+        }
+    }
+    return removed;
+}
+
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
-    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key,
-    const std::filesystem::path& directory) {
+    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key) {
     using namespace PipelineBinaryCache;
     const auto& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER;
     const bool enabled = global_key.keySize && EmulatorSettings.IsPipelineCacheEnabled();
@@ -387,7 +326,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         name += fmt::format("{:02x}", byte);
     }
     // The driver key identifies the pipeline independently of emulator draw-state keys.
-    const auto file = directory / (name + ".bin");
+    auto& db = Storage::DataBase::Instance();
     std::vector<VkPipelineBinaryKHR> handles;
     const auto destroy = [&] {
         for (auto handle : handles) {
@@ -400,11 +339,15 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     SCOPE_EXIT { destroy(); };
     try {
         const auto load_started = std::chrono::steady_clock::now();
-        auto binaries = Load(file, global, pipeline_id, 0);
-        if (!binaries) {
-            binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
-            if (binaries) {
-                Save(file, Encode(global, pipeline_id, 0, *binaries));
+        std::vector<u8> stored;
+        db.Load(Storage::BlobType::PipelineBinary, name, stored);
+        std::optional<std::vector<Binary>> binaries;
+        if (!stored.empty()) {
+            binaries = Decode(stored, global, pipeline_id, 0);
+            if (!binaries) {
+                // Written by another driver or damaged: drop it, the compile below saves a new one.
+                db.Remove(Storage::BlobType::PipelineBinary, name);
+                ++binary_rejected;
             }
         }
         binary_load_ns += ElapsedNs(load_started);
@@ -498,7 +441,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             auto* raw_key = reinterpret_cast<VkPipelineBinaryKeyKHR*>(&binary_key);
             if (dispatch.vkGetPipelineBinaryDataKHR(device, &data_info, raw_key, &size, nullptr) !=
                     VK_SUCCESS ||
-                !size || size > MaxFileSize || total_size + size > MaxFileSize ||
+                !size || size > MaxBytes || total_size + size > MaxBytes ||
                 !ValidKey(BinaryKey(binary_key))) {
                 ++binary_errors;
                 return result;
@@ -515,8 +458,10 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             binary.data.resize(size);
             binaries.push_back(std::move(binary));
         }
-        const auto encoded = Encode(global, pipeline_id, 0, binaries);
-        if (Save(file, encoded)) {
+        // An empty encoding (a key or size out of bounds) is never stored.
+        if (auto encoded = Encode(global, pipeline_id, 0, binaries);
+            !encoded.empty() &&
+            db.Save(Storage::BlobType::PipelineBinary, name, std::move(encoded))) {
             ++binary_saved;
         } else {
             ++binary_errors;
@@ -973,8 +918,6 @@ bool PipelineCache::CheckCacheProfile() {
     std::vector<u8> profile_data{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
     if (profile_data.empty()) {
-        Storage::DataBase::Instance().FinishPreload();
-
         profile_data.resize(sizeof(profile));
         std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
@@ -995,7 +938,6 @@ bool PipelineCache::CheckCacheProfile() {
         // Start a fresh cache for this build and GPU instead.
         LOG_WARNING(Render, "Pipeline cache isn't compatible with current system: rebuilding it");
         Storage::DataBase::Instance().Clear();
-        Storage::DataBase::Instance().FinishPreload();
         profile_data.resize(sizeof(profile));
         std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
@@ -1113,8 +1055,6 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);
     }
-
-    Storage::DataBase::Instance().FinishPreload();
 }
 
 void PipelineCache::StartOnDemand() {
@@ -1123,11 +1063,11 @@ void PipelineCache::StartOnDemand() {
     // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
     const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
                          !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
-    if (db.IsOpened() && db.ConcurrentReads() && !disk_on) {
+    if (db.IsOpened() && !disk_on) {
         // This session numbers permutations by first use again: the store is rebuilt at the
         // next start with disk shaders on.
         ForgetDiskShaders();
-    } else if (db.IsOpened() && db.ConcurrentReads()) {
+    } else if (db.IsOpened()) {
         std::vector<u8> marker;
         if (compatible) {
             db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
@@ -1135,9 +1075,9 @@ void PipelineCache::StartOnDemand() {
         const auto expected = DiskShaderMarker();
         if (marker != expected) {
             // Sessions without the marker numbered permutations by first use and overwrote the
-            // files by name: a meta and its SPIR-V are separate writes, so an exit between them
+            // entries by name: a meta and its SPIR-V are separate writes, so an exit between them
             // can pair one shader's meta with another's SPIR-V. Another translator may also have
-            // produced different SPIR-V. Only the numbered permutation files are dropped (once):
+            // produced different SPIR-V. Only the numbered permutation entries are dropped (once):
             // pipeline keys and the profile stay. A kept key whose slot now holds another
             // permutation only makes the warm-up build a pipeline no draw asks for, since draws
             // look pipelines up by their own key; a key whose slot is gone is skipped.
@@ -1160,7 +1100,13 @@ void PipelineCache::StartOnDemand() {
         }
         disk_shaders = true;
     }
-    db.FinishPreload();
+    // gow3: without a global key no binary was saved, so there is nothing to drop.
+    if (instance.GetPipelineBinaryGlobalKey().keySize != 0) {
+        if (const auto removed =
+                DropForeignPipelineBinaries(BinaryKey(instance.GetPipelineBinaryGlobalKey()))) {
+            std::printf("Pipeline binaries: %zu of another driver removed\n", removed);
+        }
+    }
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
 }
@@ -1193,7 +1139,7 @@ void PipelineCache::IndexDiskShaders() {
 // gow3: GPU thread, once per program: every saved permutation at its saved index, so names and
 // pipeline keys stay those of the store. Rejected blobs (other versions, motion vertex shaders,
 // damaged SPIR-V, a module the driver refuses) leave their slot empty for the next compile
-// (NewPermutationIndex), and both files of the slot are deleted: the meta and the SPIR-V are
+// (NewPermutationIndex), and both entries of the slot are deleted: the meta and the SPIR-V are
 // separate writes, and a slot refilled with another shader must never pair an old meta with
 // the new SPIR-V. The deletes queue in the store's write order, meta first: SPIR-V is written
 // first, so an exit at any point leaves at most a SPIR-V without a meta, rejected next start.
@@ -1281,8 +1227,8 @@ size_t PipelineCache::NewPermutationIndex(const Program& program) const {
     return program.modules.size();
 }
 
-// gow3: with stable permutation indices a saved pipeline key file already holds this key, so it
-// is not written again (thousands of files every start otherwise).
+// gow3: with stable permutation indices a saved pipeline key entry already holds this key, so it
+// is not written again (thousands of appends every start otherwise).
 bool PipelineCache::NewPipelineKey(const std::string& name) {
     if (!DiskShadersActive()) {
         return true;
@@ -1384,9 +1330,6 @@ struct PipelineCache::BackgroundWarmup {
 };
 
 bool PipelineCache::StartBackgroundWarmUp() {
-    if (!Storage::DataBase::Instance().ConcurrentReads()) {
-        return false;
-    }
     if (!CheckCacheProfile()) {
         return true; // nothing cached yet
     }
@@ -1651,7 +1594,7 @@ void PipelineCache::PumpWarmUp() {
                 warm.pump_ns / 1e9, warm.pump_max_ns / 1e6, warm.pump_gap_max_ns / 1e6,
                 warm.batches, warm.build_ns.load() / 1e9, warm.read_queue_ns.load() / 1e9,
                 warm.build_queue_ns.load() / 1e9);
-    std::printf("Pipeline binary profile: keys %.3f thread-s, disk/decode/migration %.3f thread-s, "
+    std::printf("Pipeline binary profile: keys %.3f thread-s, load/decode %.3f thread-s, "
                 "binary handles %.3f thread-s, driver restore %.3f thread-s, "
                 "driver compile %.3f thread-s\n",
                 binary_key_ns.load() / 1e9, binary_load_ns.load() / 1e9,
@@ -1668,7 +1611,6 @@ void PipelineCache::PumpWarmUp() {
     // The idle threads stay parked (StopWarmUp).
     warm.finished = true;
     Gow3Overlay::SetBackgroundLoading(0, 0);
-    Storage::DataBase::Instance().FinishPreload();
 }
 
 void PipelineCache::StopWarmUp() {

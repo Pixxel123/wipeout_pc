@@ -16,7 +16,6 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
-#include "common/elf_info.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
@@ -436,11 +435,9 @@ GraphicsPipeline::GraphicsPipeline(
         .layout = *pipeline_layout,
     };
 
-    const auto binary_directory = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
-        Common::ElfInfo::Instance().GameSerial() / "pipeline-binaries";
     auto [pipeline_result, pipe] =
         CreateCachedGraphicsPipeline(device, pipeline_cache, pipeline_info, key,
-                                     instance.GetPipelineBinaryGlobalKey(), binary_directory);
+                                     instance.GetPipelineBinaryGlobalKey());
     // gow3: a cached pipeline the driver refuses at the start (a damaged cache after a crash, or a
     // driver error) stays out of the warm-up (Handle() is null) instead of stopping the game (#72).
     if (pipeline_result != vk::Result::eSuccess && preloading) {
@@ -463,7 +460,7 @@ GraphicsPipeline::GraphicsPipeline(
         square_info.pColorBlendState = &square_blending;
         auto [square_result, square] =
             CreateCachedGraphicsPipeline(device, pipeline_cache, square_info, key,
-                                         instance.GetPipelineBinaryGlobalKey(), binary_directory);
+                                         instance.GetPipelineBinaryGlobalKey());
         // gow3: a refused squaring pass leaves the whole cached pipeline out (#72, #149).
         if (square_result != vk::Result::eSuccess && preloading) {
             LOG_WARNING(Render_Vulkan,
