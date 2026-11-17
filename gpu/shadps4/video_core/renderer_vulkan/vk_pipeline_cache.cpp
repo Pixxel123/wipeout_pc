@@ -957,9 +957,24 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         CompileTimer timer;
 
         GraphicsPipeline::SerializationSupport sdata{};
+        // gow3: why this build was not sent to a worker; only the log line reads it for now.
+        const char* reason = "switch off";
+        // gow3: time only the build, so a mid-race compile that stalls the frame is visible in the log.
+        const auto build_start = std::chrono::steady_clock::now();
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
             sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, false);
+        const double build_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - build_start)
+                                    .count();
+        // gow3: the load-grace window is read from its fields, not LongGrace(), which is false
+        // whenever the feature is off; a build during a loading screen or the 7 s after it is not logged.
+        if (build_ms >= 5.0 && !g_compile_policy.loading.load(std::memory_order_relaxed) &&
+            CompilePolicy::Now() >=
+                g_compile_policy.long_grace_until_ns.load(std::memory_order_relaxed)) {
+            std::printf("Pipelines: built on the GPU thread while playing, %.1f ms (%s)\n",
+                        build_ms, reason);
+        }
 
         if (NewPipelineKey(fmt::format("g_{:#018x}", pipeline_hash))) {
             RegisterPipelineData(sel.graphics_key, pipeline_hash, sdata);
