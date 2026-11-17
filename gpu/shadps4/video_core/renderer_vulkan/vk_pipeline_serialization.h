@@ -31,6 +31,9 @@ std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const
                                         const Key& pipeline, u64 graphics_hash);
 } // namespace PipelineBinaryCache
 
+/// gow3: user/cache/<serial>/pipeline-binaries, the files of CreateCachedGraphicsPipeline.
+std::filesystem::path PipelineBinaryDirectory();
+
 /// `unoptimized`, when given, is set when a PipelineBuild::Fast build compiled without driver
 /// optimisations (a binary cache miss); such a pipeline is never stored in the cache.
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
