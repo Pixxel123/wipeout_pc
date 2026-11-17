@@ -1,8 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <map>
+#include <mutex>
+#include <string>
+#include <tuple>
+#include <vector>
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
@@ -54,26 +62,43 @@ static void TraceRegistration(const char* what, ImageId image_id, const Image& i
     }
 }
 
-void LimitTextureSize(ImageInfo& info, ImageViewInfo& view) {
+static u32 TextureLimit() {
     static const u32 limit = [] {
         const char* value = std::getenv("GOW3_TEXTURE_LIMIT");
         return value ? u32(std::strtoul(value, nullptr, 10)) : 0u;
     }();
-    if (!limit || !info.props.is_block || info.type != AmdGpu::ImageType::Color2D ||
-        info.resources.layers != 1 || info.guest_samples > 1) {
-        return;
+    return limit;
+}
+
+/// Why `info` cannot be bound from a smaller level under `limit`; nullptr when it can, with
+/// `small` (the image from that level on) and `skip` (the levels left out) set.
+static const char* SmallerTexture(const ImageInfo& info, u32 limit, ImageInfo& small, u32& skip) {
+    skip = 0;
+    if (std::max(info.size.width, info.size.height) <= limit) {
+        return "fits";
     }
-    u32 skip = 0;
+    if (!info.props.is_block) {
+        return "not block-compressed";
+    }
+    if (info.type != AmdGpu::ImageType::Color2D) {
+        return "not 2D";
+    }
+    if (info.resources.layers != 1) {
+        return "several layers";
+    }
+    if (info.guest_samples > 1) {
+        return "multisampled";
+    }
     while (skip + 1 < info.resources.levels &&
            std::max(info.size.width, info.size.height) >> skip > limit) {
         ++skip;
     }
     if (skip == 0) {
-        return;
+        return "one level";
     }
     // The smaller texture's own layout must be the guest's levels from `skip` on (block formats
     // are micro-tiled or linear: each level is laid out from its own size).
-    ImageInfo small = info;
+    small = info;
     small.size.width = std::max(info.size.width >> skip, 1u);
     small.size.height = std::max(info.size.height >> skip, 1u);
     small.pitch = std::max(info.pitch >> skip, 1u);
@@ -85,9 +110,153 @@ void LimitTextureSize(ImageInfo& info, ImageViewInfo& view) {
         const auto& b = info.mips_layout[m + skip];
         if (a.size != b.size || a.pitch != b.pitch || a.height != b.height ||
             a.offset != b.offset - info.mips_layout[skip].offset) {
-            return;
+            return "level layout differs";
         }
     }
+    return nullptr;
+}
+
+// Diagnostic (branch diag/texture-limit-count): which textures the limit sees and which it would
+// shrink at 2048 and 4096, whatever GOW3_TEXTURE_LIMIT is. Totals since the start, printed every
+// 10 s. A texture is one guest address, size and format; one loaded again elsewhere counts again.
+namespace {
+struct LimitDiagVerdict {
+    const char* why{}; ///< nullptr: shrinks
+    u32 skip{};
+    u64 saved{}; ///< guest bytes
+};
+struct LimitDiagEntry {
+    u32 width{}, height{}, levels{}, layers{};
+    vk::Format format{};
+    AmdGpu::ImageType type{};
+    bool sampled{};
+    LimitDiagVerdict at[2]; ///< 2048, 4096
+};
+constexpr u32 LimitDiagSizes[2] = {2048, 4096};
+std::mutex limit_diag_mutex;
+std::map<std::tuple<u64, u32, u32, u32, bool>, LimitDiagEntry> limit_diag_seen;
+std::atomic<u64> limit_diag_bindings{};
+std::atomic<u64> limit_diag_shrunk_bindings{};
+u32 limit_diag_max_side = 0, limit_diag_max_width = 0, limit_diag_max_height = 0;
+
+void NoteLimitDiag(const ImageInfo& info, bool sampled) {
+    limit_diag_bindings.fetch_add(1, std::memory_order_relaxed);
+    const u32 side = std::max(info.size.width, info.size.height);
+    if (side <= 1024) {
+        return;
+    }
+    std::scoped_lock lock{limit_diag_mutex};
+    const auto [it, is_new] = limit_diag_seen.try_emplace(
+        std::tuple{u64(info.guest_address), u32(info.size.width), u32(info.size.height),
+                   u32(info.pixel_format), sampled});
+    if (!is_new) {
+        return;
+    }
+    if (side > limit_diag_max_side) {
+        limit_diag_max_side = side;
+        limit_diag_max_width = info.size.width;
+        limit_diag_max_height = info.size.height;
+    }
+    LimitDiagEntry& entry = it->second;
+    entry.width = info.size.width;
+    entry.height = info.size.height;
+    entry.levels = info.resources.levels;
+    entry.layers = info.resources.layers;
+    entry.format = info.pixel_format;
+    entry.type = info.type;
+    entry.sampled = sampled;
+    for (u32 i = 0; i < 2; ++i) {
+        ImageInfo small;
+        auto& verdict = entry.at[i];
+        verdict.why = SmallerTexture(info, LimitDiagSizes[i], small, verdict.skip);
+        if (!verdict.why) {
+            verdict.saved = info.guest_size > small.guest_size ? info.guest_size - small.guest_size : 0;
+            if (!sampled) {
+                verdict.why = "read with integer coordinates";
+            }
+        }
+    }
+}
+} // namespace
+
+void ReportTextureLimit() {
+    static auto last = std::chrono::steady_clock::now();
+    static size_t reported = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(10)) {
+        return;
+    }
+    last = now;
+    std::scoped_lock lock{limit_diag_mutex};
+    u32 over[2]{}, shrinks[2]{};
+    u64 saved[2]{};
+    struct Group {
+        u32 count{}, side{};
+        u64 area{};
+    };
+    std::map<std::string, Group> groups;
+    for (const auto& [key, e] : limit_diag_seen) {
+        std::string verdicts;
+        for (u32 i = 0; i < 2; ++i) {
+            const auto& v = e.at[i];
+            const bool fits = v.why && std::strcmp(v.why, "fits") == 0;
+            over[i] += !fits;
+            shrinks[i] += !v.why;
+            saved[i] += v.why ? 0 : v.saved;
+            const std::string what =
+                v.why ? std::string{v.why}
+                      : fmt::format("shrinks {} level{}, {:.1f} MiB less", v.skip,
+                                    v.skip == 1 ? "" : "s", double(v.saved) / 1048576.0);
+            verdicts += fmt::format("{} at {}: {}", i ? "," : "", LimitDiagSizes[i], what);
+        }
+        auto& group = groups[fmt::format("{}x{} {} levels {} layers {} {} {}:{}", e.width, e.height,
+                                         vk::to_string(e.format), e.levels, e.layers,
+                                         AmdGpu::NameOf(e.type), e.sampled ? "sampled" : "integer-read",
+                                         verdicts)];
+        ++group.count;
+        group.side = std::max(e.width, e.height);
+        group.area = u64(e.width) * e.height;
+    }
+    std::printf("Texture limit: GOW3_TEXTURE_LIMIT %u, %llu texture bindings seen (%llu bound smaller), "
+                "%zu textures over 1024 px, largest %ux%u\n",
+                TextureLimit(), static_cast<unsigned long long>(limit_diag_bindings.load()),
+                static_cast<unsigned long long>(limit_diag_shrunk_bindings.load()),
+                limit_diag_seen.size(), limit_diag_max_width, limit_diag_max_height);
+    for (u32 i = 0; i < 2; ++i) {
+        std::printf("Texture limit: at %u: %u textures over it, %u would shrink (%llu MiB less), %u "
+                    "would not\n",
+                    LimitDiagSizes[i], over[i], shrinks[i],
+                    static_cast<unsigned long long>(saved[i] >> 20), over[i] - shrinks[i]);
+    }
+    if (limit_diag_seen.size() != reported) {
+        reported = limit_diag_seen.size();
+        std::vector<std::pair<const std::string*, const Group*>> rows;
+        for (const auto& [name, group] : groups) {
+            rows.emplace_back(&name, &group);
+        }
+        std::ranges::sort(rows, [](const auto& x, const auto& y) {
+            return std::tie(x.second->side, x.second->area, *x.first) >
+                   std::tie(y.second->side, y.second->area, *y.first);
+        });
+        for (size_t i = 0; i < std::min<size_t>(rows.size(), 24); ++i) {
+            std::printf("  %u x %s\n", rows[i].second->count, rows[i].first->c_str());
+        }
+    }
+    std::fflush(stdout);
+}
+
+void LimitTextureSize(ImageInfo& info, ImageViewInfo& view, bool sampled) {
+    NoteLimitDiag(info, sampled);
+    const u32 limit = TextureLimit();
+    if (!limit || !sampled) {
+        return;
+    }
+    ImageInfo small;
+    u32 skip = 0;
+    if (SmallerTexture(info, limit, small, skip)) {
+        return;
+    }
+    limit_diag_shrunk_bindings.fetch_add(1, std::memory_order_relaxed);
     info = small;
     view.range.base.level = view.range.base.level > skip ? view.range.base.level - skip : 0;
     view.range.extent.levels =
@@ -103,6 +272,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
       readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
 
+    std::printf("GPU: texture limit %u (GOW3_TEXTURE_LIMIT)\n", TextureLimit());
     std::printf("GPU: deferred image readback %s (64 copies, 64 MiB pending limit)%s\n",
                 deferred_readbacks ? "enabled" : "disabled",
                 stale_readbacks ? "; CPU reads use the previous frame's copy" : "");
@@ -2097,6 +2267,7 @@ void TextureCache::RunGarbageCollector() {
 
     GarbageCollectImages();
     GarbageCollectSamplers();
+    ReportTextureLimit();
 }
 
 void TextureCache::TouchImage(const Image& image) {
