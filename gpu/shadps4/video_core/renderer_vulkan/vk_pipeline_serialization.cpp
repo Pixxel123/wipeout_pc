@@ -192,6 +192,30 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
     }
     return offset == bytes.size() ? std::optional{std::move(binaries)} : std::nullopt;
 }
+
+bool SavedUnder(std::span<const u8> bytes, const Key& global) {
+    // Reads only the header: the checksum is left to Decode, which runs when the binary is used.
+    if (!ValidKey(global)) {
+        return false;
+    }
+    size_t offset = 0;
+    const auto read = [&](auto& value) {
+        if (sizeof(value) > bytes.size() - offset) {
+            return false;
+        }
+        std::memcpy(&value, bytes.data() + offset, sizeof(value));
+        offset += sizeof(value);
+        return true;
+    };
+    u32 magic, version, size;
+    u64 graphics_hash;
+    if (!read(magic) || magic != 0x31425047 || !read(version) || version != 1 ||
+        !read(graphics_hash) || !read(size) || size != global.size() ||
+        size > bytes.size() - offset) {
+        return false;
+    }
+    return std::equal(global.begin(), global.end(), bytes.begin() + offset);
+}
 } // namespace PipelineBinaryCache
 
 namespace {
@@ -222,6 +246,21 @@ void ReportPipelineBinaryCache() {
                 static_cast<unsigned long long>(binary_errors.load()),
                 binary_restore_ns.load() / 1e6 / std::max(u64{1}, binary_restore_calls.load()),
                 binary_compile_ns.load() / 1e6 / std::max(u64{1}, binary_compile_calls.load()));
+}
+
+size_t DropForeignPipelineBinaries(const PipelineBinaryCache::Key& global) {
+    // gow3: a binary from another driver can never be restored, so it only takes up space.
+    auto& db = Storage::DataBase::Instance();
+    size_t removed = 0;
+    for (const auto& name : db.ListBlobs(Storage::BlobType::PipelineBinary)) {
+        std::vector<u8> bytes;
+        db.Load(Storage::BlobType::PipelineBinary, name, bytes);
+        if (!PipelineBinaryCache::SavedUnder(bytes, global)) {
+            db.Remove(Storage::BlobType::PipelineBinary, name);
+            ++removed;
+        }
+    }
+    return removed;
 }
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
@@ -1058,6 +1097,13 @@ void PipelineCache::StartOnDemand() {
             IndexDiskShaders();
         }
         disk_shaders = true;
+    }
+    // gow3: without a global key no binary was saved, so there is nothing to drop.
+    if (instance.GetPipelineBinaryGlobalKey().keySize != 0) {
+        if (const auto removed =
+                DropForeignPipelineBinaries(BinaryKey(instance.GetPipelineBinaryGlobalKey()))) {
+            std::printf("Pipeline binaries: %zu of another driver removed\n", removed);
+        }
     }
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());

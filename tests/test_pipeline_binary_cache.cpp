@@ -316,6 +316,12 @@ int main(int argc, char** argv) {
     assert(!Decode(encoded, Key{2}, pipeline, 42));
     assert(!Decode(encoded, global, Key{4}, 42));
     assert(!Decode(encoded, global, pipeline, 43));
+    const auto& global_a = global;
+    const Key global_b{2};
+    const auto bytes = Encode(global_a, pipeline, 0, binaries);
+    assert(SavedUnder(bytes, global_a));
+    assert(!SavedUnder(bytes, global_b));
+    assert(!SavedUnder(std::span<const u8>{}, global_a));
     const auto malformed = [&](size_t offset, u32 value) {
         auto bytes = encoded;
         std::memcpy(bytes.data() + offset, &value, sizeof(value));

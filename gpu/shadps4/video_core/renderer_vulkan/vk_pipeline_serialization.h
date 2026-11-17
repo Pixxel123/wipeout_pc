@@ -26,12 +26,16 @@ std::vector<u8> Encode(const Key& global, const Key& pipeline, u64 graphics_hash
                        const std::vector<Binary>& binaries);
 std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& global,
                                           const Key& pipeline, u64 graphics_hash);
+/// True when `bytes` is an encoded binary file saved under `global`.
+bool SavedUnder(std::span<const u8> bytes, const Key& global);
 } // namespace PipelineBinaryCache
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
     const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key);
 void ReportPipelineBinaryCache();
+/// Removes every PipelineBinary blob not saved under `global`; returns how many.
+size_t DropForeignPipelineBinaries(const PipelineBinaryCache::Key& global);
 
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata);
