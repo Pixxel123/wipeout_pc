@@ -24,6 +24,7 @@
 #include "common/serdes.h"
 #include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "common/elf_info.h"
 #include "common/thread.h"
 #include "gow3_overlay.h"
 #include "gow3_toggles.h"
@@ -321,6 +322,11 @@ void ReportPipelineBinaryCache() {
                 static_cast<unsigned long long>(binary_errors.load()),
                 binary_restore_ns.load() / 1e6 / std::max(u64{1}, binary_restore_calls.load()),
                 binary_compile_ns.load() / 1e6 / std::max(u64{1}, binary_compile_calls.load()));
+}
+
+std::filesystem::path PipelineBinaryDirectory() {
+    return Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
+           Common::ElfInfo::Instance().GameSerial() / "pipeline-binaries";
 }
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
