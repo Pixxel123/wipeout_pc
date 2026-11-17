@@ -33,10 +33,10 @@
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_amd_paths.h"
+#include "video_core/renderer_vulkan/vk_cache_preload.h"
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
-#include "video_core/renderer_vulkan/vk_pipeline_binary_preload.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_build_stamp.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -414,7 +414,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         const auto load_started = std::chrono::steady_clock::now();
         // gow3: the bytes preloaded at start, if any, are checked the same way as the file's.
         std::optional<std::vector<Binary>> binaries;
-        if (const auto bytes = PipelineBinaryPreload::Find(file)) {
+        if (const auto bytes = CachePreload::Find(file)) {
             binaries = Decode(*bytes, global, pipeline_id, 0);
         }
         const bool from_memory = binaries.has_value();
@@ -424,7 +424,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         if (!binaries) {
             binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
             if (binaries && Save(file, Encode(global, pipeline_id, 0, *binaries))) {
-                PipelineBinaryPreload::Saved(file);
+                CachePreload::Saved(file);
             }
         }
         binary_load_ns += ElapsedNs(load_started);
@@ -464,7 +464,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                 if (result.result == vk::Result::eSuccess) {
                     ++binary_hits;
                     binary_memory_hits += from_memory;
-                    PipelineBinaryPreload::Used(file);
+                    CachePreload::Used(file);
                     return result;
                 }
             }
@@ -540,7 +540,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         const auto encoded = Encode(global, pipeline_id, 0, binaries);
         if (Save(file, encoded)) {
             ++binary_saved;
-            PipelineBinaryPreload::Saved(file);
+            CachePreload::Saved(file);
         } else {
             ++binary_errors;
         }
@@ -1184,7 +1184,7 @@ void PipelineCache::StartOnDemand() {
         disk_shaders = true;
     }
     db.FinishPreload();
-    PipelineBinaryPreload::Start(PipelineBinaryDirectory());
+    CachePreload::Start(PipelineBinaryDirectory().parent_path()); // the whole cache
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
 }
