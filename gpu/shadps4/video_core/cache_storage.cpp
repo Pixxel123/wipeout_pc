@@ -292,6 +292,15 @@ std::vector<std::string> DataBase::ListBlobs(BlobType type) {
     return names;
 }
 
+std::filesystem::path DataBase::BlobPath(BlobType type, const std::string& name) const {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return {};
+    }
+    auto path = cache_path / name;
+    path.replace_extension(GetBlobFileExtension(type));
+    return path;
+}
+
 bool DataBase::ConcurrentReads() const {
     return !EmulatorSettings.IsPipelineCacheArchived();
 }

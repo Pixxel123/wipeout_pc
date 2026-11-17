@@ -265,6 +265,7 @@ private:
     std::unordered_set<vk::ShaderModule> disk_modules_unused;
     struct DiskShaderStats {
         u64 programs, permutations, rejected, matched, compiled, spirv_bytes, load_ns;
+        u64 preloaded; ///< permutations whose two files came from CachePreload
         u64 unused_peak; ///< most modules loaded and not used yet at once
         u64 keys_skipped, keys_written;
     } disk_stats{}, disk_reported{};
