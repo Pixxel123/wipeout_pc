@@ -6,8 +6,10 @@
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 
+#include "video_core/cache_import.h"
 #include "video_core/cache_storage.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -20,7 +22,7 @@
 namespace {
 
 std::mutex submit_mutex{};
-u32 num_requests{};
+std::atomic<u32> num_requests{};
 std::condition_variable_any request_cv{};
 std::queue<std::packaged_task<void()>> req_queue{};
 std::mutex m_request{};
@@ -43,7 +45,7 @@ void StopAppending(std::atomic<bool>& appending) {
     }
 }
 
-// Copies a blob into the caller's vector, which ends up empty when there is no blob.
+// gow3: copies a blob into the caller's vector, which ends up empty when there is no blob.
 template <typename T>
 void CopyBlob(const std::vector<u8>* blob, std::vector<T>& data) {
     data.resize(blob ? blob->size() / sizeof(T) : 0);
@@ -62,7 +64,7 @@ void ProcessIO(const std::stop_token& stoken) {
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests; });
+            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests != 0; });
         }
 
         if (stoken.stop_requested()) {
@@ -90,6 +92,28 @@ void ProcessIO(const std::stop_token& stoken) {
     }
 }
 
+// gow3: the first start after the update finds the old loose files and no pack. They go into the
+// pack so that nobody recompiles, and are deleted on the IO thread once the pack is on disk. If
+// the pack cannot be written they stay, and the next start imports them again.
+static void ImportLoosePack(CachePack& pack, const std::filesystem::path& folder) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto imported = ImportLoose(folder, pack);
+    if (imported.empty() || !pack.Rewrite(pack.Image())) {
+        return;
+    }
+    const auto import_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started);
+    std::printf("Cache pack: imported %zu files (%.1f MB) in %.0f ms\n", imported.size(),
+                pack.LiveBytes() / 1048576.0, import_ms.count());
+    Submit(std::packaged_task<void()>{[imported, folder] {
+        std::error_code error;
+        for (const auto& file : imported) {
+            std::filesystem::remove(file, error);
+        }
+        std::filesystem::remove(folder / "pipeline-binaries", error); // only if now empty
+    }});
+}
+
 void DataBase::Open() {
     if (opened) {
         return;
@@ -100,6 +124,7 @@ void DataBase::Open() {
     std::error_code error;
     std::filesystem::create_directories(cache_path, error);
 
+    const bool had_pack = std::filesystem::exists(cache_path / "cache.pack", error);
     const auto started = std::chrono::steady_clock::now();
     auto loaded = std::make_unique<CachePack>(cache_path / "cache.pack");
     const auto read_ms =
@@ -116,6 +141,9 @@ void DataBase::Open() {
     // they outweigh the live ones and are worth a write, the file is written again without them.
     if (dead > (size_t{8} << 20) && dead > live) {
         loaded->Rewrite(loaded->Image());
+    }
+    if (!had_pack) {
+        ImportLoosePack(*loaded, cache_path);
     }
 
     {
