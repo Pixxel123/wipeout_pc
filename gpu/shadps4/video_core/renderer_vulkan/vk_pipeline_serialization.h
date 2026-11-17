@@ -33,9 +33,12 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
 bool SavedUnder(std::span<const u8> bytes, const Key& global);
 } // namespace PipelineBinaryCache
 
+/// `unoptimized`, when given, is set when a PipelineBuild::Fast build compiled without driver
+/// optimisations (a binary cache miss); such a pipeline is never stored in the cache.
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
-    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key);
+    const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key,
+    PipelineBuild build = PipelineBuild::Optimized, bool* unoptimized = nullptr);
 void ReportPipelineBinaryCache();
 /// Removes every PipelineBinary blob not saved under `global`; returns how many.
 size_t DropForeignPipelineBinaries(const PipelineBinaryCache::Key& global);
