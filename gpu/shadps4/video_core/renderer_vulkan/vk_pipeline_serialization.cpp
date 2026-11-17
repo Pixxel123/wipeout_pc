@@ -36,6 +36,7 @@
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary_preload.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_build_stamp.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -255,6 +256,7 @@ std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const
 
 namespace {
 std::atomic<u64> binary_hits{}, binary_misses{}, binary_rejected{}, binary_saved{}, binary_errors{};
+std::atomic<u64> binary_memory_hits{}; // gow3: restores from the preloaded bytes, not the disk
 std::atomic<u64> binary_restore_ns{}, binary_compile_ns{};
 std::atomic<u64> binary_restore_calls{}, binary_compile_calls{};
 std::atomic<u64> binary_key_ns{}, binary_load_ns{}, binary_handles_ns{};
@@ -314,14 +316,18 @@ std::optional<std::vector<PipelineBinaryCache::Binary>> LoadLegacyBinary(
 void ReportPipelineBinaryCache() {
     const auto hits = binary_hits.load();
     const auto misses = binary_misses.load();
+    const auto memory_hits = binary_memory_hits.load();
     std::printf("Pipeline binary cache: %llu hits, %llu compiled, %llu rejected, %llu saved, "
-                "%llu cache errors (restore %.3f ms, compile %.3f ms each)\n",
+                "%llu cache errors (restore %.3f ms, compile %.3f ms each); hits from memory "
+                "%llu, from disk %llu\n",
                 static_cast<unsigned long long>(hits), static_cast<unsigned long long>(misses),
                 static_cast<unsigned long long>(binary_rejected.load()),
                 static_cast<unsigned long long>(binary_saved.load()),
                 static_cast<unsigned long long>(binary_errors.load()),
                 binary_restore_ns.load() / 1e6 / std::max(u64{1}, binary_restore_calls.load()),
-                binary_compile_ns.load() / 1e6 / std::max(u64{1}, binary_compile_calls.load()));
+                binary_compile_ns.load() / 1e6 / std::max(u64{1}, binary_compile_calls.load()),
+                static_cast<unsigned long long>(memory_hits),
+                static_cast<unsigned long long>(hits - std::min(hits, memory_hits)));
 }
 
 std::filesystem::path PipelineBinaryDirectory() {
@@ -406,11 +412,19 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     SCOPE_EXIT { destroy(); };
     try {
         const auto load_started = std::chrono::steady_clock::now();
-        auto binaries = Load(file, global, pipeline_id, 0);
+        // gow3: the bytes preloaded at start, if any, are checked the same way as the file's.
+        std::optional<std::vector<Binary>> binaries;
+        if (const auto bytes = PipelineBinaryPreload::Find(file)) {
+            binaries = Decode(*bytes, global, pipeline_id, 0);
+        }
+        const bool from_memory = binaries.has_value();
+        if (!binaries) {
+            binaries = Load(file, global, pipeline_id, 0);
+        }
         if (!binaries) {
             binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
-            if (binaries) {
-                Save(file, Encode(global, pipeline_id, 0, *binaries));
+            if (binaries && Save(file, Encode(global, pipeline_id, 0, *binaries))) {
+                PipelineBinaryPreload::Saved(file);
             }
         }
         binary_load_ns += ElapsedNs(load_started);
@@ -449,6 +463,8 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                 auto result = create(nullptr, restored_info, true);
                 if (result.result == vk::Result::eSuccess) {
                     ++binary_hits;
+                    binary_memory_hits += from_memory;
+                    PipelineBinaryPreload::Used(file);
                     return result;
                 }
             }
@@ -524,6 +540,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         const auto encoded = Encode(global, pipeline_id, 0, binaries);
         if (Save(file, encoded)) {
             ++binary_saved;
+            PipelineBinaryPreload::Saved(file);
         } else {
             ++binary_errors;
         }
@@ -1167,6 +1184,7 @@ void PipelineCache::StartOnDemand() {
         disk_shaders = true;
     }
     db.FinishPreload();
+    PipelineBinaryPreload::Start(PipelineBinaryDirectory());
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
 }
