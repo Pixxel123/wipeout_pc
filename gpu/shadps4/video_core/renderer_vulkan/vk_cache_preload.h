@@ -59,6 +59,8 @@ inline std::vector<std::string> Recent(std::string_view list, size_t limit) {
 void Start(const std::filesystem::path& root);
 /// The preloaded bytes of `file`, if it was read at start.
 std::optional<std::vector<u8>> Find(const std::filesystem::path& file);
+/// The preloaded bytes of `file`, dropped from memory: for a file read once per session.
+std::optional<std::vector<u8>> Take(const std::filesystem::path& file);
 /// `file` was read: listed for the next start.
 void Used(const std::filesystem::path& file);
 /// A new `file` was written: listed, and its old bytes are no longer served from memory.

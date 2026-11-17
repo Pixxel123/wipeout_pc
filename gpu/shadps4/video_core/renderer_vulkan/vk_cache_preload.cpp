@@ -162,6 +162,16 @@ std::optional<std::vector<u8>> Find(const std::filesystem::path& file) {
     return it != state->bytes.end() ? std::optional{it->second} : std::nullopt;
 }
 
+std::optional<std::vector<u8>> Take(const std::filesystem::path& file) {
+    const auto [state, entry] = Active(file);
+    if (!state || !state->preload) {
+        return std::nullopt;
+    }
+    std::scoped_lock lock{state->mutex};
+    auto node = state->bytes.extract(entry);
+    return node ? std::optional{std::move(node.mapped())} : std::nullopt;
+}
+
 void Used(const std::filesystem::path& file) {
     if (const auto [state, entry] = Active(file); state) {
         std::scoped_lock lock{state->mutex};
