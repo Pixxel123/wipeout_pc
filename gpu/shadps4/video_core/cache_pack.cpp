@@ -6,6 +6,9 @@
 #include <xxhash.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #include "video_core/cache_pack.h"
@@ -69,6 +72,29 @@ bool WriteBytes(const std::filesystem::path& path, std::ios::openmode mode,
     const bool written = bool(stream);
     stream.close();
     return written && !stream.fail();
+}
+
+// Waits until the file's bytes are on the disk itself, not only in the system's write cache.
+// Streams cannot do this, so the file is opened again with the system's own calls.
+bool SyncToDisk(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    const bool synced = FlushFileBuffers(handle) != 0;
+    CloseHandle(handle);
+    return synced;
+#else
+    const int fd = ::open(path.c_str(), O_WRONLY);
+    if (fd < 0) {
+        return false;
+    }
+    const bool synced = ::fsync(fd) == 0;
+    ::close(fd);
+    return synced;
+#endif
 }
 
 } // namespace
@@ -273,12 +299,14 @@ bool CachePack::Append(std::span<const u8> record) {
 
 bool CachePack::Rewrite(std::span<const u8> image) {
     // gow3: write a temporary file and rename it over the pack, so a full disk or a crash
-    // part-way through leaves the old pack whole.
+    // part-way through leaves the old pack whole. The data reaches the disk before the rename:
+    // the first start deletes the loose files right after, and a power cut must not keep those
+    // deletes but lose the pack that replaced them.
     auto temp = file;
     temp += ".tmp";
     std::error_code error;
     bool renamed = false;
-    if (WriteBytes(temp, std::ios::trunc, image)) {
+    if (WriteBytes(temp, std::ios::trunc, image) && SyncToDisk(temp)) {
 #ifdef _WIN32
         renamed = MoveFileExW(temp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 #else

@@ -23,4 +23,10 @@ std::optional<std::pair<u32, std::string>> LooseBlob(const std::filesystem::path
 std::vector<std::filesystem::path> ImportLoose(const std::filesystem::path& folder,
                                                CachePack& pack);
 
+/// gow3: ImportLoose, then writes `pack` to its file. Returns the imported files, which the pack
+/// on disk now holds, or nullopt when it could not be written: the loose files must then stay,
+/// and nothing may create the pack this session, or the next start would skip the import.
+std::optional<std::vector<std::filesystem::path>> ImportLooseAndWrite(
+    const std::filesystem::path& folder, CachePack& pack);
+
 } // namespace Storage

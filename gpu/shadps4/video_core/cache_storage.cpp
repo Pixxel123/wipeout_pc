@@ -93,25 +93,29 @@ void ProcessIO(const std::stop_token& stoken) {
 }
 
 // gow3: the first start after the update finds the old loose files and no pack. They go into the
-// pack so that nobody recompiles, and are deleted on the IO thread once the pack is on disk. If
-// the pack cannot be written they stay, and the next start imports them again.
-static void ImportLoosePack(CachePack& pack, const std::filesystem::path& folder) {
+// pack so that nobody recompiles, and are deleted on the IO thread once the pack is on disk.
+// False when the pack could not be written: the loose files stay for the next start.
+static bool ImportLoosePack(CachePack& pack, const std::filesystem::path& folder) {
     const auto started = std::chrono::steady_clock::now();
-    const auto imported = ImportLoose(folder, pack);
-    if (imported.empty() || !pack.Rewrite(pack.Image())) {
-        return;
+    const auto imported = ImportLooseAndWrite(folder, pack);
+    if (!imported) {
+        return false;
+    }
+    if (imported->empty()) {
+        return true;
     }
     const auto import_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started);
-    std::printf("Cache pack: imported %zu files (%.1f MB) in %.0f ms\n", imported.size(),
+    std::printf("Cache pack: imported %zu files (%.1f MB) in %.0f ms\n", imported->size(),
                 pack.LiveBytes() / 1048576.0, import_ms.count());
-    Submit(std::packaged_task<void()>{[imported, folder] {
+    Submit(std::packaged_task<void()>{[imported = *imported, folder] {
         std::error_code error;
         for (const auto& file : imported) {
             std::filesystem::remove(file, error);
         }
         std::filesystem::remove(folder / "pipeline-binaries", error); // only if now empty
     }});
+    return true;
 }
 
 void DataBase::Open() {
@@ -142,15 +146,17 @@ void DataBase::Open() {
     if (dead > (size_t{8} << 20) && dead > live) {
         loaded->Rewrite(loaded->Image());
     }
-    if (!had_pack) {
-        ImportLoosePack(*loaded, cache_path);
+    appending = true;
+    // gow3: after a failed import nothing is appended this session: the first append would
+    // create a pack, and the next start would then skip the import and recompile everything.
+    if (!had_pack && !ImportLoosePack(*loaded, cache_path)) {
+        StopAppending(appending);
     }
 
     {
         std::scoped_lock lock{pack_mutex};
         pack = std::move(loaded);
     }
-    appending = true;
     io_worker = std::jthread{ProcessIO};
     opened = true;
 }
@@ -265,11 +271,15 @@ void DataBase::Clear() {
     pack->EraseIf([](u32 type) { return type == u32(BlobType::PipelineBinary); });
     // gow3: the file is written again whole, so the next start never reads the old entries. If
     // that fails, nothing more is appended: new entries after the old ones would pass for valid.
-    Submit(std::packaged_task<void()>{[this, image = pack->Image()] {
-        if (!pack->Rewrite(image)) {
-            StopAppending(appending);
-        }
-    }});
+    // With appends stopped the file is left alone too: a rewrite could create a pack that hides
+    // loose files not yet imported.
+    if (appending) {
+        Submit(std::packaged_task<void()>{[this, image = pack->Image()] {
+            if (appending && !pack->Rewrite(image)) {
+                StopAppending(appending);
+            }
+        }});
+    }
     LOG_WARNING(Render, "Pipeline cache cleared ({} entries): it is rebuilt for this build",
                 removed);
 }

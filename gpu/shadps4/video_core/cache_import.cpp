@@ -76,4 +76,13 @@ std::vector<std::filesystem::path> ImportLoose(const std::filesystem::path& fold
     return imported;
 }
 
+std::optional<std::vector<std::filesystem::path>> ImportLooseAndWrite(
+    const std::filesystem::path& folder, CachePack& pack) {
+    auto imported = ImportLoose(folder, pack);
+    if (!imported.empty() && !pack.Rewrite(pack.Image())) {
+        return std::nullopt;
+    }
+    return imported;
+}
+
 } // namespace Storage

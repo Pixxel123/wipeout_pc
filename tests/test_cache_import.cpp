@@ -12,6 +12,7 @@
 
 using Storage::CachePack;
 using Storage::ImportLoose;
+using Storage::ImportLooseAndWrite;
 using Storage::LooseBlob;
 
 namespace {
@@ -70,10 +71,35 @@ void Import() {
     std::filesystem::permissions(folder / "locked.meta", std::filesystem::perms::owner_all);
     std::filesystem::remove_all(folder);
 }
+
+// A pack that cannot be written leaves no pack and every loose file, so the next start imports
+// them again.
+void FailedWriteKeepsTheLooseFiles() {
+    const auto folder = std::filesystem::temp_directory_path() / "cache-import-write-test";
+    std::filesystem::remove_all(folder);
+    Write(folder / "a.meta", "m");
+    // A directory in the temp file's place makes the write fail.
+    std::filesystem::create_directories(folder / "cache.pack.tmp");
+    {
+        CachePack pack{folder / "cache.pack"};
+        assert(!ImportLooseAndWrite(folder, pack));
+    }
+    assert(!std::filesystem::exists(folder / "cache.pack") &&
+           std::filesystem::exists(folder / "a.meta"));
+    std::filesystem::remove(folder / "cache.pack.tmp");
+    {
+        CachePack pack{folder / "cache.pack"};
+        const auto imported = ImportLooseAndWrite(folder, pack);
+        assert(imported && imported->size() == 1);
+    }
+    assert(*CachePack{folder / "cache.pack"}.Find(0, "a") == Bytes("m"));
+    std::filesystem::remove_all(folder);
+}
 } // namespace
 
 int main() {
     LooseBlobNames();
     Import();
+    FailedWriteKeepsTheLooseFiles();
     std::puts("cache import: all tests passed");
 }
