@@ -65,7 +65,6 @@ struct CompilePolicy {
         return NoSceneFor(now_ns) || now_ns < long_grace_until_ns.load(std::memory_order_relaxed);
     }
 
-private:
     /// No scene yet, or none for no_scene_ns. Another thread may have stored a scene flip
     /// slightly after `now_ns` was read.
     bool NoSceneFor(u64 now_ns) const {

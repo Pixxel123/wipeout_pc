@@ -33,6 +33,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_precompile_scan.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -336,6 +337,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    Precompile::StartScanDiagnostic(); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
@@ -1461,6 +1463,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         it_pgm = program_cache.end();
     }
     if (it_pgm == program_cache.end()) {
+        Precompile::ScanProgramUsed(params.hash); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
         if (compile_async()) {
             QueueShader(*new_program, hw_stage, sw_stage, params, runtime_info, binding, 0, true);

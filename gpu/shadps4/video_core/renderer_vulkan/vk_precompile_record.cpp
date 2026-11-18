@@ -114,32 +114,6 @@ struct RecordTally {
     bool operator==(const RecordTally&) const = default;
 };
 
-/// A program's code from its start token through its OrbShdr header (vk_precompile_list.h),
-std::vector<u32> ReadProgramCode(VAddr address) {
-    std::array<u32, 2> start;
-    if (!ReadGuest(address, start.data(), sizeof(start)) || start[0] != CodeStartToken) {
-        return {};
-    }
-    const u64 header = CodeHeaderAt(start);
-    std::array<u32, CodeHeaderWords> info;
-    if ((header + CodeHeaderWords) * 4 > MaxCodeBytes ||
-        !ReadGuest(address + header * 4, info.data(), sizeof(info))) {
-        return {};
-    }
-    u32 length;
-    std::memcpy(&length, reinterpret_cast<const u8*>(info.data()) + CodeHeaderLengthAt,
-                sizeof(length));
-    const u64 words = std::max<u64>(header + CodeHeaderWords, ((length >> 8) + 3) / 4);
-    if (words * 4 > MaxCodeBytes) {
-        return {};
-    }
-    std::vector<u32> code(words);
-    if (!ReadGuest(address, code.data(), words * 4)) {
-        return {};
-    }
-    return code;
-}
-
 } // namespace
 
 struct PrecompileRecord {
@@ -349,7 +323,7 @@ void PrecompileRecord::RecordCode(const StageCapture& stage) {
     if (!code_seen.insert(stage.hash).second) {
         return;
     }
-    const auto code = ReadProgramCode(stage.code);
+    const auto code = ReadProgramCode(stage.code, ReadGuest);
     if (code.empty() || CheckCode(stage.hash, code) ||
         !WriteRecord(EncodeListCode(stage.hash, code))) {
         ++record.code_missing;

@@ -26,6 +26,7 @@ extern "C" void runtime_set_target_fps(double fps); // src/runtime_extra.c
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
+#include "video_core/renderer_vulkan/vk_precompile_scan.h"
 #include "common/debug.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
@@ -317,8 +318,11 @@ void VideoOutDriver::Flip(const Request& req) {
                                                 : 0);
     // gow3: after a loading screen, new pipelines may wait longer for a few seconds
     // (vk_compile_policy.h); the log line marks where that window starts.
-    if (Vulkan::g_compile_policy.Flipped(Vulkan::CompilePolicy::Now(),
-                                         Gow3Stats::draws.load(std::memory_order_relaxed))) {
+    const u64 flip_ns = Vulkan::CompilePolicy::Now();
+    const bool first_scene = Vulkan::g_compile_policy.Flipped(
+        flip_ns, Gow3Stats::draws.load(std::memory_order_relaxed));
+    Vulkan::Precompile::ScanFlipped(flip_ns, first_scene); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
+    if (first_scene) {
         std::printf("Pipelines: first scene after a loading screen; new pipelines may wait "
                     "longer for %llu s (GOW3_LOAD_GRACE=0: no)\n",
                     static_cast<unsigned long long>(Vulkan::CompilePolicy::after_load_ns /

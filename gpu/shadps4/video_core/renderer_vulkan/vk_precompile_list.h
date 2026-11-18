@@ -142,6 +142,36 @@ inline const char* CheckCode(u64 hash, std::span<const u32> code) {
     return nullptr;
 }
 
+/// A program's code from its start token through its OrbShdr header, or through the length
+/// the header gives when that is longer, read through `read(address, out, size)` (false when
+/// it cannot); empty when a read fails or it would be longer than MaxCodeBytes. CheckCode
+/// says whether it is the program.
+template <typename Read>
+[[nodiscard]] std::vector<u32> ReadProgramCode(u64 address, Read&& read) {
+    std::array<u32, 2> start;
+    if (!read(address, start.data(), sizeof(start)) || start[0] != CodeStartToken) {
+        return {};
+    }
+    const u64 header = CodeHeaderAt(start);
+    std::array<u32, CodeHeaderWords> info;
+    if ((header + CodeHeaderWords) * 4 > MaxCodeBytes ||
+        !read(address + header * 4, info.data(), sizeof(info))) {
+        return {};
+    }
+    u32 length;
+    std::memcpy(&length, reinterpret_cast<const u8*>(info.data()) + CodeHeaderLengthAt,
+                sizeof(length));
+    const u64 words = std::max<u64>(header + CodeHeaderWords, ((length >> 8) + 3) / 4);
+    if (words * 4 > MaxCodeBytes) {
+        return {};
+    }
+    std::vector<u32> code(words);
+    if (!read(address, code.data(), words * 4)) {
+        return {};
+    }
+    return code;
+}
+
 namespace ListDetail {
 
 template <typename T>
