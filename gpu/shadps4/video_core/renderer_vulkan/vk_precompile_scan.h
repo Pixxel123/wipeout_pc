@@ -126,6 +126,8 @@ public:
     void SetLoading(bool loading);
     /// Ends the sleep between passes now.
     void Wake();
+    /// Lets a later pass report `hash` again (TakeNew), at the address it sees first then.
+    void Forget(u64 hash);
 
     /// Passes run, those cut short when loading ended included. What they found is in TakeNew
     /// by then.
@@ -155,6 +157,7 @@ private:
     std::atomic<bool> loading{false}, stop{false};
     bool woken = false;            ///< under mutex
     std::vector<FoundCode> fresh;  ///< under mutex: TakeNew
+    std::vector<u64> forget;       ///< under mutex: Forget, taken out of `known` by each pass
     std::unordered_set<u64> known; ///< the scan thread's: every hash found
     std::atomic<u64> passes{0}, started{0}, last_pass_ms{0};
 };

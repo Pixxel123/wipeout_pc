@@ -18,12 +18,12 @@
 // is built, at most 5 s per loading state, and never outside one.
 //
 // Threads: the pump and the hold never run at once, both are on the GPU command thread. The
-// pump runs in Rasterizer::OnSubmit, which only Liverpool::Process calls (liverpool.cpp:172).
+// pump runs in Rasterizer::OnSubmit, which only Liverpool::Process calls, after a submission.
 // The hold runs in GetProgram for PipelineCache::sel only: draw-preparation workers and the
 // loader's own builds return before it (sel.worker, sel.boot), and sel is selected only by
 // GetGraphicsPipeline and GetComputePipeline, which Rasterizer's Draw, DrawIndirect and
-// Dispatch calls use on the thread that decodes the command lists, Liverpool::Process again
-// (liverpool.cpp:155); the draw recording thread never selects. So disk_permutations, which
+// Dispatch calls use on the thread that decodes the command lists, Liverpool::Process again,
+// which resumes them; the draw recording thread never selects. So disk_permutations, which
 // has no lock, and the loader's state need none. The loading state is read from CompilePolicy's
 // atomics on this thread, so nothing of the loader is shared with the present thread.
 //
@@ -38,6 +38,7 @@
 #include <numeric>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -59,6 +60,7 @@ namespace {
 constexpr u64 PumpNs = 4'000'000;               ///< ready entries one pump builds, at most
 constexpr u64 ReportIntervalNs = 5'000'000'000; ///< the line of programs used
 constexpr auto HoldPoll = std::chrono::milliseconds(1);
+constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as not verified
 
 } // namespace
 
@@ -82,7 +84,8 @@ private:
     /// One loading state's counts, for its line.
     struct Tally {
         u32 built = 0, skipped = 0, rejected = 0;
-        u32 unverified = 0; ///< list programs whose copy failed its checks
+        u32 no_info = 0;    ///< entries with a program in use whose translation is pending
+        u32 unverified = 0; ///< list programs whose copies failed their checks
         u64 permutations = 0;
         u64 held_ns = 0;
         u64 passes_before = 0; ///< scan passes when the loading state began
@@ -111,7 +114,8 @@ private:
     u64 found_in = 0; ///< scan.Started() when code an entry lacked was last taken
     Tally tally;
     std::unordered_set<u64> list_programs; ///< every stage's program of the list
-    std::unordered_set<u64> unverified;    ///< list programs whose copy failed its checks
+    std::unordered_set<u64> unverified;    ///< list programs whose copies failed their checks
+    std::unordered_map<u64, u32> failed_copies; ///< copies of a list program that failed
     std::unordered_set<u64> used;          ///< list programs first used since the load began
     std::unordered_set<u64> built;         ///< programs the loader wrote permutations of
     u64 next_report_ns = 0;
@@ -149,7 +153,8 @@ bool PrecompileLoad::Loading() {
 /// Copies the list programs' code the scan found since the last call (one address each, the
 /// first seen) and plans the waiting entries again; true when an entry with a needed program
 /// lacked some of it. A copy that cannot be read or fails CheckCode or CheckCodeBody is not
-/// kept: its entries are not built, and the game translates the program at its first use.
+/// kept, and the scan forgets the program so a later pass may find another copy; after
+/// MaxFailedCopies its entries are not built, and the game translates it at its first use.
 bool PrecompileLoad::TakeFound() {
     const auto found = scan.TakeNew();
     if (found.empty()) {
@@ -162,8 +167,12 @@ bool PrecompileLoad::TakeFound() {
         }
         auto words = ReadProgramCode(address, ReadGuest);
         if (words.empty() || CheckCode(hash, words) || CheckCodeBody(words)) {
-            unverified.insert(hash);
-            ++tally.unverified;
+            if (++failed_copies[hash] < MaxFailedCopies) {
+                scan.Forget(hash);
+            } else {
+                unverified.insert(hash);
+                ++tally.unverified;
+            }
             continue;
         }
         code.emplace(hash, std::move(words));
@@ -205,9 +214,14 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
             ++tally.skipped;
             continue;
         }
-        const char* why = builder.Build(index, list.keys[index]);
+        bool no_info = false;
+        const char* why = builder.Build(index, list.keys[index], no_info);
         if (!why) {
             ++tally.built;
+            continue;
+        }
+        if (no_info) {
+            ++tally.no_info; // not retried either
             continue;
         }
         ++tally.rejected;
@@ -251,12 +265,12 @@ void PrecompileLoad::Hold() {
 
 /// Flushes the store and adds the permutations written since the last merge to its index.
 void PrecompileLoad::Merge() {
-    const auto written = builder.TakeWritten();
+    auto written = builder.TakeWritten();
     if (written.empty()) {
         return;
     }
     Storage::DataBase::Instance().Flush();
-    cache.AddSavedPermutations(written);
+    cache.AddSavedPermutations(written); // keeps what it indexed
     tally.permutations += written.size();
     for (const auto& [hash, perm] : written) {
         built.insert(hash);
@@ -272,10 +286,10 @@ void PrecompileLoad::ReportLoad() const {
         reasons += ")";
     }
     std::printf("Precompile load: %u entries built (%llu permutations), %u skipped, %u "
-                "rejected%s, %u programs' code not verified, hold %llu ms, %llu scan passes "
-                "(last %llu ms)\n",
+                "rejected%s, %u with a program in use but untranslated, %u programs' code not "
+                "verified, hold %llu ms, %llu scan passes (last %llu ms)\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
-                tally.rejected, reasons.c_str(), tally.unverified,
+                tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
                 static_cast<unsigned long long>(scan.LastPassMs()));
@@ -314,19 +328,25 @@ void PrecompileLoad::Pump() {
     BuildReady(CompilePolicy::Now() + PumpNs);
 }
 
-/// GetProgram, a program not in program_cache: before the store is asked for it.
+/// GetProgram, a program not in program_cache: before the store is asked for it. Only a
+/// needed list program holds; without a hold what is built is merged now, so the store is
+/// asked for it (else the game translates it as permutation 0 and overwrites the loader's).
 void PrecompileLoad::FirstUse(u64 hash) {
     const bool now_loading = cache.DiskShadersActive() && Loading(); // may begin a load first
-    if (list_programs.contains(hash)) {
+    const bool list_program = list_programs.contains(hash);
+    if (list_program) {
         used.insert(hash);
     }
     if (!now_loading) {
         return;
     }
     TakeFound();
-    if (HoldActive(loading, tally.held_ns, !ready.empty(),
+    if (list_program && cache.ProgramNeeded(hash) &&
+        HoldActive(loading, tally.held_ns, !ready.empty(),
                    LastPassFound(found_in, scan.Passes()))) {
         Hold();
+    } else {
+        Merge(); // nothing when nothing is unmerged
     }
 }
 

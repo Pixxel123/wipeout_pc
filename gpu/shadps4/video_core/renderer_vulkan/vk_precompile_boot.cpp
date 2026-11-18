@@ -793,8 +793,9 @@ LoadBuilder::LoadBuilder(PipelineCache& cache, const ParsedList& list,
 
 LoadBuilder::~LoadBuilder() = default;
 
-const char* LoadBuilder::Build(u32 index, const RecordedKey& key) {
+const char* LoadBuilder::Build(u32 index, const RecordedKey& key, bool& no_info) {
     const auto why = boot->Entry(index, key);
+    no_info = why == Reject::NoInfo;
     return why ? RejectNames[size_t(*why)] : nullptr;
 }
 

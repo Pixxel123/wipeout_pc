@@ -1342,17 +1342,19 @@ bool PipelineCache::InUseInfo(u64 hash, Shader::Info& info) {
 // IndexDiskShaders adds the whole store's (sorted: LoadDiskProgram sizes the program by the
 // last), once they are on disk. A program in use by now keeps the numbering it has: none of it
 // is read from the store again.
-void PipelineCache::AddSavedPermutations(std::span<const std::pair<u64, u32>> saved) {
-    for (const auto& [hash, idx] : saved) {
+void PipelineCache::AddSavedPermutations(std::vector<std::pair<u64, u32>>& saved) {
+    std::erase_if(saved, [this](const std::pair<u64, u32>& permutation) {
+        const auto [hash, idx] = permutation;
         if (program_cache.contains(hash)) {
-            continue;
+            return true;
         }
         auto& indices = disk_permutations[hash];
         const auto at = std::ranges::lower_bound(indices, idx);
         if (at == indices.end() || *at != idx) {
             indices.insert(at, idx);
         }
-    }
+        return false;
+    });
 }
 
 size_t PipelineCache::NewPermutationIndex(const Program& program) const {

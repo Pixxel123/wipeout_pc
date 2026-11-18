@@ -122,6 +122,11 @@ void ShaderScan::Wake() {
     wake.notify_one();
 }
 
+void ShaderScan::Forget(u64 hash) {
+    std::scoped_lock lk{mutex};
+    forget.push_back(hash);
+}
+
 std::vector<FoundCode> ShaderScan::TakeNew() {
     std::scoped_lock lk{mutex};
     return std::exchange(fresh, {});
@@ -150,6 +155,13 @@ void ShaderScan::Run() {
 
 void ShaderScan::Pass(std::vector<u8>& buf) {
     started.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::scoped_lock lk{mutex};
+        for (const u64 hash : forget) {
+            known.erase(hash);
+        }
+        forget.clear();
+    }
     const auto t0 = std::chrono::steady_clock::now();
     const u64 page = HostPageSize();
     const u64 own_lo = reinterpret_cast<u64>(buf.data()), own_hi = own_lo + buf.size();

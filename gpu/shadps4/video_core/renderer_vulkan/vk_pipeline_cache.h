@@ -242,8 +242,9 @@ private:
     /// gow3 (GOW3_PRECOMPILE_LOAD): the Info GetProgram binds a program in use or saved with;
     /// false while there is none yet. GPU command thread.
     bool InUseInfo(u64 hash, Shader::Info& info);
-    /// gow3 (GOW3_PRECOMPILE_LOAD): permutations the loader saved, for LoadDiskProgram.
-    void AddSavedPermutations(std::span<const std::pair<u64, u32>> saved);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): permutations the loader saved, for LoadDiskProgram;
+    /// `saved` keeps those it indexed.
+    void AddSavedPermutations(std::vector<std::pair<u64, u32>>& saved);
     /// gow3 (GOW3_PRECOMPILE_LOAD): GetProgram, a program not in program_cache; while loading
     /// the draw may wait for the loader here. Never changes program_cache.
     void PrecompileLoadFirstUse(u64 hash);

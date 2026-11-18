@@ -99,8 +99,9 @@ public:
     ~LoadBuilder();
 
     /// Builds entry `index` of the list, which `code` has every stage's code for: null when it
-    /// was built, else why not (a static text).
-    const char* Build(u32 index, const Precompile::RecordedKey& key);
+    /// was built, else why not (a static text). `no_info` is set when the reason is a program
+    /// in use whose first translation is pending, which is no fault.
+    const char* Build(u32 index, const Precompile::RecordedKey& key, bool& no_info);
     /// The permutations written since the last call: program hash, permutation index.
     [[nodiscard]] std::vector<std::pair<u64, u32>> TakeWritten();
 
