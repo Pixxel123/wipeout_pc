@@ -1545,7 +1545,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // gow3 diagnostic GOW3_PRECOMPILE_LOAD: may build list entries into the store first,
         // and its pipeline selections may read programs from it, this one too: found again.
         PrecompileLoadFirstUse(params.hash);
-        it_pgm = program_cache.find(params.hash);
+        if (precompile_load) {
+            it_pgm = program_cache.find(params.hash);
+        }
     }
     if (it_pgm == program_cache.end() && DiskShadersActive() && LoadDiskProgram(params.hash)) {
         it_pgm = program_cache.find(params.hash);
