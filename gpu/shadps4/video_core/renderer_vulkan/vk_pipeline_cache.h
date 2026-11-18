@@ -267,6 +267,8 @@ private:
     /// gow3 (GOW3_PRECOMPILE_LOAD): whether every build the loader handed over is done by
     /// `until_ns` (CompilePolicy::Now), waiting for them until then.
     bool WaitLoadBuilds(u64 until_ns);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): builds the loader handed over that are not published yet.
+    [[nodiscard]] size_t LoadBuildsRunning() const;
     /// gow3 (GOW3_PRECOMPILE_LOAD): a draw of a pipeline the loader is building waits for it
     /// while loading, from the loading state's hold budget; true when it is built.
     bool WaitLoadBuild(const AsyncGraphicsCompilation& build);

@@ -1053,6 +1053,12 @@ bool PipelineCache::WaitLoadBuilds(u64 until_ns) {
     return true;
 }
 
+size_t PipelineCache::LoadBuildsRunning() const {
+    return std::ranges::count_if(pending_graphics, [](const auto& item) {
+        return item.second->loader && item.second->job.Pending();
+    });
+}
+
 bool PipelineCache::WaitLoadBuild(const AsyncGraphicsCompilation& build) {
     if (!build.loader || !build.job.Pending()) {
         return false;

@@ -103,6 +103,7 @@ private:
         u64 held_ns = 0;
         u64 passes_before = 0; ///< scan passes when the loading state began
         u32 dropped = 0;       ///< pipeline selections that found no pipeline
+        u32 have = 0;          ///< pipeline selections whose pipeline was built or building
         u64 published_before = 0, failed_before = 0; ///< the cache's load builds then
         std::vector<std::pair<const char*, u32>> reasons;
     };
@@ -272,6 +273,7 @@ void PrecompileLoad::SelectPipelines(u64 until_ns) {
         }
         selecting.pop_front();
         tally.dropped += step == PipelineStep::Dropped;
+        tally.have += step == PipelineStep::Have;
     }
 }
 
@@ -329,6 +331,9 @@ void PrecompileLoad::Merge() {
     unmerged.clear();
 }
 
+/// The built entries' pipelines: built, dropped (a selection without one, a failed build) or
+/// left (built or building already, not handed over, or still building), which add up to the
+/// entries built.
 void PrecompileLoad::ReportLoad() const {
     std::string reasons;
     for (const auto& [why, count] : tally.reasons) {
@@ -339,14 +344,16 @@ void PrecompileLoad::ReportLoad() const {
     }
     std::printf("Precompile load: %u entries built (%llu permutations), %u skipped, %u "
                 "rejected%s, %u with a program in use but untranslated, %u programs' code not "
-                "verified, %llu pipelines built, %llu dropped, hold %llu ms, %llu scan passes "
-                "(last %llu ms)\n",
+                "verified, %llu pipelines built, %llu dropped, %llu left, hold %llu ms, %llu "
+                "scan passes (last %llu ms)\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
                 tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -
                                                 tally.published_before),
                 static_cast<unsigned long long>(tally.dropped + cache.load_builds_failed -
                                                 tally.failed_before),
+                static_cast<unsigned long long>(tally.have + selecting.size() + unmerged.size() +
+                                                cache.LoadBuildsRunning()),
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
                 static_cast<unsigned long long>(scan.LastPassMs()));
