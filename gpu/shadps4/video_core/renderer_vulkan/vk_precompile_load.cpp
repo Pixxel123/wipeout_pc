@@ -3,10 +3,13 @@
 
 // gow3 diagnostic GOW3_PRECOMPILE_LOAD=1 with GOW3_PRECOMPILE_LIST=<file> (vk_precompile_load.h):
 // while loading (CompilePolicy::NoSceneFor) a shader scan of the loader's own finds each
-// program's code in the game's memory. An entry with a needed program whose stages were all
-// found is built by the start-up rebuild's entry build (LoadBuilder), which writes the needed
-// programs' permutations to the store as the rebuild does; at most 4 ms of entries per
-// submission. When the queue runs empty after a build, the store is flushed and the new
+// program's code in the game's memory. The loader copies each list program's code out of it
+// and keeps the copy only when its header and its body (the header's crc32) check out: the game
+// may be writing or reusing that memory, and the copy is what gets translated, so nothing the
+// game does later reaches the translation. An entry with a needed program whose stages all have
+// a copy is built by the start-up rebuild's entry build (LoadBuilder) from the copies, which
+// writes the needed programs' permutations to the store as the rebuild does; at most 4 ms of
+// entries per submission. When the queue runs empty after a build, the store is flushed and the new
 // permutations are added to its index, so a program's first use in this launch reads them
 // (LoadDiskProgram) instead of translating it.
 //
@@ -31,10 +34,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <map>
 #include <numeric>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -61,7 +64,7 @@ constexpr auto HoldPoll = std::chrono::milliseconds(1);
 
 struct PrecompileLoad {
     PrecompileLoad(PipelineCache& cache_, ParsedList list_)
-        : cache{cache_}, list{std::move(list_)}, builder{cache, list, code_at} {
+        : cache{cache_}, list{std::move(list_)}, builder{cache, list, code} {
         waiting.resize(list.keys.size());
         std::iota(waiting.begin(), waiting.end(), 0u);
         for (const auto& key : list.keys) {
@@ -79,6 +82,7 @@ private:
     /// One loading state's counts, for its line.
     struct Tally {
         u32 built = 0, skipped = 0, rejected = 0;
+        u32 unverified = 0; ///< list programs whose copy failed its checks
         u64 permutations = 0;
         u64 held_ns = 0;
         u64 passes_before = 0; ///< scan passes when the loading state began
@@ -97,7 +101,7 @@ private:
 
     PipelineCache& cache;
     const ParsedList list;
-    std::unordered_map<u64, u64> code_at; ///< every program the scan found: its code's address
+    std::map<u64, std::vector<u32>> code; ///< list programs' checked copies of their code
     LoadBuilder builder;
     ShaderScan scan;
     std::vector<u32> waiting; ///< entries the scan has not found every program of
@@ -107,6 +111,7 @@ private:
     u64 found_in = 0; ///< scan.Started() when code an entry lacked was last taken
     Tally tally;
     std::unordered_set<u64> list_programs; ///< every stage's program of the list
+    std::unordered_set<u64> unverified;    ///< list programs whose copy failed its checks
     std::unordered_set<u64> used;          ///< list programs first used since the load began
     std::unordered_set<u64> built;         ///< programs the loader wrote permutations of
     u64 next_report_ns = 0;
@@ -115,7 +120,7 @@ private:
 EntryPlan PrecompileLoad::Plan(u32 index) const {
     return PlanEntry(
         list.keys[index].stages, [this](u64 hash) { return cache.ProgramNeeded(hash); },
-        [this](u64 hash) { return code_at.contains(hash); });
+        [this](u64 hash) { return code.contains(hash); });
 }
 
 /// Whether the loading state holds now. A load that begins prints the last line of programs
@@ -141,18 +146,28 @@ bool PrecompileLoad::Loading() {
     return loading;
 }
 
-/// Takes the code the scan found since the last call (one address each, the first seen) and
-/// plans the waiting entries again; true when an entry with a needed program lacked some of it.
+/// Copies the list programs' code the scan found since the last call (one address each, the
+/// first seen) and plans the waiting entries again; true when an entry with a needed program
+/// lacked some of it. A copy that cannot be read or fails CheckCode or CheckCodeBody is not
+/// kept: its entries are not built, and the game translates the program at its first use.
 bool PrecompileLoad::TakeFound() {
     const auto found = scan.TakeNew();
     if (found.empty()) {
         return false;
     }
     std::unordered_set<u64> fresh;
-    for (const auto& code : found) {
-        if (code_at.emplace(code.hash, code.address).second) {
-            fresh.insert(code.hash);
+    for (const auto& [hash, address] : found) {
+        if (!list_programs.contains(hash) || code.contains(hash) || unverified.contains(hash)) {
+            continue;
         }
+        auto words = ReadProgramCode(address, ReadGuest);
+        if (words.empty() || CheckCode(hash, words) || CheckCodeBody(words)) {
+            unverified.insert(hash);
+            ++tally.unverified;
+            continue;
+        }
+        code.emplace(hash, std::move(words));
+        fresh.insert(hash);
     }
     const bool lacked = std::ranges::any_of(waiting, [this, &fresh](u32 index) {
         return EntryLacked(
@@ -257,9 +272,10 @@ void PrecompileLoad::ReportLoad() const {
         reasons += ")";
     }
     std::printf("Precompile load: %u entries built (%llu permutations), %u skipped, %u "
-                "rejected%s, hold %llu ms, %llu scan passes (last %llu ms)\n",
+                "rejected%s, %u programs' code not verified, hold %llu ms, %llu scan passes "
+                "(last %llu ms)\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
-                tally.rejected, reasons.c_str(),
+                tally.rejected, reasons.c_str(), tally.unverified,
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
                 static_cast<unsigned long long>(scan.LastPassMs()));

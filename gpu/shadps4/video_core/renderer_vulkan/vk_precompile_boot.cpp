@@ -25,13 +25,11 @@
 // An assert in the translator ends the game instead: a marker file beside the list names the
 // entry being translated, and the next start skips the entries it names (CrashMarker).
 //
-// The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way from a
-// second code source: each program where the shader scan found it in guest memory, so a list
-// without code works. The shadow copy then holds no code; the program address register points
-// at the game's own copy, which is checked before the selection and again after each
-// translation, since the game may move or free it at any time. Only programs the loader calls
-// needed (neither in use nor saved) are translated and written; a stage of another program is
-// only bound, with the Info the game's own draws bind it with (Bind).
+// The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way, with
+// its own checked copies of the code the shader scan found in guest memory in place of the
+// list's, so a list without code works. Only programs the loader calls needed (neither in use
+// nor saved) are translated and written; a stage of another program is only bound, with the
+// Info the game's own draws bind it with (Bind).
 
 #include <algorithm>
 #include <bit>
@@ -41,10 +39,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
-#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -96,7 +94,6 @@ enum class Reject {
     StrayFetch,        ///< the fetch shader is read through a pointer the recording did not
     Exception,         ///< the translation threw
     TooManyPermutations,
-    CodeMoved,         ///< the loader's code is no longer where the scan found it
     NoInfo,            ///< a program the loader only binds is in use but not translated yet
     Count,
 };
@@ -104,7 +101,7 @@ enum class Reject {
 constexpr std::array<const char*, size_t(Reject::Count)> RejectNames = {
     "not vertex + fragment", "no code", "no room", "faulted", "not selected", "spec changed",
     "walk outside the recording", "fetch outside the recording", "exception",
-    "too many permutations", "code moved", "program in use without its info",
+    "too many permutations", "program in use without its info",
 };
 
 /// Synthetic base of a stage's code in the shadow layout: no guest pointer (48 bits) has it.
@@ -121,25 +118,6 @@ bool HeaderFoundFirst(std::span<const u32> code, u64 hash) {
     const auto* info =
         std::bit_cast<const AmdGpu::BinaryInfo*>(code.data() + CodeHeaderAt(code));
     return info->Valid() && info->shader_hash == hash && info->length <= code.size_bytes();
-}
-
-/// Whether the program `hash` is at the guest address `address` as AmdGpu::GetParams finds it
-/// without searching (it stops the game on code without its header), and the program address
-/// register can hold the address (bits 8 and up). Reads the game's memory directly: a fault
-/// (the code was freed) counts as moved.
-bool CodeStillThere(u64 address, u64 hash) {
-    if (address & 0xff) {
-        return false;
-    }
-    bool there = false;
-    const bool read = Guarded([&] {
-        const auto code = ReadProgramCode(address, [](u64 at, void* out, size_t size) {
-            std::memcpy(out, reinterpret_cast<const void*>(at), size);
-            return true;
-        });
-        there = HeaderFoundFirst(code, hash);
-    });
-    return read && there;
 }
 
 bool VertexFragmentOnly(const RecordedKey& key, const AmdGpu::Regs& regs) {
@@ -265,8 +243,10 @@ u64 PeakMemoryMiB() {
 } // namespace
 
 struct PrecompileBoot {
-    PrecompileBoot(PipelineCache& cache_, const ParsedList& list_, std::string marker_path)
-        : cache{cache_}, list{list_}, marker{std::move(marker_path)} {}
+    /// `code_`: program hash -> code words, the list's or the loader's.
+    PrecompileBoot(PipelineCache& cache_, const ParsedList& list_,
+                   const std::map<u64, std::vector<u32>>& code_, std::string marker_path)
+        : cache{cache_}, list{list_}, code{code_}, marker{std::move(marker_path)} {}
 
     bool Run();
     void Begin();
@@ -276,10 +256,9 @@ struct PrecompileBoot {
                                   SwStage sw_stage, Shader::Backend::Bindings& binding,
                                   const Shader::RuntimeInfo& runtime_info);
 
-    /// Set (the loader): each program's code is at this guest address, not in the list.
-    const std::unordered_map<u64, u64>* code_at = nullptr;
+    bool load = false; ///< the loader's build: programs not needed are only bound
     const char* log_name = "Precompile boot";
-    /// With the loader's code source: the permutations written, program hash and index.
+    /// The loader's: the permutations written, program hash and index.
     std::vector<std::pair<u64, u32>> written;
 
 private:
@@ -304,6 +283,7 @@ private:
 
     PipelineCache& cache;
     const ParsedList& list;
+    const std::map<u64, std::vector<u32>>& code;
     std::unordered_map<u64, TranslatedProgram> programs; ///< node-based: specs point at their Info
     std::unordered_map<u64, Shader::Info> bound; ///< the loader's programs only bound (Bind)
     Shader::Pools pools; ///< the rebuild's own: a fault jumps out of a translation
@@ -421,18 +401,8 @@ std::optional<Reject> PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
 /// Replays the entry's selection from its shadow copy; why it was not translated, or none.
 std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& shadow) {
     for (const auto& stage : key.stages) {
-        if (code_at) {
-            // Every stage has one (the loader builds only those), checked before the
-            // selection's GetParams reads the header.
-            const u64 address = code_at->at(stage.hash);
-            if (!CodeStillThere(address, stage.hash)) {
-                stop_detail = fmt::format("program {:016x} at {:#x}", stage.hash, address);
-                return Reject::CodeMoved;
-            }
-            continue;
-        }
-        const auto code = list.code.find(stage.hash);
-        if (code == list.code.end() || !HeaderFoundFirst(code->second, stage.hash)) {
+        const auto found = code.find(stage.hash);
+        if (found == code.end() || !HeaderFoundFirst(found->second, stage.hash)) {
             stop_detail = fmt::format("no code for program {:016x}", stage.hash);
             return Reject::NoCode;
         }
@@ -475,16 +445,14 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
     return selected ? std::nullopt : std::optional{Reject::NotSelected};
 }
 
-/// The entry's words and each stage's code (none with the loader's code source), laid out with
-/// guard pages and filled in.
+/// The entry's words and each stage's code, laid out with guard pages and filled in.
 bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
     shadow.words = key.words;
-    const auto with_code = code_at ? std::span<const RecordedStage>{} : std::span{key.stages};
-    for (const auto& stage : with_code) {
+    for (const auto& stage : key.stages) {
         // A code region is only marked out here (its first and last word) and copied in after
         // the fill. Padded to whole pages: the program address register holds bits 8 and up,
         // and a region ends right before its guard page.
-        const size_t bytes = list.code.at(stage.hash).size() * sizeof(u32);
+        const size_t bytes = code.at(stage.hash).size() * sizeof(u32);
         const size_t padded = (bytes + PageSize - 1) / PageSize * PageSize;
         shadow.words.push_back({CodeBase(stage.sw_stage), 0, 0});
         shadow.words.push_back({CodeBase(stage.sw_stage), u32(padded - 4), 0});
@@ -498,17 +466,16 @@ bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
     shadow.address = *address;
     shadow.layout->Fill(reinterpret_cast<u8*>(*address), *address, shadow.words, key.pointers,
                         g_reserved.shadow);
-    for (const auto& stage : with_code) {
-        const auto& code = list.code.at(stage.hash);
+    for (const auto& stage : key.stages) {
+        const auto& words = code.at(stage.hash);
         const u64 at = *shadow.layout->Translate(CodeBase(stage.sw_stage), *address);
-        std::memcpy(reinterpret_cast<void*>(at), code.data(), code.size() * sizeof(u32));
+        std::memcpy(reinterpret_cast<void*>(at), words.data(), words.size() * sizeof(u32));
     }
     return true;
 }
 
-/// The recorded registers, with each stage's code address (the game's copy with the loader's
-/// code source) and user-data pointers led into the shadow copy; stages not recorded have no
-/// program.
+/// The recorded registers, with each stage's code address and user-data pointers led into
+/// the shadow copy; stages not recorded have no program.
 std::unique_ptr<AmdGpu::Regs> PrecompileBoot::Registers(const RecordedKey& key,
                                                         const Shadow& shadow) const {
     auto regs = std::make_unique<AmdGpu::Regs>();
@@ -521,10 +488,8 @@ std::unique_ptr<AmdGpu::Regs> PrecompileBoot::Registers(const RecordedKey& key,
     }
     for (const auto& stage : key.stages) {
         auto& program = ProgramAt(*regs, stage.hw_stage);
-        const u64 code =
-            code_at ? code_at->at(stage.hash)
-                    : *shadow.layout->Translate(CodeBase(stage.sw_stage), shadow.address);
-        program.address = code >> 8; // 40 bits: the address without its low 8
+        const u64 at = *shadow.layout->Translate(CodeBase(stage.sw_stage), shadow.address);
+        program.address = at >> 8; // 40 bits: the address without its low 8
         program.user_data = stage.user_data;
         for (const auto& [sgpr, target] : stage.roots) {
             u64 pointer;
@@ -546,7 +511,7 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
     if (stopped) {
         return {};
     }
-    if (code_at && !cache.ProgramNeeded(params.hash)) {
+    if (load && !cache.ProgramNeeded(params.hash)) {
         return Bind(params, binding);
     }
     auto [it, is_new] = programs.try_emplace(params.hash);
@@ -652,11 +617,6 @@ std::optional<size_t> PrecompileBoot::Translate(TranslatedProgram& program,
                                               perm));
         return std::nullopt;
     }
-    // The game's copy may have changed while it was translated.
-    if (code_at && !CodeStillThere(u64(params.code.data()), params.hash)) {
-        Stop(Reject::CodeMoved, fmt::format("program {:016x} after its translation", params.hash));
-        return std::nullopt;
-    }
     if (!lookup) {
         program.info = std::move(info);
     }
@@ -664,7 +624,7 @@ std::optional<size_t> PrecompileBoot::Translate(TranslatedProgram& program,
     RegisterShaderBinary(std::move(spv), params.hash, perm);
     RegisterShaderMeta(program.info, spec.fetch_shader_data, spec,
                        HashCombine(params.hash, u64(perm)), perm);
-    if (code_at) {
+    if (load) {
         written.emplace_back(params.hash, u32(perm));
     }
     program.specs.push_back(std::move(spec));
@@ -823,10 +783,10 @@ PipelineCache::Result PipelineCache::BootProgram(PipelineSelection& sel, HwStage
 }
 
 LoadBuilder::LoadBuilder(PipelineCache& cache, const ParsedList& list,
-                         const std::unordered_map<u64, u64>& code_at)
-    : boot{std::make_unique<PrecompileBoot>(cache, list, std::string{})} {
+                         const std::map<u64, std::vector<u32>>& code)
+    : boot{std::make_unique<PrecompileBoot>(cache, list, code, std::string{})} {
     // No crash marker (an empty path names none): nothing is skipped.
-    boot->code_at = &code_at;
+    boot->load = true;
     boot->log_name = "Precompile load";
     boot->Begin();
 }
@@ -856,7 +816,8 @@ bool PipelineCache::RebuildFromPrecompileList() {
     if (!parsed || !SetUpFaultGuard()) {
         return false;
     }
-    auto boot_run = std::make_unique<PrecompileBoot>(*this, *parsed, std::string{path} + ".boot");
+    auto boot_run = std::make_unique<PrecompileBoot>(*this, *parsed, parsed->code,
+                                                     std::string{path} + ".boot");
     return boot_run->Run();
 #endif
 }

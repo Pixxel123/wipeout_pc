@@ -10,8 +10,8 @@
 #pragma once
 
 #include <algorithm>
+#include <map>
 #include <memory>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "common/types.h"
@@ -88,18 +88,18 @@ constexpr u64 HoldBudgetNs = 5'000'000'000;
 
 } // namespace Precompile
 
-/// The start-up rebuild's entry build (vk_precompile_boot.cpp) with the loader's code source:
-/// each program's code where the scan found it in guest memory. A stage whose program is not
-/// needed is only bound. GPU command thread only.
+/// The start-up rebuild's entry build (vk_precompile_boot.cpp) for the loader: the code is the
+/// loader's checked copies of what the scan found in guest memory, not the list's. A stage
+/// whose program is not needed is only bound. GPU command thread only.
 class LoadBuilder {
 public:
-    /// `code_at`: program hash -> guest address of its code, the loader's; kept by reference.
+    /// `code`: program hash -> code words, the loader's copies; kept by reference.
     LoadBuilder(PipelineCache& cache, const Precompile::ParsedList& list,
-                const std::unordered_map<u64, u64>& code_at);
+                const std::map<u64, std::vector<u32>>& code);
     ~LoadBuilder();
 
-    /// Builds entry `index` of the list, which `code_at` has every stage's code for: null when
-    /// it was built, else why not (a static text).
+    /// Builds entry `index` of the list, which `code` has every stage's code for: null when it
+    /// was built, else why not (a static text).
     const char* Build(u32 index, const Precompile::RecordedKey& key);
     /// The permutations written since the last call: program hash, permutation index.
     [[nodiscard]] std::vector<std::pair<u64, u32>> TakeWritten();
