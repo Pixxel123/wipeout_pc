@@ -143,7 +143,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
              Common::SlotVector<ImageView>& slot_image_views_, const ImageInfo& info_,
-             u32 host_mip_levels)
+             u32 host_mip_levels, u32 host_layers)
     : guest_begin{info_.guest_address}, guest_end{info_.guest_address + info_.guest_size},
       info{info_}, runtime{&runtime_}, slot_image_views{&slot_image_views_} {
     Gow3Stats::Timer timer{Gow3Stats::t_image_create};
@@ -218,7 +218,7 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
             .depth = info.size.depth,
         },
         .mipLevels = std::max(host_mip_levels, static_cast<u32>(info.resources.levels)),
-        .arrayLayers = static_cast<u32>(info.resources.layers),
+        .arrayLayers = std::max(host_layers, static_cast<u32>(info.resources.layers)),
         .samples = LiverpoolToVK::NumSamples(info.num_samples, supported_samples),
         .tiling = tiling,
         .usage = usage_flags,
@@ -235,6 +235,33 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
                           info.size.height, info.size.depth, AmdGpu::NameOf(info.tile_mode),
                           vk::to_string(info.pixel_format), info.guest_address, info.guest_size,
                           info.resources.layers, info.resources.levels, info.num_samples);
+}
+
+bool Image::CanGrowLayers(const ImageInfo& requested) const {
+    const u32 layers = info.resources.layers;
+    if (!backing || backing_images.size() != 1 || scene_proxy ||
+        True(flags & ImageFlagBits::Aliased) || info.type != AmdGpu::ImageType::Color2D ||
+        requested.type != info.type || info.props.is_depth || info.props.is_block ||
+        info.props.is_volume || AmdGpu::GetMicroTileThickness(info.array_mode) != 1 ||
+        info.resources.levels != 1 || requested.resources.levels != 1 ||
+        info.num_samples != 1 || requested.num_samples != 1 ||
+        info.guest_samples != 1 || requested.guest_samples != 1 ||
+        info.size != requested.size || info.pitch != requested.pitch ||
+        info.pixel_format != requested.pixel_format || info.num_bits != requested.num_bits ||
+        info.tile_mode != requested.tile_mode || info.array_mode != requested.array_mode ||
+        info.alt_tile != requested.alt_tile || info.bank_swizzle != requested.bank_swizzle ||
+        info.props.is_pow2 != requested.props.is_pow2 ||
+        info.guest_address != requested.guest_address ||
+        requested.resources.layers <= layers ||
+        requested.resources.layers > backing->image.image_ci.arrayLayers) {
+        return false;
+    }
+    // Layer k must start at k slices in guest memory, with the same slices as before.
+    const auto& a = info.mips_layout[0];
+    const auto& b = requested.mips_layout[0];
+    return info.guest_size % layers == 0 &&
+           u64{requested.guest_size} == u64{info.guest_size} / layers * requested.resources.layers &&
+           a.pitch == b.pitch && a.height == b.height && a.offset == 0 && b.offset == 0;
 }
 
 bool Image::CanGrowMipLevels(const ImageInfo& requested) const {
@@ -299,7 +326,8 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
 
     if (needs_partial_transition || partially_transited) {
         if (!partially_transited) {
-            subresource_states.resize(backing->image.image_ci.mipLevels * info.resources.layers);
+            subresource_states.resize(backing->image.image_ci.mipLevels *
+                                      backing->image.image_ci.arrayLayers);
             std::fill(subresource_states.begin(), subresource_states.end(), last_state);
         }
 
@@ -315,13 +343,14 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
             needs_partial_transition
                 ? std::ranges::views::iota(subres_range->base.layer,
                                            subres_range->base.layer + subres_range->extent.layers)
-                : std::views::iota(0u, info.resources.layers);
+                : std::views::iota(0u, backing->image.image_ci.arrayLayers);
 
         for (u32 mip : mips) {
             for (u32 layer : layers) {
                 // NOTE: these loops may produce a lot of small barriers.
                 // If this becomes a problem, we can optimize it by merging adjacent barriers.
-                const auto subres_idx = mip * info.resources.layers + layer;
+                // gow3: indexed by the host layers, which stay fixed while the declared ones grow.
+                const auto subres_idx = mip * backing->image.image_ci.arrayLayers + layer;
                 ASSERT(subres_idx < subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 

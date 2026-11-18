@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <filesystem>
@@ -1339,6 +1340,31 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
         }
         return image_id;
     }
+    // gow3: a render target given one more layer at a time (WipEout's reflection targets grow
+    // 1, 2 ... 6 layers, then 8 or 16, in one frame) keeps its image while the reserved layers
+    // last: only the new guest range is registered, protected and uploaded.
+    if (image.CanGrowLayers(info)) {
+        RefreshImage(image);
+        const u32 first_layer = image.info.resources.layers;
+        const VAddr old_end = image.guest_end;
+        total_used_memory += Common::AlignUp(info.guest_size, 1024) -
+                             Common::AlignUp(image.info.guest_size, 1024);
+        image.info = info;
+        image.guest_end = info.guest_address + info.guest_size;
+        ++registry_generation;
+        const u64 first_page = ((old_end - 1) >> Traits::PageBits) + 1;
+        const u64 last_page = (image.guest_end - 1) >> Traits::PageBits;
+        for (u64 page = first_page; page <= last_page; ++page) {
+            page_table[page].push_back(image_id);
+        }
+        image.flags |= ImageFlagBits::CpuDirty;
+        TrackImage(image_id);
+        RefreshImage(image, 0, first_layer);
+        if (image.binding.is_bound || image.binding.is_target) {
+            image.binding.needs_rebind = 1;
+        }
+        return image_id;
+    }
     // WipEout builds a mip chain one level at a time. Reserve host capacity on the first
     // expansion, keeping guest sizes, views and uploads limited to the declared levels.
     const u32 host_mips = info.type == AmdGpu::ImageType::Color2D &&
@@ -1346,7 +1372,21 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
                                  info.resources.layers == 1 && info.num_samples == 1 &&
                                  info.guest_samples == 1 && info.size.depth == 1
                              ? std::bit_width(std::max(info.size.width, info.size.height)) : 0;
-    const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, info, host_mips);
+    // gow3: and a small render target gaining layers reserves up to 16 (the next power of two of
+    // its layers, at least 8), so the growth above takes over. Only slices up to 1 MiB: the
+    // reserved layers take memory, and the targets seen growing this way are 256x256.
+    const u64 slice_bytes = info.resources.layers ? info.guest_size / info.resources.layers : 0;
+    const u32 host_layers =
+        image.usage.render_target && info.type == AmdGpu::ImageType::Color2D &&
+                !info.props.is_depth && !info.props.is_block && info.resources.levels == 1 &&
+                info.num_samples == 1 && info.guest_samples == 1 &&
+                AmdGpu::GetMicroTileThickness(info.array_mode) == 1 &&
+                image.info.resources.layers < info.resources.layers &&
+                info.resources.layers < 16 && slice_bytes <= (1u << 20)
+            ? std::clamp(std::bit_ceil(u32(info.resources.layers)), 8u, 16u)
+            : 0;
+    const auto new_image_id =
+        slot_images.insert(instance, runtime, slot_image_views, info, host_mips, host_layers);
     RegisterImage(new_image_id);
 
     auto& src_image = slot_images[image_id];
@@ -1797,7 +1837,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     return image.FindView(desc.view_info, false);
 }
 
-void TextureCache::RefreshImage(Image& image, u32 first_mip) {
+void TextureCache::RefreshImage(Image& image, u32 first_mip, u32 first_layer) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.guest_samples > 1) {
         return;
     }
@@ -1846,7 +1886,7 @@ void TextureCache::RefreshImage(Image& image, u32 first_mip) {
         if (is_gpu_modified && !is_gpu_dirty) {
             const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
             const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
-            if (first_mip == 0 && image.mip_hashes[m] == hash) {
+            if (first_mip == 0 && first_layer == 0 && image.mip_hashes[m] == hash) {
                 continue;
             }
             image.mip_hashes[m] = hash;
@@ -1854,15 +1894,20 @@ void TextureCache::RefreshImage(Image& image, u32 first_mip) {
 
         const u32 extent_width = mip_pitch ? std::min(mip_pitch, width) : width;
         const u32 extent_height = mip_height ? std::min(mip_height, height) : height;
+        // gow3: from first_layer on (a target grown in place, single mip): the whole range is
+        // still read and detiled, since macro tiling rotates banks by slice, but only the new
+        // layers are copied, from where they sit in the detiled buffer.
+        const u64 layer_offset = u64{first_layer} * (mip_pitch ? mip_pitch : width) *
+                                 (mip_height ? mip_height : height) * (image.info.num_bits / 8);
         image_copies.push_back({
-            .bufferOffset = mip_offset,
+            .bufferOffset = mip_offset + layer_offset,
             .bufferRowLength = mip_pitch,
             .bufferImageHeight = mip_height,
             .imageSubresource{
                 .aspectMask = image.aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
                 .mipLevel = m,
-                .baseArrayLayer = 0,
-                .layerCount = num_layers,
+                .baseArrayLayer = first_layer,
+                .layerCount = num_layers - first_layer,
             },
             .imageOffset = {0, 0, 0},
             .imageExtent = {extent_width, extent_height, depth},
