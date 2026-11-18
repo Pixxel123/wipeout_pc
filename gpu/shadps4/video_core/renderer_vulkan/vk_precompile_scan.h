@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -56,18 +57,19 @@ inline std::optional<u64> CodeStart(std::span<const u8> bytes, u64 base, u64 hea
     // bytes above it, which a candidate may reach into.
     std::span<const u8> block = bytes;
     u64 block_lo = base;
-    std::vector<u8> below;
+    std::vector<u8> below; ///< the block read below `bytes`, reused
     for (u64 back = 8; back <= reach; back += 8) {
         const u64 start = header - back;
         while (start < block_lo) {
             const u64 hi = block_lo;
             const u64 lo = std::max(header - reach, (hi - 1) & ~(ScanReadBlock - 1));
-            std::vector<u8> next(hi - lo + 8);
-            if (!read(lo, next.data(), hi - lo)) {
+            std::array<u8, 8> above;
+            std::memcpy(above.data(), block.data(), above.size());
+            below.resize(hi - lo + above.size());
+            if (!read(lo, below.data(), hi - lo)) {
                 return std::nullopt;
             }
-            std::memcpy(next.data() + (hi - lo), block.data(), 8);
-            below = std::move(next);
+            std::memcpy(below.data() + (hi - lo), above.data(), above.size());
             block = below;
             block_lo = lo;
         }
@@ -111,8 +113,8 @@ inline void FindShaderCode(std::span<const u8> bytes, u64 base, const ReadFn& re
 }
 
 /// A thread at nice 19 that, while loading, scans the resident readable memory of the guest
-/// range for program code, sleeping 250 ms between passes (Linux only: elsewhere Start logs
-/// that it is not supported). It never faults: pages are checked with mincore and read with
+/// range for program code, sleeping 250 ms between passes (Linux only: elsewhere Start does
+/// nothing). It never faults: pages are checked with mincore and read with
 /// process_vm_readv.
 class ShaderScan {
 public:
@@ -139,7 +141,7 @@ public:
 
 private:
     void Run();
-    void Pass();
+    void Pass(std::vector<u8>& buf);
 
     std::thread thread;
     std::mutex mutex;
@@ -150,6 +152,12 @@ private:
     std::unordered_set<u64> known; ///< the scan thread's: every hash found
     std::atomic<u64> passes{0}, last_pass_ms{0};
 };
+
+/// Whether GOW3_PRECOMPILE_SCAN=1 asks for the scan diagnostic.
+[[nodiscard]] inline bool ScanRequested() {
+    const char* scan = std::getenv("GOW3_PRECOMPILE_SCAN");
+    return scan && scan[0] == '1';
+}
 
 /// gow3 diagnostic GOW3_PRECOMPILE_SCAN=1: runs a ShaderScan while loading and logs it. Each
 /// does nothing while it is off.

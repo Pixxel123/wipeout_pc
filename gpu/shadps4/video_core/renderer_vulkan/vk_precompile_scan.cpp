@@ -3,9 +3,10 @@
 
 // gow3 (vk_precompile_scan.h): the memory reads of the shader scan, and the diagnostic
 // GOW3_PRECOMPILE_SCAN=1, which runs it while loading (CompilePolicy::NoSceneFor) and logs each
-// pass. With GOW3_PRECOMPILE_LIST=<file> it also logs, every 5 s, how many of the list's
-// programs the game used since the load began (their first use in this launch) and how many of
-// those the scan had found before the load's first scene frame.
+// pass. With GOW3_PRECOMPILE_LIST=<file> it also logs how many of the list's programs the game
+// used since the load began (their first use in this launch) and how many of those the scan had
+// found before the load's first scene frame: every 5 s outside a load, and once more as the
+// next load begins.
 //
 // Linux only (mincore, process_vm_readv); elsewhere the switch logs that it is not supported.
 
@@ -88,8 +89,6 @@ void ShaderScan::Start() {
         stop = false;
         thread = std::thread([this] { Run(); });
     }
-#else
-    std::printf("Precompile scan: not supported on this platform\n");
 #endif
 }
 
@@ -132,6 +131,9 @@ std::vector<FoundCode> ShaderScan::TakeNew() {
 void ShaderScan::Run() {
     Common::SetCurrentThreadName("gow3:ShaderScan");
     setpriority(PRIO_PROCESS, 0, 19); // this thread
+    // Each read lands after ScanOverlap bytes, which hold the last bytes of the read before
+    // when that one ended where this one starts.
+    std::vector<u8> buf(ScanOverlap + PassChunk);
     std::unique_lock lk{mutex};
     while (!stop) {
         wake.wait(lk, [this] { return stop || loading; });
@@ -140,18 +142,15 @@ void ShaderScan::Run() {
         }
         woken = false;
         lk.unlock();
-        Pass();
+        Pass(buf);
         lk.lock();
         wake.wait_for(lk, PassInterval, [this] { return stop || woken; });
     }
 }
 
-void ShaderScan::Pass() {
+void ShaderScan::Pass(std::vector<u8>& buf) {
     const auto t0 = std::chrono::steady_clock::now();
     const u64 page = HostPageSize();
-    // Each read lands after ScanOverlap bytes, which hold the last bytes of the read before
-    // when that one ended where this one starts.
-    std::vector<u8> buf(ScanOverlap + PassChunk);
     const u64 own_lo = reinterpret_cast<u64>(buf.data()), own_hi = own_lo + buf.size();
     std::vector<unsigned char> resident, read_resident;
     const ReadFn read = [&read_resident](u64 address, void* out, size_t size) {
@@ -251,8 +250,7 @@ std::atomic<ScanDiagnostic*> g_scan{nullptr};
 } // namespace
 
 void StartScanDiagnostic() {
-    const char* on = std::getenv("GOW3_PRECOMPILE_SCAN");
-    if (!on || on[0] != '1' || g_scan.load(std::memory_order_acquire)) {
+    if (!ScanRequested() || g_scan.load(std::memory_order_acquire)) {
         return;
     }
 #ifndef __linux__
@@ -294,31 +292,43 @@ void ScanFlipped(u64 now_ns, bool first_scene) {
     if (d.list_programs.empty()) {
         return;
     }
-    std::scoped_lock lk{d.mutex};
-    if (loading && !d.loading) { // a load begins
-        d.used.clear();
-        d.found_at_scene.clear();
-    }
-    d.loading = loading;
-    if (first_scene) {
-        for (const auto& code : d.scan.TakeNew()) {
-            d.found.insert(code.hash);
+    // The line is counted under the lock and printed after it. It comes every 5 s outside a
+    // load and once more as the next load begins, before that load clears the counts.
+    std::optional<std::pair<size_t, size_t>> line; ///< used, of them found before the scene
+    {
+        std::scoped_lock lk{d.mutex};
+        const auto count = [&d] {
+            size_t found_before = 0;
+            for (const u64 hash : d.used) {
+                found_before += d.found_at_scene.contains(hash);
+            }
+            return std::pair{d.used.size(), found_before};
+        };
+        if (loading && !d.loading) { // a load begins
+            line = count();
+            d.used.clear();
+            d.found_at_scene.clear();
         }
-        for (const u64 hash : d.list_programs) {
-            if (d.found.contains(hash)) {
-                d.found_at_scene.insert(hash);
+        d.loading = loading;
+        if (first_scene) {
+            for (const auto& code : d.scan.TakeNew()) {
+                d.found.insert(code.hash);
+            }
+            for (const u64 hash : d.list_programs) {
+                if (d.found.contains(hash)) {
+                    d.found_at_scene.insert(hash);
+                }
             }
         }
-    }
-    if (now_ns >= d.next_report_ns) {
-        d.next_report_ns = now_ns + ReportIntervalNs;
-        size_t found_before = 0;
-        for (const u64 hash : d.used) {
-            found_before += d.found_at_scene.contains(hash);
+        if (!loading && now_ns >= d.next_report_ns) {
+            d.next_report_ns = now_ns + ReportIntervalNs;
+            line = count();
         }
+    }
+    if (line) {
         std::printf("Precompile scan: %zu list programs used since the load, %zu of them found "
                     "before the first scene frame, last pass %llu ms\n",
-                    d.used.size(), found_before,
+                    line->first, line->second,
                     static_cast<unsigned long long>(d.scan.LastPassMs()));
     }
 }

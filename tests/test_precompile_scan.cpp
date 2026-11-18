@@ -14,7 +14,9 @@ constexpr u64 MemoryBase = 0x10'0000'0000ULL;
 
 /// Fake guest memory at MemoryBase, filled with a byte that is no signature or start token.
 struct Memory {
-    std::vector<u8> bytes = std::vector<u8>(0x10000, 0x5A);
+    std::vector<u8> bytes;
+
+    explicit Memory(size_t size = 0x10000) : bytes(size, 0x5A) {}
 
     /// A program at `start` bytes in: the start token, the OrbShdr header at dword `header`
     /// with `hash` and a length of `length` bytes. Returns the header's offset.
@@ -88,6 +90,19 @@ void TestStartBeforeBytes() {
     assert(out.empty());
 }
 
+void TestWalkBound() {
+    // The header may lie at most MaxCodeBytes - 32 bytes past the start (the recorder's bound).
+    for (const auto& [back, found] : {std::pair{MaxCodeBytes - 32, true},
+                                      std::pair{MaxCodeBytes - 24, false}}) {
+        Memory memory{MaxCodeBytes + 0x1000};
+        memory.Program(0x100, 0x9999, u32(back / 4), 64);
+        std::vector<FoundCode> out;
+        FindShaderCode(memory.bytes, MemoryBase, memory.Reader(), out);
+        assert(out == (found ? std::vector<FoundCode>{{0x9999, MemoryBase + 0x100}}
+                             : std::vector<FoundCode>{}));
+    }
+}
+
 void TestSplitAcrossBuffers() {
     Memory memory;
     const size_t header = memory.Program(0x100, 0x8888, 64, 256);
@@ -108,6 +123,7 @@ int main() {
     TestTwoPrograms();
     TestNoStart();
     TestStartBeforeBytes();
+    TestWalkBound();
     TestSplitAcrossBuffers();
     return EXIT_SUCCESS;
 }

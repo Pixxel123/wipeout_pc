@@ -1441,6 +1441,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     }
 
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
+    if (it_pgm == program_cache.end()) {
+        Precompile::ScanProgramUsed(params.hash); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
+    }
     if (it_pgm == program_cache.end() && DiskShadersActive() && LoadDiskProgram(params.hash)) {
         it_pgm = program_cache.find(params.hash);
     }
@@ -1463,7 +1466,6 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         it_pgm = program_cache.end();
     }
     if (it_pgm == program_cache.end()) {
-        Precompile::ScanProgramUsed(params.hash); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
         if (compile_async()) {
             QueueShader(*new_program, hw_stage, sw_stage, params, runtime_info, binding, 0, true);
