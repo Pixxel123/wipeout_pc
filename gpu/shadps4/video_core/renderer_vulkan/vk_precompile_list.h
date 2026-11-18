@@ -142,6 +142,34 @@ inline const char* CheckCode(u64 hash, std::span<const u32> code) {
     return nullptr;
 }
 
+constexpr u32 CodeHeaderCrcAt = 24; ///< bytes into the header: the u32 crc32 of the code
+
+/// CRC-32 as zlib's crc32() computes it (reflected polynomial 0xEDB88320).
+[[nodiscard]] inline u32 Crc32(std::span<const u8> bytes) {
+    u32 crc = 0xFFFFFFFF;
+    for (const u8 byte : bytes) {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320 & (0u - (crc & 1)));
+        }
+    }
+    return ~crc;
+}
+
+/// Why the body of `code` (CheckCode passed) is not what its header's crc32 says, or null: the
+/// crc32 covers the code from the start token through the header's first 16 bytes. The start
+/// token and the header alone may survive in memory the game has partly overwritten.
+inline const char* CheckCodeBody(std::span<const u32> code) {
+    const u64 header = CodeHeaderAt(code) * 4;
+    if (header + CodeHeaderWords * 4 > code.size_bytes()) {
+        return "code header out of range";
+    }
+    const auto* bytes = reinterpret_cast<const u8*>(code.data());
+    u32 crc;
+    std::memcpy(&crc, bytes + header + CodeHeaderCrcAt, sizeof(crc));
+    return Crc32({bytes, size_t(header) + 16}) == crc ? nullptr : "code body differs from its crc";
+}
+
 /// A program's code from its start token through its OrbShdr header, or through the length
 /// the header gives when that is longer, read through `read(address, out, size)` (false when
 /// it cannot); empty when a read fails or it would be longer than MaxCodeBytes. CheckCode

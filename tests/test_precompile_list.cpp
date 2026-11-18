@@ -251,6 +251,22 @@ void TestCodeRejects() {
              "malformed");
 }
 
+void TestCodeBody() {
+    const char* check = "123456789";
+    assert(Crc32({reinterpret_cast<const u8*>(check), 9}) == 0xCBF43926);
+    // The header's crc32 covers the code from the start token through the header's first 16
+    // bytes.
+    constexpr u64 Hash = 0xC0DE'0000'2222ULL;
+    auto code = SampleCode(Hash, 6, 40);
+    auto* bytes = reinterpret_cast<u8*>(code.data());
+    const size_t header = CodeHeaderAt(code) * 4;
+    const u32 crc = Crc32({static_cast<const u8*>(bytes), header + 16});
+    std::memcpy(bytes + header + CodeHeaderCrcAt, &crc, sizeof(crc));
+    assert(!CheckCode(Hash, code) && !CheckCodeBody(code));
+    code[2] ^= 0x100; // one body byte
+    assert(!CheckCode(Hash, code) && CheckCodeBody(code));
+}
+
 void TestOldVersion() {
     // A version 1 list (no code) is another version: the boot needs the code.
     auto file = File({SampleKey(1)});
@@ -404,6 +420,7 @@ int main() {
     TestCap();
     TestCode();
     TestCodeRejects();
+    TestCodeBody();
     TestOldVersion();
     TestStagesDigest();
     TestAppendKeeps();
