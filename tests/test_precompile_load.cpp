@@ -1,5 +1,6 @@
 // Loader of the precompile diagnostics (vk_precompile_load.h): which list entries are built
-// while loading, from fake sets of programs in use and found by the scan.
+// while loading and when a draw's first use of a program waits for them, from fake sets of
+// programs in use and found by the scan and fake scan pass counters.
 #include <cassert>
 #include <set>
 #include <vector>
@@ -43,6 +44,56 @@ void TestOneNeededProgramIsEnough() {
     assert(Plan({{1}, {2}}, {1, 2}, {1, 2}) == EntryPlan::Build);
 }
 
+bool Lacked(const std::vector<Stage>& stages, const std::set<u64>& needed,
+            const std::set<u64>& fresh) {
+    return EntryLacked(
+        stages, [&](u64 hash) { return needed.contains(hash); },
+        [&](u64 hash) { return fresh.contains(hash); });
+}
+
+void TestFreshCodeCountsOnlyForAnEntryWithANeededProgram() {
+    assert(Lacked({{1}, {2}}, {1}, {2}));
+    assert(Lacked({{1}, {2}}, {1}, {1}));
+    assert(!Lacked({{1}, {2}}, {}, {2}));     // nothing to build
+    assert(!Lacked({{1}, {2}}, {1, 2}, {3})); // not one of its programs
+}
+
+void TestLastPassFoundWhileItRanOrUntilTheNextOneFinishes() {
+    assert(!LastPassFound(0, 0)); // nothing taken yet
+    assert(!LastPassFound(0, 3));
+    // Taken while pass 4 ran (3 finished): pass 4, or 3 when it was taken late.
+    assert(LastPassFound(4, 3));
+    assert(LastPassFound(4, 4));
+    assert(!LastPassFound(4, 5)); // pass 5 finished without anything lacked
+}
+
+void TestHoldOnlyWhileLoadingWithWorkAndTimeLeft() {
+    constexpr u64 Second = 1'000'000'000;
+    assert(HoldActive(true, 0, true, false));
+    assert(HoldActive(true, 0, false, true));
+    assert(!HoldActive(true, 0, false, false)); // nothing queued, the scan found nothing more
+    assert(!HoldActive(false, 0, true, true));  // never outside the loading state
+    assert(HoldActive(true, 5 * Second - 1, true, true));
+    assert(!HoldActive(true, 5 * Second, true, true)); // the load's holds took 5 s
+}
+
+void TestHoldWaitsForAPassThatStartedAfterItWokeTheScan() {
+    // Pass 7 ran when the hold woke the scan (7 started, 6 finished): pass 8 is the one.
+    assert(!WaitedPassDone(7, 6));
+    assert(!WaitedPassDone(7, 7));
+    assert(WaitedPassDone(7, 8));
+    // No pass ran (6 started, 6 finished): pass 7.
+    assert(WaitedPassDone(6, 7));
+}
+
+void TestHoldEndsWhenAPassFindsNothingNeededOrTimeIsUp() {
+    constexpr u64 Second = 1'000'000'000;
+    assert(HoldEnds(false, 0));
+    assert(!HoldEnds(true, 0));
+    assert(!HoldEnds(true, 5 * Second - 1));
+    assert(HoldEnds(true, 5 * Second));
+}
+
 } // namespace
 
 int main() {
@@ -50,5 +101,10 @@ int main() {
     TestNeededEntryWaitsUntilEveryStageWasFound();
     TestStageInUseStillNeedsItsCode();
     TestOneNeededProgramIsEnough();
+    TestFreshCodeCountsOnlyForAnEntryWithANeededProgram();
+    TestLastPassFoundWhileItRanOrUntilTheNextOneFinishes();
+    TestHoldOnlyWhileLoadingWithWorkAndTimeLeft();
+    TestHoldWaitsForAPassThatStartedAfterItWokeTheScan();
+    TestHoldEndsWhenAPassFindsNothingNeededOrTimeIsUp();
     return 0;
 }

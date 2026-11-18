@@ -149,6 +149,7 @@ void ShaderScan::Run() {
 }
 
 void ShaderScan::Pass(std::vector<u8>& buf) {
+    started.fetch_add(1, std::memory_order_relaxed);
     const auto t0 = std::chrono::steady_clock::now();
     const u64 page = HostPageSize();
     const u64 own_lo = reinterpret_cast<u64>(buf.data()), own_hi = own_lo + buf.size();
@@ -222,7 +223,7 @@ void ShaderScan::Pass(std::vector<u8>& buf) {
     if (!cut) {
         last_pass_ms.store(ms, std::memory_order_relaxed);
     }
-    const u64 pass = passes.fetch_add(1, std::memory_order_relaxed) + 1;
+    const u64 pass = passes.fetch_add(1, std::memory_order_release) + 1;
     std::printf("Precompile scan: pass %llu, %llu MiB in %llu ms, %zu shaders (%llu new)%s\n",
                 static_cast<unsigned long long>(pass),
                 static_cast<unsigned long long>(bytes_read >> 20),

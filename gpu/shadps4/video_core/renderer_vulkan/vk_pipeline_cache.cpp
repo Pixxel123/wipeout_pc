@@ -1444,6 +1444,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
     if (it_pgm == program_cache.end()) {
         Precompile::ScanProgramUsed(params.hash); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
+        // gow3 diagnostic GOW3_PRECOMPILE_LOAD: may build list entries into the store first;
+        // program_cache is unchanged, so it_pgm stays valid.
+        PrecompileLoadFirstUse(params.hash);
     }
     if (it_pgm == program_cache.end() && DiskShadersActive() && LoadDiskProgram(params.hash)) {
         it_pgm = program_cache.find(params.hash);

@@ -127,9 +127,15 @@ public:
     /// Ends the sleep between passes now.
     void Wake();
 
-    /// Passes run, those cut short when loading ended included.
+    /// Passes run, those cut short when loading ended included. What they found is in TakeNew
+    /// by then.
     [[nodiscard]] u64 Passes() const {
-        return passes.load(std::memory_order_relaxed);
+        return passes.load(std::memory_order_acquire);
+    }
+    /// Passes begun, the running one included: a pass not counted in it reads the memory after
+    /// the call.
+    [[nodiscard]] u64 Started() const {
+        return started.load(std::memory_order_relaxed);
     }
     /// The last pass that was not cut short.
     [[nodiscard]] u64 LastPassMs() const {
@@ -150,7 +156,7 @@ private:
     bool woken = false;            ///< under mutex
     std::vector<FoundCode> fresh;  ///< under mutex: TakeNew
     std::unordered_set<u64> known; ///< the scan thread's: every hash found
-    std::atomic<u64> passes{0}, last_pass_ms{0};
+    std::atomic<u64> passes{0}, started{0}, last_pass_ms{0};
 };
 
 /// Whether GOW3_PRECOMPILE_SCAN=1 asks for the scan diagnostic.
