@@ -253,6 +253,11 @@ void StartScanDiagnostic() {
     if (!ScanRequested() || g_scan.load(std::memory_order_acquire)) {
         return;
     }
+    if (LoadRequested()) {
+        // Never two scans at once, and the loader takes every program the scan finds.
+        std::printf("Precompile scan: off, GOW3_PRECOMPILE_LOAD=1 runs its own scan\n");
+        return;
+    }
 #ifndef __linux__
     std::printf("Precompile scan: not supported on this platform\n");
 #else

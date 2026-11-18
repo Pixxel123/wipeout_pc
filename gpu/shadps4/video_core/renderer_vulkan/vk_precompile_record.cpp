@@ -597,9 +597,10 @@ PrecompileRecordPtr MakePrecompileRecord() {
         std::printf("Precompile replay: GOW3_PRECOMPILE_REPLAY no longer exists (the start-up "
                     "rebuild, GOW3_PRECOMPILE_BOOT, replaced it), ignored\n");
     }
-    if (list_path && !BootRequested() && !ScanRequested()) {
+    if (list_path && !BootRequested() && !LoadRequested() && !ScanRequested()) {
         std::printf("Precompile list: %s is read only by the start-up rebuild "
-                    "(GOW3_PRECOMPILE_BOOT=1) and the scan (GOW3_PRECOMPILE_SCAN=1), not used\n",
+                    "(GOW3_PRECOMPILE_BOOT=1), the loader (GOW3_PRECOMPILE_LOAD=1) and the scan "
+                    "(GOW3_PRECOMPILE_SCAN=1), not used\n",
                     list_path);
     }
     // The record file may be the start-up rebuild's list: it is opened here, before the rebuild

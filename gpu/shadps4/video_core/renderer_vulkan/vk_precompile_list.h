@@ -613,6 +613,13 @@ struct ListAppend {
     return boot && boot[0] == '1';
 }
 
+/// Whether GOW3_PRECOMPILE_LOAD=1 asks for the loader, which builds GOW3_PRECOMPILE_LIST while
+/// loading (vk_precompile_load.cpp); it replaces the start-up rebuild.
+[[nodiscard]] inline bool LoadRequested() {
+    const char* load = std::getenv("GOW3_PRECOMPILE_LOAD");
+    return load && load[0] == '1';
+}
+
 /// Reads the list at `path` (vk_precompile_record.cpp); none when it cannot be used (logged).
 std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys);
 

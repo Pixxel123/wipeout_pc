@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <variant>
 #include <boost/container/static_vector.hpp>
@@ -17,6 +18,7 @@
 #include "shader_recompiler/specialization.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_precompile_load.h"
 #include "video_core/renderer_vulkan/vk_precompile_record.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
@@ -182,6 +184,9 @@ public:
     /// gow3 diagnostic (GOW3_PRECOMPILE_RECORD): reports the recording every few seconds.
     /// GPU command thread, between submissions.
     void ReportPrecompile();
+    /// gow3 diagnostic (GOW3_PRECOMPILE_LOAD): builds list entries while loading. GPU command
+    /// thread, between submissions.
+    void PumpPrecompileLoad();
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
                               std::optional<Shader::Gcn::FetchShaderData>, u64>;
@@ -228,6 +233,17 @@ private:
     Result BootProgram(PipelineSelection& sel, Shader::HwStage hw_stage, Shader::SwStage sw_stage,
                        const Shader::ShaderParams& params, Shader::Backend::Bindings& binding,
                        const Shader::RuntimeInfo& runtime_info);
+    friend struct PrecompileLoad;
+    /// gow3 (GOW3_PRECOMPILE_LOAD): neither in use nor saved in the store, so the loader may
+    /// translate it and number its permutations from 0. GPU command thread.
+    [[nodiscard]] bool ProgramNeeded(u64 hash) const {
+        return !program_cache.contains(hash) && !disk_permutations.contains(hash);
+    }
+    /// gow3 (GOW3_PRECOMPILE_LOAD): the Info GetProgram binds a program in use or saved with;
+    /// false while there is none yet. GPU command thread.
+    bool InUseInfo(u64 hash, Shader::Info& info);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): permutations the loader saved, for LoadDiskProgram.
+    void AddSavedPermutations(std::span<const std::pair<u64, u32>> saved);
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
@@ -305,6 +321,7 @@ private:
     void ReportDiskShaders();
 
     PrecompileRecordPtr precompile; ///< gow3: the recorder, null unless GOW3_PRECOMPILE_RECORD
+    PrecompileLoadPtr precompile_load; ///< gow3: the loader, null unless GOW3_PRECOMPILE_LOAD
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

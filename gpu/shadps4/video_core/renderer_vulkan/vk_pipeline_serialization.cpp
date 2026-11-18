@@ -1301,6 +1301,60 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
     return inserted != 0;
 }
 
+// gow3 (GOW3_PRECOMPILE_LOAD): a program in use binds with its translated Info (the template,
+// GetProgram's AddBindings); a saved one with that of its first permutation LoadShaderMeta
+// accepts, as LoadDiskProgram takes it.
+bool PipelineCache::InUseInfo(u64 hash, Shader::Info& info) {
+    if (const auto found = program_cache.find(hash); found != program_cache.end()) {
+        if (!found->second->info_template) {
+            return false; // its first translation is pending
+        }
+        info = *found->second->info_template;
+        return true;
+    }
+    const auto saved = disk_permutations.find(hash);
+    if (saved == disk_permutations.end()) {
+        return false;
+    }
+    auto& db = Storage::DataBase::Instance();
+    for (const u32 idx : saved->second) {
+        std::vector<u8> meta;
+        db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", HashCombine(hash, u64{idx})),
+                meta);
+        if (meta.empty()) {
+            continue;
+        }
+        Serialization::Archive meta_ar{std::move(meta)};
+        Shader::Info candidate{};
+        Shader::StageSpecialization spec{};
+        std::optional<Shader::Gcn::FetchShaderData> fetch;
+        size_t perm_idx{};
+        if (LoadShaderMeta(meta_ar, candidate, fetch, spec, perm_idx) && perm_idx == idx &&
+            candidate.pgm_hash == hash) {
+            info = std::move(candidate);
+            return true;
+        }
+    }
+    return false;
+}
+
+// gow3 (GOW3_PRECOMPILE_LOAD): the loader's saved permutations, added to the index as
+// IndexDiskShaders adds the whole store's (sorted: LoadDiskProgram sizes the program by the
+// last), once they are on disk. A program in use by now keeps the numbering it has: none of it
+// is read from the store again.
+void PipelineCache::AddSavedPermutations(std::span<const std::pair<u64, u32>> saved) {
+    for (const auto& [hash, idx] : saved) {
+        if (program_cache.contains(hash)) {
+            continue;
+        }
+        auto& indices = disk_permutations[hash];
+        const auto at = std::ranges::lower_bound(indices, idx);
+        if (at == indices.end() || *at != idx) {
+            indices.insert(at, idx);
+        }
+    }
+}
+
 size_t PipelineCache::NewPermutationIndex(const Program& program) const {
     if (DiskShadersActive()) {
         const auto hole =

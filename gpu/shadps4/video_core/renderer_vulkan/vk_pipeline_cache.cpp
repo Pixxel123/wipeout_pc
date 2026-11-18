@@ -435,6 +435,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                  capture_count, count, fast_first_builds ? "on" : "off");
     }
     precompile = MakePrecompileRecord();
+    precompile_load = MakePrecompileLoad(*this);
 }
 
 PipelineCache::~PipelineCache() {
