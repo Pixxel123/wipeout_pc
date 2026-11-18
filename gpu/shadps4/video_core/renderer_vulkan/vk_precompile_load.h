@@ -88,8 +88,8 @@ constexpr u64 HoldBudgetNs = 5'000'000'000;
 }
 
 /// Whether a hold stops waiting for the pipelines of the entries built: every one was handed
-/// to the compile workers (`left`: the workers' queue was full) and every build the loader
-/// handed over is done, or this loading state's holds have taken HoldBudgetNs.
+/// to the compile workers (`left`: their queue held LoadQueueDepth tasks) and every build the
+/// loader handed over is done, or this loading state's holds have taken HoldBudgetNs.
 [[nodiscard]] constexpr bool PipelineWaitEnds(bool left, bool builds_done, u64 held_ns) {
     return (!left && builds_done) || held_ns >= HoldBudgetNs;
 }
@@ -100,11 +100,15 @@ constexpr u64 HoldBudgetNs = 5'000'000'000;
     return loading && held_ns < HoldBudgetNs ? HoldBudgetNs - held_ns : 0;
 }
 
+/// The loader hands a pipeline to the compile workers only while fewer tasks than this wait in
+/// their queue (64, shared with the shader translations): the rest stays for the draws.
+constexpr size_t LoadQueueDepth = 48;
+
 /// What became of a built entry's pipeline.
 enum class PipelineStep {
     Have,    ///< built or being built already
     Queued,  ///< handed to the compile workers
-    Full,    ///< the workers' queue is full: again later
+    Full,    ///< the workers' queue holds LoadQueueDepth tasks: again later
     Dropped, ///< not selected: a program or permutation is missing, or a read faulted
 };
 
@@ -127,7 +131,7 @@ public:
     /// The permutations written since the last call: program hash, permutation index.
     [[nodiscard]] std::vector<std::pair<u64, u32>> TakeWritten();
     /// Entry `key`, built and its permutations in the store's index: its pipeline, selected
-    /// and handed to the compile workers. Room in their queue is checked first.
+    /// and handed to the compile workers. Room in their queue (LoadQueueDepth) is checked first.
     Precompile::PipelineStep Pipeline(const Precompile::RecordedKey& key);
 
 private:

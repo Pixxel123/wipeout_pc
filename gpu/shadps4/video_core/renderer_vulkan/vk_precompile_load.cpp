@@ -260,7 +260,7 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
 }
 
 /// Hands built and merged entries' pipelines to the compile workers until `until_ns` or until
-/// their queue is full.
+/// their queue holds LoadQueueDepth tasks.
 void PrecompileLoad::SelectPipelines(u64 until_ns) {
     while (!selecting.empty() && CompilePolicy::Now() < until_ns) {
         const auto step = builder.Pipeline(list.keys[selecting.front()]);
@@ -304,7 +304,7 @@ void PrecompileLoad::Hold() {
             break;
         }
         if (left) {
-            std::this_thread::sleep_for(HoldPoll); // the workers' queue is full
+            std::this_thread::sleep_for(HoldPoll); // the queue holds LoadQueueDepth tasks
         }
     }
     cache.PublishGraphics();

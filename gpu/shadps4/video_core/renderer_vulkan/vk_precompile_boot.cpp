@@ -455,7 +455,7 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 /// It is handed to the compile workers inside the same recovery point, before the copy goes:
 /// the build's snapshot reads it.
 PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key) {
-    if (!cache.compiler->HasCapacity()) {
+    if (cache.compiler->Depth() >= LoadQueueDepth) {
         return PipelineStep::Full;
     }
     Shadow shadow;
