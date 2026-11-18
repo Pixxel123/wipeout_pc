@@ -117,6 +117,10 @@ struct PipelineSelection {
     bool compilation_pending = false;
     DrawIndirectParams draw_indirect_params{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
+    /// gow3 (GOW3_PRECOMPILE_LOAD): with `worker`, on the GPU command thread: the lookup first
+    /// reads a program missing from program_cache from the store (LoadDiskProgram). It still
+    /// translates nothing: a missing program or permutation fails the selection.
+    bool from_store = false;
     /// gow3: set: a start-up rebuild from a precompile list (vk_precompile_boot.cpp) translates
     /// the programs, not program_cache.
     struct PrecompileBoot* boot{};
