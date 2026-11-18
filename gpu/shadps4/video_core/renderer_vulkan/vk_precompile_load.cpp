@@ -13,9 +13,18 @@
 // permutations are added to its index, so a program's first use in this launch reads them
 // (LoadDiskProgram) instead of translating it.
 //
+// Then each built entry's pipeline is selected again, lookup-only as a draw-preparation worker
+// does but reading its programs from the store (LoadBuilder::Pipeline), and handed to the
+// compile workers as a draw's background build is, while their queue has room; the draw path
+// publishes it (PublishGraphics). A translated shader alone does not draw: a draw whose
+// pipeline is still building is skipped after a short grace wait (GetGraphicsPipeline). A
+// selection that misses a program or permutation, and a failed build, are dropped and counted;
+// the race's draw then builds that pipeline itself.
+//
 // The first draw of the race asks for programs before the pump has built them: a draw's first
 // use of a program while the loader is active holds the draw (Hold) until what the scan finds
-// is built, at most 5 s per loading state, and never outside one.
+// is built and its pipelines too, and a draw of a pipeline the loader is building waits for it
+// (Wait); both at most 5 s per loading state together, and never outside one.
 //
 // Threads: the pump and the hold never run at once, both are on the GPU command thread. The
 // pump runs in Rasterizer::OnSubmit, which only Liverpool::Process calls, after a submission.
@@ -25,7 +34,9 @@
 // Dispatch calls use on the thread that decodes the command lists, Liverpool::Process again,
 // which resumes them; the draw recording thread never selects. So disk_permutations, which
 // has no lock, and the loader's state need none. The loading state is read from CompilePolicy's
-// atomics on this thread, so nothing of the loader is shared with the present thread.
+// atomics on this thread, so nothing of the loader is shared with the present thread. The
+// pipeline selections run on this thread too and add programs to program_cache under its lock,
+// as GetProgram does; a hold inside GetProgram finds its program again afterwards.
 //
 // Linux only (the scan); elsewhere the switch logs that it is not supported.
 
@@ -34,6 +45,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <map>
 #include <numeric>
 #include <string>
@@ -79,6 +91,7 @@ struct PrecompileLoad {
 
     void Pump();
     void FirstUse(u64 hash);
+    bool Wait(const std::function<bool(u64 left_ns)>& wait);
 
 private:
     /// One loading state's counts, for its line.
@@ -89,6 +102,8 @@ private:
         u64 permutations = 0;
         u64 held_ns = 0;
         u64 passes_before = 0; ///< scan passes when the loading state began
+        u32 dropped = 0;       ///< pipeline selections that found no pipeline
+        u64 published_before = 0, failed_before = 0; ///< the cache's load builds then
         std::vector<std::pair<const char*, u32>> reasons;
     };
 
@@ -97,6 +112,7 @@ private:
     bool TakeFound();
     void Replan();
     void BuildReady(u64 until_ns);
+    void SelectPipelines(u64 until_ns);
     void Hold();
     void Merge();
     void ReportLoad() const;
@@ -109,6 +125,8 @@ private:
     ShaderScan scan;
     std::vector<u32> waiting; ///< entries the scan has not found every program of
     std::deque<u32> ready;    ///< entries to build
+    std::vector<u32> unmerged; ///< entries built since the last merge
+    std::deque<u32> selecting; ///< entries built and merged whose pipeline is not handed over
     bool loading = false;
     bool store_off_logged = false;
     u64 found_in = 0; ///< scan.Started() when code an entry lacked was last taken
@@ -142,6 +160,8 @@ bool PrecompileLoad::Loading() {
         used.clear();
         tally = {};
         tally.passes_before = scan.Passes();
+        tally.published_before = cache.load_builds_published;
+        tally.failed_before = cache.load_builds_failed;
         Replan(); // the game has used programs since the last load
     } else {
         Merge(); // the load ended before the queue ran empty
@@ -218,6 +238,7 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
         const char* why = builder.Build(index, list.keys[index], no_info);
         if (!why) {
             ++tally.built;
+            unmerged.push_back(index);
             continue;
         }
         if (no_info) {
@@ -238,15 +259,30 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
     }
 }
 
+/// Hands built and merged entries' pipelines to the compile workers until `until_ns` or until
+/// their queue is full.
+void PrecompileLoad::SelectPipelines(u64 until_ns) {
+    while (!selecting.empty() && CompilePolicy::Now() < until_ns) {
+        const auto step = builder.Pipeline(list.keys[selecting.front()]);
+        if (step == PipelineStep::Full) {
+            break; // again on a later call
+        }
+        selecting.pop_front();
+        tally.dropped += step == PipelineStep::Dropped;
+    }
+}
+
 /// Builds every queued entry, then has the scan run a pass that starts after that and builds
 /// what it found, until such a pass finds no code an entry with a needed program lacked or the
 /// loading state's holds took HoldBudgetNs; then merges, so the GetProgram this holds finds
-/// what was built in the store. Not a pending draw, and no grace wait.
+/// what was built in the store, hands the entries' pipelines to the compile workers and waits
+/// for them in the same budget, and publishes them. Not a pending draw, and no grace wait.
 void PrecompileLoad::Hold() {
     const u64 began = CompilePolicy::Now();
+    const u64 until = began + (HoldBudgetNs - tally.held_ns);
     const auto held = [&] { return tally.held_ns + (CompilePolicy::Now() - began); };
     for (;;) {
-        BuildReady(began + (HoldBudgetNs - tally.held_ns));
+        BuildReady(until);
         if (held() >= HoldBudgetNs) {
             break;
         }
@@ -260,21 +296,34 @@ void PrecompileLoad::Hold() {
         }
     }
     Merge();
+    for (;;) {
+        SelectPipelines(until);
+        const bool left = !selecting.empty();
+        const bool done = !left && cache.WaitLoadBuilds(until);
+        if (PipelineWaitEnds(left, done, held())) {
+            break;
+        }
+        if (left) {
+            std::this_thread::sleep_for(HoldPoll); // the workers' queue is full
+        }
+    }
+    cache.PublishGraphics();
     tally.held_ns = held();
 }
 
-/// Flushes the store and adds the permutations written since the last merge to its index.
+/// Flushes the store and adds the permutations written since the last merge to its index; the
+/// entries built since then go on to their pipelines.
 void PrecompileLoad::Merge() {
-    auto written = builder.TakeWritten();
-    if (written.empty()) {
-        return;
+    if (auto written = builder.TakeWritten(); !written.empty()) {
+        Storage::DataBase::Instance().Flush();
+        cache.AddSavedPermutations(written); // keeps what it indexed
+        tally.permutations += written.size();
+        for (const auto& [hash, perm] : written) {
+            built.insert(hash);
+        }
     }
-    Storage::DataBase::Instance().Flush();
-    cache.AddSavedPermutations(written); // keeps what it indexed
-    tally.permutations += written.size();
-    for (const auto& [hash, perm] : written) {
-        built.insert(hash);
-    }
+    selecting.insert(selecting.end(), unmerged.begin(), unmerged.end());
+    unmerged.clear();
 }
 
 void PrecompileLoad::ReportLoad() const {
@@ -287,9 +336,14 @@ void PrecompileLoad::ReportLoad() const {
     }
     std::printf("Precompile load: %u entries built (%llu permutations), %u skipped, %u "
                 "rejected%s, %u with a program in use but untranslated, %u programs' code not "
-                "verified, hold %llu ms, %llu scan passes (last %llu ms)\n",
+                "verified, %llu pipelines built, %llu dropped, hold %llu ms, %llu scan passes "
+                "(last %llu ms)\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
                 tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
+                static_cast<unsigned long long>(cache.load_builds_published -
+                                                tally.published_before),
+                static_cast<unsigned long long>(tally.dropped + cache.load_builds_failed -
+                                                tally.failed_before),
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
                 static_cast<unsigned long long>(scan.LastPassMs()));
@@ -324,8 +378,10 @@ void PrecompileLoad::Pump() {
         }
         return;
     }
+    const u64 until = CompilePolicy::Now() + PumpNs;
     TakeFound();
-    BuildReady(CompilePolicy::Now() + PumpNs);
+    BuildReady(until);
+    SelectPipelines(until);
 }
 
 /// GetProgram, a program not in program_cache: before the store is asked for it. Only a
@@ -348,6 +404,20 @@ void PrecompileLoad::FirstUse(u64 hash) {
     } else {
         Merge(); // nothing when nothing is unmerged
     }
+}
+
+/// GetGraphicsPipeline, a pipeline the loader is building: `wait` for it while loading, from
+/// what this loading state's holds left. Not a pending draw, and no grace wait.
+bool PrecompileLoad::Wait(const std::function<bool(u64 left_ns)>& wait) {
+    const bool now_loading = cache.DiskShadersActive() && Loading();
+    const u64 left = HoldLeftNs(now_loading, tally.held_ns);
+    if (left == 0) {
+        return false;
+    }
+    const u64 began = CompilePolicy::Now();
+    const bool ready = wait(left);
+    tally.held_ns += CompilePolicy::Now() - began;
+    return ready;
 }
 
 void PrecompileLoadDeleter::operator()(PrecompileLoad* load) const {
@@ -392,6 +462,10 @@ void PipelineCache::PrecompileLoadFirstUse(u64 hash) {
     if (precompile_load) {
         precompile_load->FirstUse(hash);
     }
+}
+
+bool PipelineCache::PrecompileLoadWait(const std::function<bool(u64 left_ns)>& wait) {
+    return precompile_load && precompile_load->Wait(wait);
 }
 
 } // namespace Vulkan

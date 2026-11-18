@@ -359,7 +359,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                                                               : create(nullptr, used_info, false);
     };
     const auto compiled = [&] {
-        if (counted) {
+        if (counted && !t_loader_build) {
             g_compile_policy.Compiled(CompilePolicy::Now());
         }
     };

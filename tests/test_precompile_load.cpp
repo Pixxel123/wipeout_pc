@@ -1,6 +1,7 @@
 // Loader of the precompile diagnostics (vk_precompile_load.h): which list entries are built
-// while loading and when a draw's first use of a program waits for them, from fake sets of
-// programs in use and found by the scan and fake scan pass counters.
+// while loading, when a draw's first use of a program waits for them and when a wait for their
+// pipelines ends, from fake sets of programs in use and found by the scan and fake scan pass
+// counters.
 #include <cassert>
 #include <set>
 #include <vector>
@@ -94,6 +95,24 @@ void TestHoldEndsWhenAPassFindsNothingNeededOrTimeIsUp() {
     assert(HoldEnds(true, 5 * Second));
 }
 
+void TestPipelineWaitEndsOnceAllAreHandedOverAndBuiltOrTimeIsUp() {
+    constexpr u64 Second = 1'000'000'000;
+    assert(PipelineWaitEnds(false, true, 0));
+    assert(!PipelineWaitEnds(false, false, 0)); // a build still runs
+    assert(!PipelineWaitEnds(true, true, 0));   // the workers' queue was full: more to hand over
+    assert(!PipelineWaitEnds(true, false, 5 * Second - 1));
+    assert(PipelineWaitEnds(true, false, 5 * Second)); // the load's holds took 5 s
+}
+
+void TestBuildWaitOnlyWhileLoadingFromWhatTheHoldsLeft() {
+    constexpr u64 Second = 1'000'000'000;
+    assert(HoldLeftNs(true, 0) == 5 * Second);
+    assert(HoldLeftNs(true, 2 * Second) == 3 * Second);
+    assert(HoldLeftNs(true, 5 * Second) == 0);
+    assert(HoldLeftNs(true, 6 * Second) == 0); // a wait may end a little past the budget
+    assert(HoldLeftNs(false, 0) == 0);         // never outside the loading state
+}
+
 } // namespace
 
 int main() {
@@ -106,5 +125,7 @@ int main() {
     TestHoldOnlyWhileLoadingWithWorkAndTimeLeft();
     TestHoldWaitsForAPassThatStartedAfterItWokeTheScan();
     TestHoldEndsWhenAPassFindsNothingNeededOrTimeIsUp();
+    TestPipelineWaitEndsOnceAllAreHandedOverAndBuiltOrTimeIsUp();
+    TestBuildWaitOnlyWhileLoadingFromWhatTheHoldsLeft();
     return 0;
 }

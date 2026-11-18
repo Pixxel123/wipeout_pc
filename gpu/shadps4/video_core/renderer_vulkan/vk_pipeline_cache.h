@@ -250,8 +250,29 @@ private:
     /// `saved` keeps those it indexed.
     void AddSavedPermutations(std::vector<std::pair<u64, u32>>& saved);
     /// gow3 (GOW3_PRECOMPILE_LOAD): GetProgram, a program not in program_cache; while loading
-    /// the draw may wait for the loader here. Never changes program_cache.
+    /// the draw may wait for the loader here. Its pipeline selections may read programs from
+    /// the store into program_cache.
     void PrecompileLoadFirstUse(u64 hash);
+    /// gow3: hands the pipeline `sel` selected to the compile workers, as a draw's background
+    /// build; null when their queue is full. `live`: the Infos the published pipeline binds,
+    /// `loader`: the loader's build (AsyncGraphicsCompilation::loader).
+    std::shared_ptr<AsyncGraphicsCompilation> StartGraphicsBuild(
+        const PipelineSelection& sel, const std::array<const Shader::Info*, MaxShaderStages>& live,
+        bool loader);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): the pipeline a loader selection (`worker`, `from_store`)
+    /// found, handed to the compile workers unless it is built or being built. GPU command
+    /// thread, while the selection's shadow copy is mapped: the build's snapshot reads it.
+    Precompile::PipelineStep StartLoadPipeline(const PipelineSelection& selection,
+                                               const PrepWorker& worker);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): whether every build the loader handed over is done by
+    /// `until_ns` (CompilePolicy::Now), waiting for them until then.
+    bool WaitLoadBuilds(u64 until_ns);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): a draw of a pipeline the loader is building waits for it
+    /// while loading, from the loading state's hold budget; true when it is built.
+    bool WaitLoadBuild(const AsyncGraphicsCompilation& build);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): `wait(left_ns)` while loading with hold budget left, the
+    /// time it takes counted as held; false (no wait) otherwise, else what `wait` returned.
+    bool PrecompileLoadWait(const std::function<bool(u64 left_ns)>& wait);
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
@@ -330,6 +351,8 @@ private:
 
     PrecompileRecordPtr precompile; ///< gow3: the recorder, null unless GOW3_PRECOMPILE_RECORD
     PrecompileLoadPtr precompile_load; ///< gow3: the loader, null unless GOW3_PRECOMPILE_LOAD
+    /// gow3 (GOW3_PRECOMPILE_LOAD): the loader's builds published and failed (PublishGraphics).
+    u64 load_builds_published = 0, load_builds_failed = 0;
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

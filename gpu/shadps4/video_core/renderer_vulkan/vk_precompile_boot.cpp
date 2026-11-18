@@ -29,7 +29,9 @@
 // its own checked copies of the code the shader scan found in guest memory in place of the
 // list's, so a list without code works. Only programs the loader calls needed (neither in use
 // nor saved) are translated and written; a stage of another program is only bound, with the
-// Info the game's own draws bind it with (Bind).
+// Info the game's own draws bind it with (Bind). Once its permutations are in the store's index,
+// a built entry's pipeline is selected again from a new shadow copy, as a draw-preparation
+// worker looks it up (Pipeline), and handed to the compile workers.
 
 #include <algorithm>
 #include <bit>
@@ -255,6 +257,7 @@ struct PrecompileBoot {
     PipelineCache::Result Program(const Shader::ShaderParams& params, HwStage hw_stage,
                                   SwStage sw_stage, Shader::Backend::Bindings& binding,
                                   const Shader::RuntimeInfo& runtime_info);
+    PipelineStep Pipeline(const RecordedKey& key);
 
     bool load = false; ///< the loader's build: programs not needed are only bound
     const char* log_name = "Precompile boot";
@@ -443,6 +446,44 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
         return Reject::Faulted;
     }
     return selected ? std::nullopt : std::optional{Reject::NotSelected};
+}
+
+/// The loader's, for an entry built and indexed: its pipeline, selected from a new shadow copy
+/// lookup-only as a draw-preparation worker does, except that a program not in use is read from
+/// the store first (PipelineSelection::from_store). A missing program or permutation, a
+/// program in use whose translation is pending, or a read outside the recorded words drops it.
+/// It is handed to the compile workers inside the same recovery point, before the copy goes:
+/// the build's snapshot reads it.
+PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key) {
+    if (!cache.compiler->HasCapacity()) {
+        return PipelineStep::Full;
+    }
+    Shadow shadow;
+    if (!MapShadow(key, shadow)) {
+        return PipelineStep::Dropped;
+    }
+    const auto regs = Registers(key, shadow);
+    PrepWorker worker{};
+    PipelineSelection selection{};
+    selection.regs = regs.get();
+    selection.worker = &worker;
+    selection.from_store = true;
+    selection.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
+    auto step = PipelineStep::Dropped;
+    Watch();
+    Guarded([&] {
+        try {
+            if (cache.RefreshGraphicsKey(selection) && !worker.failed &&
+                FaultState().faults == 0) {
+                step = cache.StartLoadPipeline(selection, worker);
+            }
+        } catch (...) {
+            step = PipelineStep::Dropped;
+        }
+    });
+    FaultState().Stop();
+    arena.Unmap(shadow.address, *shadow.layout);
+    return step;
 }
 
 /// The entry's words and each stage's code, laid out with guard pages and filled in.
@@ -801,6 +842,10 @@ const char* LoadBuilder::Build(u32 index, const RecordedKey& key, bool& no_info)
 
 std::vector<std::pair<u64, u32>> LoadBuilder::TakeWritten() {
     return std::exchange(boot->written, {});
+}
+
+PipelineStep LoadBuilder::Pipeline(const RecordedKey& key) {
+    return boot->Pipeline(key);
 }
 
 bool PipelineCache::RebuildFromPrecompileList() {

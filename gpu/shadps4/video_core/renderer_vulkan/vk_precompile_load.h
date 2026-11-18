@@ -4,8 +4,9 @@
 // gow3 diagnostic GOW3_PRECOMPILE_LOAD=1 with GOW3_PRECOMPILE_LIST=<file>
 // (vk_precompile_load.cpp): while a track loads, the list's entries are built from the code the
 // shader scan (vk_precompile_scan.h) finds in the game's memory, so the list needs no code and
-// the race reads the translated shaders from the store as on a second visit. The decisions are
-// here; the rest is in the .cpp.
+// the race reads the translated shaders from the store as on a second visit, and their
+// pipelines are built on the compile workers before the race draws. The decisions are here; the
+// rest is in the .cpp.
 
 #pragma once
 
@@ -86,6 +87,27 @@ constexpr u64 HoldBudgetNs = 5'000'000'000;
     return !pass_found || held_ns >= HoldBudgetNs;
 }
 
+/// Whether a hold stops waiting for the pipelines of the entries built: every one was handed
+/// to the compile workers (`left`: the workers' queue was full) and every build the loader
+/// handed over is done, or this loading state's holds have taken HoldBudgetNs.
+[[nodiscard]] constexpr bool PipelineWaitEnds(bool left, bool builds_done, u64 held_ns) {
+    return (!left && builds_done) || held_ns >= HoldBudgetNs;
+}
+
+/// How long a draw may still wait for a pipeline the loader is building: what this loading
+/// state's holds left of HoldBudgetNs, nothing outside a loading state.
+[[nodiscard]] constexpr u64 HoldLeftNs(bool loading, u64 held_ns) {
+    return loading && held_ns < HoldBudgetNs ? HoldBudgetNs - held_ns : 0;
+}
+
+/// What became of a built entry's pipeline.
+enum class PipelineStep {
+    Have,    ///< built or being built already
+    Queued,  ///< handed to the compile workers
+    Full,    ///< the workers' queue is full: again later
+    Dropped, ///< not selected: a program or permutation is missing, or a read faulted
+};
+
 } // namespace Precompile
 
 /// The start-up rebuild's entry build (vk_precompile_boot.cpp) for the loader: the code is the
@@ -104,6 +126,9 @@ public:
     const char* Build(u32 index, const Precompile::RecordedKey& key, bool& no_info);
     /// The permutations written since the last call: program hash, permutation index.
     [[nodiscard]] std::vector<std::pair<u64, u32>> TakeWritten();
+    /// Entry `key`, built and its permutations in the store's index: its pipeline, selected
+    /// and handed to the compile workers. Room in their queue is checked first.
+    Precompile::PipelineStep Pipeline(const Precompile::RecordedKey& key);
 
 private:
     std::unique_ptr<PrecompileBoot> boot;
