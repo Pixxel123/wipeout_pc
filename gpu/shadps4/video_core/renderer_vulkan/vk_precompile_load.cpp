@@ -146,8 +146,8 @@ EntryPlan PrecompileLoad::Plan(u32 index) const {
 }
 
 /// Whether the loading state holds now. A load that begins prints the last line of programs
-/// used and starts its counts; one that ends (its first scene frame) merges and prints its
-/// line.
+/// used, starts its counts and drops the last load's pipelines not handed over; one that ends
+/// (its first scene frame) merges and prints its line.
 bool PrecompileLoad::Loading() {
     const bool now_loading = g_compile_policy.NoSceneFor(CompilePolicy::Now());
     scan.SetLoading(now_loading);
@@ -162,6 +162,9 @@ bool PrecompileLoad::Loading() {
         tally.passes_before = scan.Passes();
         tally.published_before = cache.load_builds_published;
         tally.failed_before = cache.load_builds_failed;
+        // Pipelines the last load did not hand over: the race has built what it drew of them,
+        // and the rest would take this load's budget.
+        selecting.clear();
         Replan(); // the game has used programs since the last load
     } else {
         Merge(); // the load ended before the queue ran empty
