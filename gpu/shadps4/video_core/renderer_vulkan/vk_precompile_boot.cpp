@@ -24,6 +24,12 @@
 // address without faulting, so each walk is first run on the recorded words alone (CheckWalk).
 // An assert in the translator ends the game instead: a marker file beside the list names the
 // entry being translated, and the next start skips the entries it names (CrashMarker).
+//
+// The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way from a
+// second code source: each program where the shader scan found it in guest memory, so a list
+// without code works. The shadow copy then holds no code; the program address register points
+// at the game's own copy, which is checked before the selection and again after each
+// translation, since the game may move or free it at any time.
 
 #include <algorithm>
 #include <bit>
@@ -36,6 +42,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <fmt/format.h>
@@ -84,13 +91,14 @@ enum class Reject {
     StrayFetch,        ///< the fetch shader is read through a pointer the recording did not
     Exception,         ///< the translation threw
     TooManyPermutations,
+    CodeMoved,         ///< the loader's code is no longer where the scan found it
     Count,
 };
 
 constexpr std::array<const char*, size_t(Reject::Count)> RejectNames = {
     "not vertex + fragment", "no code", "no room", "faulted", "not selected", "spec changed",
     "walk outside the recording", "fetch outside the recording", "exception",
-    "too many permutations",
+    "too many permutations", "code moved",
 };
 
 /// Synthetic base of a stage's code in the shadow layout: no guest pointer (48 bits) has it.
@@ -107,6 +115,25 @@ bool HeaderFoundFirst(std::span<const u32> code, u64 hash) {
     const auto* info =
         std::bit_cast<const AmdGpu::BinaryInfo*>(code.data() + CodeHeaderAt(code));
     return info->Valid() && info->shader_hash == hash && info->length <= code.size_bytes();
+}
+
+/// Whether the program `hash` is at the guest address `address` as AmdGpu::GetParams finds it
+/// without searching (it stops the game on code without its header), and the program address
+/// register can hold the address (bits 8 and up). Reads the game's memory directly: a fault
+/// (the code was freed) counts as moved.
+bool CodeStillThere(u64 address, u64 hash) {
+    if (address & 0xff) {
+        return false;
+    }
+    bool there = false;
+    const bool read = Guarded([&] {
+        const auto code = ReadProgramCode(address, [](u64 at, void* out, size_t size) {
+            std::memcpy(out, reinterpret_cast<const void*>(at), size);
+            return true;
+        });
+        there = HeaderFoundFirst(code, hash);
+    });
+    return read && there;
 }
 
 bool VertexFragmentOnly(const RecordedKey& key, const AmdGpu::Regs& regs) {
@@ -236,12 +263,17 @@ struct PrecompileBoot {
         : cache{cache_}, list{list_}, marker{std::move(marker_path)} {}
 
     bool Run();
+    /// Builds one entry; why it was not translated, or none.
+    std::optional<Reject> Entry(u32 index, const RecordedKey& key);
     PipelineCache::Result Program(const Shader::ShaderParams& params, HwStage hw_stage,
                                   SwStage sw_stage, Shader::Backend::Bindings& binding,
                                   const Shader::RuntimeInfo& runtime_info);
 
+    /// Set (the loader): each program's code is at this guest address, not in the list.
+    const std::unordered_map<u64, u64>* code_at = nullptr;
+    const char* log_name = "Precompile boot";
+
 private:
-    void Entry(u32 index, const RecordedKey& key);
     std::optional<Reject> Select(const RecordedKey& key, Shadow& shadow);
     bool MapShadow(const RecordedKey& key, Shadow& shadow);
     std::unique_ptr<AmdGpu::Regs> Registers(const RecordedKey& key, const Shadow& shadow) const;
@@ -334,7 +366,7 @@ bool PrecompileBoot::Run() {
     return true;
 }
 
-void PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
+std::optional<Reject> PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
     Shadow shadow;
     entry = &key;
     recorded.clear();
@@ -357,17 +389,28 @@ void PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
     entry = nullptr;
     if (!why) {
         ++translated;
-        return;
+        return why;
     }
     ++rejects[size_t(*why)];
     Detail(*why, fmt::format("entry {} (recorded key {:016x}) rejected, {}{}{}", index,
                              key.key_hash, RejectNames[size_t(*why)],
                              stop_detail.empty() ? "" : ": ", stop_detail));
+    return why;
 }
 
 /// Replays the entry's selection from its shadow copy; why it was not translated, or none.
 std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& shadow) {
     for (const auto& stage : key.stages) {
+        if (code_at) {
+            // Every stage has one (the loader builds only those), checked before the
+            // selection's GetParams reads the header.
+            const u64 address = code_at->at(stage.hash);
+            if (!CodeStillThere(address, stage.hash)) {
+                stop_detail = fmt::format("program {:016x} at {:#x}", stage.hash, address);
+                return Reject::CodeMoved;
+            }
+            continue;
+        }
         const auto code = list.code.find(stage.hash);
         if (code == list.code.end() || !HeaderFoundFirst(code->second, stage.hash)) {
             stop_detail = fmt::format("no code for program {:016x}", stage.hash);
@@ -412,10 +455,12 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
     return selected ? std::nullopt : std::optional{Reject::NotSelected};
 }
 
-/// The entry's words and each stage's code, laid out with guard pages and filled in.
+/// The entry's words and each stage's code (none with the loader's code source), laid out with
+/// guard pages and filled in.
 bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
     shadow.words = key.words;
-    for (const auto& stage : key.stages) {
+    const auto with_code = code_at ? std::span<const RecordedStage>{} : std::span{key.stages};
+    for (const auto& stage : with_code) {
         // A code region is only marked out here (its first and last word) and copied in after
         // the fill. Padded to whole pages: the program address register holds bits 8 and up,
         // and a region ends right before its guard page.
@@ -433,7 +478,7 @@ bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
     shadow.address = *address;
     shadow.layout->Fill(reinterpret_cast<u8*>(*address), *address, shadow.words, key.pointers,
                         g_reserved.shadow);
-    for (const auto& stage : key.stages) {
+    for (const auto& stage : with_code) {
         const auto& code = list.code.at(stage.hash);
         const u64 at = *shadow.layout->Translate(CodeBase(stage.sw_stage), *address);
         std::memcpy(reinterpret_cast<void*>(at), code.data(), code.size() * sizeof(u32));
@@ -441,8 +486,9 @@ bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
     return true;
 }
 
-/// The recorded registers, with each stage's code address and user-data pointers led into
-/// the shadow copy; stages not recorded have no program.
+/// The recorded registers, with each stage's code address (the game's copy with the loader's
+/// code source) and user-data pointers led into the shadow copy; stages not recorded have no
+/// program.
 std::unique_ptr<AmdGpu::Regs> PrecompileBoot::Registers(const RecordedKey& key,
                                                         const Shadow& shadow) const {
     auto regs = std::make_unique<AmdGpu::Regs>();
@@ -455,7 +501,9 @@ std::unique_ptr<AmdGpu::Regs> PrecompileBoot::Registers(const RecordedKey& key,
     }
     for (const auto& stage : key.stages) {
         auto& program = ProgramAt(*regs, stage.hw_stage);
-        const u64 code = *shadow.layout->Translate(CodeBase(stage.sw_stage), shadow.address);
+        const u64 code =
+            code_at ? code_at->at(stage.hash)
+                    : *shadow.layout->Translate(CodeBase(stage.sw_stage), shadow.address);
         program.address = code >> 8; // 40 bits: the address without its low 8
         program.user_data = stage.user_data;
         for (const auto& [sgpr, target] : stage.roots) {
@@ -552,6 +600,11 @@ std::optional<size_t> PrecompileBoot::Translate(TranslatedProgram& program,
     if (!(spec == expected)) {
         Stop(Reject::SpecChanged, fmt::format("program {:016x} permutation {}", params.hash,
                                               perm));
+        return std::nullopt;
+    }
+    // The game's copy may have changed while it was translated.
+    if (code_at && !CodeStillThere(u64(params.code.data()), params.hash)) {
+        Stop(Reject::CodeMoved, fmt::format("program {:016x} after its translation", params.hash));
         return std::nullopt;
     }
     if (!lookup) {
@@ -681,7 +734,7 @@ bool PrecompileBoot::Failed() const {
 /// Up to MaxDetails lines per reason.
 void PrecompileBoot::Detail(Reject why, const std::string& text) {
     if (rejects[size_t(why)] <= MaxDetails) {
-        std::printf("Precompile boot: %s\n", text.c_str());
+        std::printf("%s: %s\n", log_name, text.c_str());
     }
 }
 
