@@ -41,6 +41,9 @@
 #include <fmt/format.h>
 #ifdef __linux__
 #include <sys/resource.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
 #endif
 
 #include "common/hash.h"
@@ -216,6 +219,11 @@ u64 PeakMemoryMiB() {
 #ifdef __linux__
     rusage usage{};
     return getrusage(RUSAGE_SELF, &usage) == 0 ? u64(usage.ru_maxrss) >> 10 : 0;
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    return K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
+               ? u64(counters.PeakWorkingSetSize) >> 20
+               : 0;
 #else
     return 0;
 #endif
@@ -713,7 +721,7 @@ bool PipelineCache::RebuildFromPrecompileList() {
     if (!BootRequested() || !path || !path[0]) {
         return false;
     }
-#ifndef __linux__
+#if !defined(__linux__) && !defined(_WIN32)
     std::printf("Precompile boot: not supported on this platform\n");
     return false;
 #else

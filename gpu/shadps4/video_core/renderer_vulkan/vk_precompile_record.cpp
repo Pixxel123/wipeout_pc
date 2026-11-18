@@ -633,7 +633,7 @@ PrecompileRecordPtr MakePrecompileRecord() {
     if (!record_path) {
         return nullptr;
     }
-#ifndef __linux__
+#if !defined(__linux__) && !defined(_WIN32)
     std::printf("Precompile record: not supported on this platform\n");
     return nullptr;
 #else

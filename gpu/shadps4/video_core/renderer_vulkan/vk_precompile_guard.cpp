@@ -8,6 +8,8 @@
 #include <sys/uio.h>
 #include <ucontext.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 #include "common/decoder.h"
@@ -29,6 +31,10 @@ u64 Reserve(u64 size) {
     void* at = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     return at == MAP_FAILED ? 0 : u64(at);
 }
+#elif defined(_WIN32)
+u64 Reserve(u64 size) {
+    return u64(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS)); // committed by Protect
+}
 #else
 u64 Reserve(u64) {
     return 0;
@@ -41,14 +47,24 @@ u64 Reserve(u64) {
 /// ranges are noted and go on to the recovery point (runtime_fault_recover); the rest pass
 /// through untouched (a guest page the page manager resolves is not a stray read).
 bool OnFault(void* context, void* fault_address) {
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
     auto& t = t_state;
     const u64 address = u64(fault_address);
     if (!t.watching && !g_reserved.InRecord(address) && !g_reserved.InShadow(address)) {
         return false; // the game's own faults
     }
+#ifdef _WIN32
+    CONTEXT& regs = *static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
+    DWORD64& reg_rip = regs.Rip;
+    DWORD64& reg_rdi = regs.Rdi;
+    DWORD64& reg_r10 = regs.R10;
+#else
     auto& gregs = static_cast<ucontext_t*>(context)->uc_mcontext.gregs;
-    const u64 rip = u64(gregs[REG_RIP]);
+    greg_t& reg_rip = gregs[REG_RIP];
+    greg_t& reg_rdi = gregs[REG_RDI];
+    greg_t& reg_r10 = gregs[REG_R10];
+#endif
+    const u64 rip = u64(reg_rip);
     ZydisDecodedInstruction inst;
     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
     const bool walker_read =
@@ -69,7 +85,7 @@ bool OnFault(void* context, void* fault_address) {
     const bool is_pointer = operands[0].reg.value == ZYDIS_REGISTER_RDI;
     u64 value;
     if (t.recorder && g_reserved.InRecord(address)) {
-        value = t.recorder->Load(u64(gregs[REG_RDI]), address, is_pointer);
+        value = t.recorder->Load(u64(reg_rdi), address, is_pointer);
     } else {
         // A read outside the recorded words (in a recording, outside the record slots; in a
         // rebuild, a guard page or the dead page of the shadow copy): a zero, or for a pointer
@@ -77,8 +93,8 @@ bool OnFault(void* context, void* fault_address) {
         t.Note(address);
         value = is_pointer ? g_reserved.shadow : 0;
     }
-    gregs[is_pointer ? REG_RDI : REG_R10] = greg_t(value);
-    gregs[REG_RIP] += inst.length;
+    (is_pointer ? reg_rdi : reg_r10) = value;
+    reg_rip += inst.length;
     return true;
 #else
     return false;
@@ -121,6 +137,30 @@ bool ReadGuest(u64 address, void* out, size_t size) {
         g_read_errno = errno;
     }
     errno = saved;
+    return read;
+}
+#elif defined(_WIN32)
+bool Protect(u64 address, size_t size, bool access) {
+    void* at = reinterpret_cast<void*>(address);
+    if (access) {
+        return VirtualAlloc(at, size, MEM_COMMIT, PAGE_READWRITE) == at;
+    }
+    DWORD old;
+    return VirtualProtect(at, size, PAGE_NOACCESS, &old) != 0;
+}
+void Discard(u64 address, size_t size) {
+    // Back to reserved: any access faults again, and a later Protect commits zeroed pages.
+    VirtualFree(reinterpret_cast<void*>(address), size, MEM_DECOMMIT);
+}
+
+bool ReadGuest(u64 address, void* out, size_t size) {
+    SIZE_T done = 0;
+    const bool read = ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(address),
+                                        out, size, &done) &&
+                      done == size;
+    if (!read && !g_read_errno) {
+        g_read_errno = EFAULT; // reported with strerror
+    }
     return read;
 }
 #else
