@@ -1352,6 +1352,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
 
+    new_image.usage = src_image.usage; // gow3: the same resource, larger (RefreshImage)
     RefreshImage(new_image);
     runtime.CopyImage(&src_image, &new_image);
 
@@ -1801,8 +1802,14 @@ void TextureCache::RefreshImage(Image& image, u32 first_mip) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.guest_samples > 1) {
         return;
     }
-    ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
-                     ReadbackSource::ImageRefresh);
+    // gow3: with stale readbacks (CPU reads see the copy the GPU published last), a render or
+    // depth target uploads its memory without waiting for the copies still pending in it, as a
+    // CPU read would: those bytes are one copy old. WipEout's first full race frame waited
+    // 20-40 ms here, twice, for 1.5 KiB exposure copies at the end of new 256x256 targets.
+    if (!stale_readbacks || !(image.usage.render_target || image.usage.depth_target)) {
+        ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
+                         ReadbackSource::ImageRefresh);
+    }
     Gow3Stats::Timer timer{Gow3Stats::t_refresh};
 
     RENDERER_TRACE;
