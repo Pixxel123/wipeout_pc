@@ -425,9 +425,9 @@ bool PrecompileLoad::Wait(const std::function<bool(u64 left_ns)>& wait) {
         return false;
     }
     const u64 began = CompilePolicy::Now();
-    const bool ready = wait(left);
+    const bool done = wait(left);
     tally.held_ns += CompilePolicy::Now() - began;
-    return ready;
+    return done;
 }
 
 void PrecompileLoadDeleter::operator()(PrecompileLoad* load) const {
