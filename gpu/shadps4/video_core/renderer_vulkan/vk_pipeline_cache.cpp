@@ -690,6 +690,13 @@ void PipelineCache::PublishGraphics(bool wait) {
             ++it;
             continue;
         }
+        if (build->loader && !build->pipeline->Handle()) {
+            // gow3 (GOW3_PRECOMPILE_LOAD): the driver refused it (logged when built): dropped,
+            // so a draw builds this pipeline itself.
+            ++load_builds_failed;
+            it = pending_graphics.erase(it);
+            continue;
+        }
         const auto key = it.key();
         build->pipeline->PublishStages(build->live_infos);
         const auto hash = std::hash<GraphicsPipelineKey>{}(key);

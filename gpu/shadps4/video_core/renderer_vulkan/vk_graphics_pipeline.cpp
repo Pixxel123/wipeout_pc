@@ -12,6 +12,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_blend_rewrite.h"
+#include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
@@ -458,6 +459,13 @@ GraphicsPipeline::GraphicsPipeline(
                     debug_str, vk::to_string(pipeline_result));
         return;
     }
+    // gow3 (GOW3_PRECOMPILE_LOAD): a pipeline the loader selected is no draw the game issued; one
+    // the driver refuses is dropped (Handle() null, PublishGraphics) instead of ending the game.
+    if (pipeline_result != vk::Result::eSuccess && t_loader_build) {
+        LOG_WARNING(Render_Vulkan, "Precompile load: graphics pipeline {} not built ({})",
+                    debug_str, vk::to_string(pipeline_result));
+        return;
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
@@ -489,6 +497,12 @@ GraphicsPipeline::GraphicsPipeline(
         }
         if (square_result != vk::Result::eSuccess && rebuild) {
             LOG_WARNING(Render_Vulkan, "Optimised rebuild of the squaring pass of {} failed ({})",
+                        debug_str, vk::to_string(square_result));
+            pipeline.reset();
+            return;
+        }
+        if (square_result != vk::Result::eSuccess && t_loader_build) {
+            LOG_WARNING(Render_Vulkan, "Precompile load: squaring pass of {} not built ({})",
                         debug_str, vk::to_string(square_result));
             pipeline.reset();
             return;
