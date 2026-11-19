@@ -1612,6 +1612,43 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
     return true;
 }
 
+// gow3 (GOW3_PRECOMPILE_LOAD): as a merge into a program the game already uses, at the index the
+// game's own translation would take, so the store's names and pipeline keys stay those the game
+// would write; the SPIR-V before the meta, as the shader compiler writes them.
+bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
+                                      Shader::StageSpecialization&& spec, size_t& index_out) {
+    const auto it_pgm = program_cache.find(hash);
+    if (it_pgm == program_cache.end() || it_pgm->second->pending) {
+        return false; // a pending translation takes the next index
+    }
+    Program& program = *it_pgm->second;
+    spec.info = &program.info;
+    const auto it = std::ranges::find(program.modules, spec, &Program::Module::spec);
+    if (it != program.modules.end()) {
+        index_out = std::distance(program.modules.begin(), it);
+        return true;
+    }
+    const size_t index = NewPermutationIndex(program);
+    // Not CompileSPV, which asserts: a module the driver refuses is left to the game.
+    const vk::ShaderModuleCreateInfo module_info{
+        .codeSize = spv.size() * sizeof(u32),
+        .pCode = spv.data(),
+    };
+    const auto [module_result, module] = instance.GetDevice().createShaderModule(module_info);
+    if (module_result != vk::Result::eSuccess || !module) {
+        return false;
+    }
+    RegisterShaderBinary(std::move(spv), hash, index);
+    RegisterShaderMeta(program.info, spec.fetch_shader_data, spec, HashCombine(hash, u64(index)),
+                       index);
+    {
+        std::unique_lock lock{programs_mutex};
+        program.InsertPermut(module, std::move(spec), index);
+    }
+    index_out = index;
+    return true;
+}
+
 void PipelineCache::PumpWarmUp() {
     if (!background || background->finished) {
         return;

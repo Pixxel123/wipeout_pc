@@ -18,8 +18,13 @@
 // compile workers as a draw's background build is, while their queue has room; the draw path
 // publishes it (PublishGraphics). A translated shader alone does not draw: a draw whose
 // pipeline is still building is skipped after a short grace wait (GetGraphicsPipeline). A
-// selection that misses a program or permutation, and a failed build, are dropped and counted;
-// the race's draw then builds that pipeline itself.
+// selection that misses a variant (permutation) of a program in use or saved, which the entry
+// build only binds, translates it from the selection's shadow copy with the entry build's
+// checks, adds it to the program at the index the game's own translation would take and saves
+// it there, so the store stays the game's across launches, and selects again; while the game
+// translates a variant of that program it is left to the game, as one that fails a check is.
+// The load line counts both. A selection that misses a program or a variant not added, and a
+// failed build, are dropped and counted; the race's draw then builds that pipeline itself.
 //
 // The first draw of the race asks for programs before the pump has built them: a draw's first
 // use of a program while the loader is active holds the draw (Hold) until what the scan finds
@@ -37,6 +42,9 @@
 // dropped or built already) and then stops, as a short loading screen ends the pump part way;
 // the holds are not limited. It shows what the pump's handover adds to the pipelines a scene
 // starts with, against what the holds and the draws build themselves.
+//
+// GOW3_PRECOMPILE_LOAD_VARIANTS=0 (read once, logged as the loader starts) adds no variant: a
+// selection that misses one is dropped as before, and counted among those left to the game.
 //
 // Diagnostic GOW3_PRECOMPILE_LOAD_TRACE=1: when a scene's draw still builds a pipeline itself,
 // either the list has no entry for it (the recorder missed the draw) or the loader dropped its
@@ -58,8 +66,9 @@
 // atomics on this thread, so nothing of the loader is shared with the present thread, but for
 // the trace's frame line: it is printed on the video-out thread at each flip (LoadTraceFlipped)
 // and reads only atomics, the skipped draws this thread counts and when the last load ended. The
-// pipeline selections run on this thread too and add programs to program_cache under its lock,
-// as GetProgram does; a hold inside GetProgram finds its program again afterwards.
+// pipeline selections run on this thread too and add programs to program_cache and variants to
+// its programs under its lock, as GetProgram does; a hold inside GetProgram finds its program
+// again afterwards.
 // HoldPipelines runs in GetGraphicsPipeline after sel's selection, on the same thread; the
 // selections it makes never come back to it, as only Rasterizer calls GetGraphicsPipeline.
 //
@@ -123,6 +132,12 @@ constexpr size_t MaxTraceMatches = 4; ///< list entries a draw's trace line name
         return std::nullopt;
     }
     return count == 1 ? 0 : count;
+}
+
+/// Off only for GOW3_PRECOMPILE_LOAD_VARIANTS=0.
+[[nodiscard]] bool VariantsRequested() {
+    const char* value = std::getenv("GOW3_PRECOMPILE_LOAD_VARIANTS");
+    return !value || std::string_view{value} != "0";
 }
 
 [[nodiscard]] bool TraceRequested() {
@@ -301,9 +316,13 @@ std::atomic<u32> Precompile::g_load_trace_skipped{0};
 
 struct PrecompileLoad {
     PrecompileLoad(PipelineCache& cache_, ParsedList list_)
-        : cache{cache_}, list{std::move(list_)}, builder{cache, list, code},
-          pump_limit{PumpPipelineLimit()},
+        : cache{cache_}, list{std::move(list_)}, variants{VariantsRequested()},
+          builder{cache, list, code, variants}, pump_limit{PumpPipelineLimit()},
           trace{TraceRequested() ? std::make_unique<LoadTrace>(list) : nullptr} {
+        if (!variants) {
+            std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_VARIANTS=0, a variant missing from "
+                        "a program in use or saved is left to the game\n");
+        }
         if (pump_limit == 0u) {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, only holds "
                         "hand pipelines over\n");
@@ -369,6 +388,7 @@ private:
     PipelineCache& cache;
     const ParsedList list;
     std::map<u64, std::vector<u32>> code; ///< list programs' checked copies of their code
+    const bool variants; ///< GOW3_PRECOMPILE_LOAD_VARIANTS not 0: missing variants are added
     LoadBuilder builder;
     ShaderScan scan;
     std::vector<u32> waiting; ///< entries the scan has not found every program of
@@ -410,6 +430,7 @@ bool PrecompileLoad::Loading() {
         ReportUsed();
         used.clear();
         tally = {};
+        builder.ResetVariants();
         tally.began_ns = CompilePolicy::Now();
         tally.passes_before = scan.Passes();
         tally.published_before = cache.load_builds_published;
@@ -679,7 +700,8 @@ void PrecompileLoad::ReportLoad() const {
                 "rejected%s, %u with a program in use but untranslated, %u programs' code not "
                 "verified, %llu pipelines built, %llu dropped, %llu left (%u taken by a draw "
                 "first, %zu not handed over, %zu still building), hold %llu ms, %llu scan passes "
-                "(last %llu ms), %u holds\n",
+                "(last %llu ms), %u holds, variants of existing programs: %u added, %u left to "
+                "the game\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
                 tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -
@@ -691,7 +713,8 @@ void PrecompileLoad::ReportLoad() const {
                 tally.have, selecting.size() + unmerged.size(), cache.LoadBuildsRunning(),
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
-                static_cast<unsigned long long>(scan.LastPassMs()), tally.holds);
+                static_cast<unsigned long long>(scan.LastPassMs()), tally.holds,
+                builder.Variants().added, builder.Variants().left);
 }
 
 /// Every 5 s outside a load, and once more as the next load begins, before it clears the

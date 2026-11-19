@@ -143,6 +143,14 @@ struct PrepWorker {
     /// SwStage it failed at, so the loader's trace can say which program or permutation it was.
     const char* failure = nullptr;
     u32 failed_stage = 0;
+    /// gow3 (GOW3_PRECOMPILE_LOAD): for a loader selection (`from_store`) whose program lacks
+    /// the stage's permutation, the spec it looked up (its Info is the one in `infos`) and the
+    /// stage's bindings at its start, runtime info and hardware stage, so the loader can
+    /// translate it (PrecompileBoot::AddVariant).
+    std::optional<Shader::StageSpecialization> missing_spec;
+    Shader::Backend::Bindings missing_binding{};
+    Shader::RuntimeInfo missing_runtime{};
+    Shader::HwStage missing_hw{};
 };
 
 struct PreparedDraw;
@@ -253,6 +261,13 @@ private:
     /// gow3 (GOW3_PRECOMPILE_LOAD): permutations the loader saved, for LoadDiskProgram;
     /// `saved` keeps those it indexed.
     void AddSavedPermutations(std::vector<std::pair<u64, u32>>& saved);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): a variant the loader translated for a program in use,
+    /// inserted at the index the game would give it (NewPermutationIndex) and saved there.
+    /// False, writing nothing, when the program is gone, has a translation pending or its
+    /// module cannot be created; an equal spec already there gives its index and inserts
+    /// nothing. GPU command thread.
+    bool InsertLoadVariant(u64 hash, std::vector<u32>&& spv, Shader::StageSpecialization&& spec,
+                           size_t& index_out);
     /// gow3 (GOW3_PRECOMPILE_LOAD): GetProgram, a program not in program_cache; while loading
     /// the draw may wait for the loader here. Its pipeline selections may read programs from
     /// the store into program_cache.

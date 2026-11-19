@@ -122,6 +122,14 @@ void TestBuildWaitOnlyWhileLoadingFromWhatTheHoldsLeft() {
     assert(HoldLeftNs(false, 0) == 0);         // never outside the loading state
 }
 
+void TestVariantStepsAsideWhileTheGameTranslates() {
+    assert(AddsVariant(true, LoadVariant::Missing));
+    assert(!AddsVariant(true, LoadVariant::Pending));   // the game's translation takes the next index
+    assert(!AddsVariant(true, LoadVariant::Found));
+    assert(!AddsVariant(true, LoadVariant::NoProgram));
+    assert(!AddsVariant(false, LoadVariant::Missing));  // GOW3_PRECOMPILE_LOAD_VARIANTS=0
+}
+
 } // namespace
 
 int main() {
@@ -137,5 +145,6 @@ int main() {
     TestHoldEndsWhenAPassFindsNothingNeededOrTimeIsUp();
     TestPipelineWaitEndsOnceAllAreHandedOverAndBuiltOrTimeIsUp();
     TestBuildWaitOnlyWhileLoadingFromWhatTheHoldsLeft();
+    TestVariantStepsAsideWhileTheGameTranslates();
     return 0;
 }

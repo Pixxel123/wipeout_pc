@@ -1574,6 +1574,14 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             worker.failed = true;
             worker.failure = "permutation missing";
             worker.failed_stage = u32(sw_stage);
+            if (sel.from_store) {
+                // The loader may translate it (PrecompileBoot::AddVariant), with the bindings
+                // this stage started from.
+                worker.missing_spec = std::move(spec);
+                worker.missing_binding = binding;
+                worker.missing_runtime = runtime_info;
+                worker.missing_hw = hw_stage;
+            }
             return {};
         }
         info.AddBindings(binding);

@@ -124,6 +124,27 @@ enum class PipelineStep {
     Dropped, ///< not selected: a program or permutation is missing, or a read faulted
 };
 
+/// What a loader selection found of a stage's variant (permutation) in its program.
+enum class LoadVariant : u8 {
+    Found,     ///< the program has it
+    Missing,   ///< the program is in use or saved, without it
+    Pending,   ///< the program is in use and the game is translating a variant of it
+    NoProgram, ///< neither in use nor saved, or its first translation is pending
+};
+
+/// Whether the loader translates a missing variant into the program and selects again: not
+/// while the game translates one (that takes the next index), nor with
+/// GOW3_PRECOMPILE_LOAD_VARIANTS=0 (`enabled` false).
+[[nodiscard]] constexpr bool AddsVariant(bool enabled, LoadVariant found) {
+    return enabled && found == LoadVariant::Missing;
+}
+
+/// One loading state's variants of programs in use or saved: added by the loader, or left to
+/// the game (switched off, the game translating, or the translation failed its checks).
+struct VariantCounts {
+    u32 added = 0, left = 0;
+};
+
 /// GOW3_PRECOMPILE_LOAD_TRACE: what a loader selection found besides its PipelineStep.
 struct PipelineTrace {
     std::optional<u64> key_hash;  ///< std::hash<GraphicsPipelineKey> of the key it selected
@@ -147,9 +168,10 @@ void LoadTraceFlipped(u64 flip_ns, u64 draws);
 /// whose program is not needed is only bound. GPU command thread only.
 class LoadBuilder {
 public:
-    /// `code`: program hash -> code words, the loader's copies; kept by reference.
+    /// `code`: program hash -> code words, the loader's copies; kept by reference. `variants`:
+    /// a selection that misses a variant of a program in use or saved adds it (Pipeline).
     LoadBuilder(PipelineCache& cache, const Precompile::ParsedList& list,
-                const std::map<u64, std::vector<u32>>& code);
+                const std::map<u64, std::vector<u32>>& code, bool variants);
     ~LoadBuilder();
 
     /// Builds entry `index` of the list, which `code` has every stage's code for: null when it
@@ -160,9 +182,15 @@ public:
     [[nodiscard]] std::vector<std::pair<u64, u32>> TakeWritten();
     /// Entry `key`, built and its permutations in the store's index: its pipeline, selected
     /// and handed to the compile workers. Room in their queue (LoadQueueDepth) is checked first.
-    /// `trace`, when set, gets the key selected and why it was dropped.
+    /// A variant missing from a program in use or saved is translated into it and saved, and
+    /// the pipeline selected again. `trace`, when set, gets the key selected and why it was
+    /// dropped.
     Precompile::PipelineStep Pipeline(const Precompile::RecordedKey& key,
                                       Precompile::PipelineTrace* trace = nullptr);
+    /// The variants Pipeline added or left to the game since the last ResetVariants.
+    [[nodiscard]] const Precompile::VariantCounts& Variants() const;
+    /// When a loading state begins.
+    void ResetVariants();
 
 private:
     std::unique_ptr<PrecompileBoot> boot;
