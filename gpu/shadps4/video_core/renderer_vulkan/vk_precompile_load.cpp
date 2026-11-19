@@ -14,6 +14,8 @@
 // (LoadDiskProgram) instead of translating it. An entry with no needed program is built too (it
 // only binds its stages, writes nothing) once its code is found, so its pipeline selection can
 // add variants to the programs that exist; with GOW3_PRECOMPILE_LOAD_VARIANTS=0 it is skipped.
+// Such a checked entry waits in a queue of its own, which the pump builds only while no entry
+// with a needed program is queued, and a first use never holds for it (see below).
 //
 // Then each built entry's pipeline is selected again, lookup-only as a draw-preparation worker
 // does but reading its programs from the store (LoadBuilder::Pipeline), and handed to the
@@ -35,8 +37,10 @@
 // selections put their programs in program_cache), so a draw's pipeline miss while built
 // entries' pipelines are not handed over or still building waits for them as the end of a hold
 // does (HoldPipelines); without it the scene's first draws build those pipelines themselves
-// and are skipped. A draw of a pipeline the loader is building waits for it (Wait). All three
-// at most 5 s per loading state together, and never outside one.
+// and are skipped. That hold also builds the checked entries first, as their pipelines too are
+// ones a draw would otherwise build itself; a first use's hold does not, as a checked entry has
+// no program a first use waits for. A draw of a pipeline the loader is building waits for it
+// (Wait). All three at most 5 s per loading state together, and never outside one.
 //
 // Diagnostic GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1: the pump still builds entries but hands
 // none of their pipelines over, so only a hold does. With a count N > 1 instead it hands at most
@@ -110,7 +114,7 @@ using namespace Precompile;
 
 namespace {
 
-constexpr u64 PumpNs = 4'000'000;               ///< ready entries one pump builds, at most
+constexpr u64 PumpNs = 4'000'000;               ///< queued entries one pump builds, at most
 constexpr u64 ReportIntervalNs = 5'000'000'000; ///< the line of programs used
 constexpr auto HoldPoll = std::chrono::milliseconds(1);
 constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as not verified
@@ -375,10 +379,11 @@ private:
     };
 
     [[nodiscard]] EntryPlan Plan(u32 index) const;
+    [[nodiscard]] bool Checked(u32 index) const;
     bool Loading();
     bool TakeFound();
     void Replan();
-    void BuildReady(u64 until_ns);
+    void BuildReady(u64 until_ns, std::deque<u32>& queue);
     u32 SelectPipelines(u64 until_ns, u32 most = std::numeric_limits<u32>::max());
     void TraceSelection(u32 index, PipelineStep step, const PipelineTrace& found);
     void Hold();
@@ -395,7 +400,8 @@ private:
     LoadBuilder builder;
     ShaderScan scan;
     std::vector<u32> waiting; ///< entries the scan has not found every program of
-    std::deque<u32> ready;    ///< entries to build
+    std::deque<u32> ready;    ///< entries with a needed program to build
+    std::deque<u32> checking; ///< checked entries to build (no needed program), after `ready`
     std::vector<u32> unmerged; ///< entries built since the last merge
     std::deque<u32> selecting; ///< entries built and merged whose pipeline is not handed over
     bool loading = false;
@@ -418,6 +424,15 @@ EntryPlan PrecompileLoad::Plan(u32 index) const {
         variants, list.keys[index].stages,
         [this](u64 hash) { return cache.ProgramNeeded(hash); },
         [this](u64 hash) { return code.contains(hash); });
+}
+
+/// Whether entry `index` has no needed program, PlanEntry's test for Skip: with variants on
+/// (check_existing) it is built all the same, only for the variants its pipeline selection adds
+/// to programs that exist, a checked entry.
+bool PrecompileLoad::Checked(u32 index) const {
+    return std::ranges::none_of(list.keys[index].stages, [this](const auto& stage) {
+        return cache.ProgramNeeded(stage.hash);
+    });
 }
 
 /// Whether the loading state holds now. A load that begins prints the last line of programs
@@ -502,13 +517,14 @@ bool PrecompileLoad::TakeFound() {
     return lacked;
 }
 
-/// Queues the waiting entries the scan has found every program of and drops those with no
-/// needed program.
+/// Queues the waiting entries the scan has found every program of, those with a needed program
+/// on `ready` and the checked ones on `checking`; drops those with no needed program while
+/// variants are off (GOW3_PRECOMPILE_LOAD_VARIANTS=0).
 void PrecompileLoad::Replan() {
     std::erase_if(waiting, [this](u32 index) {
         const auto plan = Plan(index);
         if (plan == EntryPlan::Build) {
-            ready.push_back(index);
+            (Checked(index) ? checking : ready).push_back(index);
         }
         tally.skipped += plan == EntryPlan::Skip;
         if (trace && plan != EntryPlan::Wait) {
@@ -519,13 +535,15 @@ void PrecompileLoad::Replan() {
     });
 }
 
-/// Builds queued entries until `until_ns`; merges once the queue is empty (also when an earlier
-/// call's builds are still unmerged).
-void PrecompileLoad::BuildReady(u64 until_ns) {
-    while (!ready.empty() && CompilePolicy::Now() < until_ns) {
-        const u32 index = ready.front();
-        ready.pop_front();
-        // The game may have used its programs since it was queued (found code stays found).
+/// Builds the entries of `queue` (`ready` or `checking`) until `until_ns`; merges once `ready`
+/// is empty (also when an earlier call's builds are still unmerged).
+void PrecompileLoad::BuildReady(u64 until_ns, std::deque<u32>& queue) {
+    while (!queue.empty() && CompilePolicy::Now() < until_ns) {
+        const u32 index = queue.front();
+        queue.pop_front();
+        // The game may have used its programs since it was queued (found code stays found):
+        // with variants off the entry is skipped then; with them on it is checked instead, and
+        // one taken from `ready` goes on to `checking`, which a first use's hold does not build.
         if (Plan(index) != EntryPlan::Build) {
             ++tally.skipped;
             if (trace) {
@@ -533,10 +551,12 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
             }
             continue;
         }
+        const bool checked = Checked(index);
+        if (checked && &queue == &ready) {
+            checking.push_back(index);
+            continue;
+        }
         bool no_info = false;
-        const bool checked = std::ranges::none_of(list.keys[index].stages, [this](const auto& stage) {
-            return cache.ProgramNeeded(stage.hash);
-        });
         const char* why = builder.Build(index, list.keys[index], no_info);
         if (trace) {
             trace->Set(index,
@@ -611,10 +631,11 @@ void PrecompileLoad::TraceSelection(u32 index, PipelineStep step, const Pipeline
                 Hex(key.key_hash).c_str());
 }
 
-/// Builds every queued entry, then has the scan run a pass that starts after that and builds
-/// what it found, until such a pass finds no code an entry with a needed program lacked or the
-/// loading state's holds took HoldBudgetNs; then waits for the entries' pipelines in the same
-/// budget (WaitPipelines). Not a pending draw, and no grace wait.
+/// Builds every queued entry with a needed program (`ready`, not the checked ones), then has the
+/// scan run a pass that starts after that and builds what it found, until such a pass finds no
+/// code an entry with a needed program lacked or the loading state's holds took HoldBudgetNs;
+/// then waits for the entries' pipelines in the same budget (WaitPipelines). Not a pending draw,
+/// and no grace wait.
 void PrecompileLoad::Hold() {
     const u64 began = CompilePolicy::Now();
     ++tally.holds;
@@ -624,7 +645,7 @@ void PrecompileLoad::Hold() {
     const u64 until = began + (HoldBudgetNs - tally.held_ns);
     const auto held = [&] { return tally.held_ns + (CompilePolicy::Now() - began); };
     for (;;) {
-        BuildReady(until);
+        BuildReady(until, ready);
         if (held() >= HoldBudgetNs) {
             break;
         }
@@ -704,14 +725,14 @@ void PrecompileLoad::ReportLoad() const {
     if (!reasons.empty()) {
         reasons += ")";
     }
-    std::printf("Precompile load: %u entries built (%llu permutations), %u skipped, %u "
-                "checked for variants, %u rejected%s, %u with a program in use but untranslated, %u programs' code not "
-                "verified, %llu pipelines built, %llu dropped, %llu left (%u taken by a draw "
-                "first, %zu not handed over, %zu still building), hold %llu ms, %llu scan passes "
-                "(last %llu ms), %u holds, variants of existing programs: %u added, %u already "
-                "there, %u left to the game\n",
-                tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
-                tally.checked, tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
+    std::printf("Precompile load: %u entries built (%u of them only checked for variants, %llu "
+                "permutations), %u skipped, %u rejected%s, %u with a program in use but "
+                "untranslated, %u programs' code not verified, %llu pipelines built, %llu "
+                "dropped, %llu left (%u taken by a draw first, %zu not handed over, %zu still "
+                "building), hold %llu ms, %llu scan passes (last %llu ms), %u holds, variants of "
+                "existing programs: %u added, %u already there, %u left to the game\n",
+                tally.built, tally.checked, static_cast<unsigned long long>(tally.permutations),
+                tally.skipped, tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -
                                                 tally.published_before),
                 static_cast<unsigned long long>(tally.dropped + cache.load_builds_failed -
@@ -756,7 +777,10 @@ void PrecompileLoad::Pump() {
     }
     const u64 until = CompilePolicy::Now() + PumpNs;
     TakeFound();
-    BuildReady(until);
+    BuildReady(until, ready);
+    if (NextPumpQueue(!ready.empty(), !checking.empty()) == PumpQueue::Checking) {
+        BuildReady(until, checking);
+    }
     if (const u32 most = pump_limit.value_or(std::numeric_limits<u32>::max());
         tally.pumped < most) {
         tally.pumped += SelectPipelines(until, most - tally.pumped);
@@ -786,20 +810,23 @@ void PrecompileLoad::FirstUse(u64 hash) {
 }
 
 /// GetGraphicsPipeline, a pipeline miss: while loading, before the draw builds the pipeline
-/// itself, waits for the pipelines of the entries built that are not handed over or still
-/// building, as the end of a hold does, which may include this one. True when it held.
+/// itself, builds the checked entries (`checking`) and waits for the pipelines of the entries
+/// built that are not handed over or still building, as the end of a hold does, which may
+/// include this one; in this loading state's HoldBudgetNs. True when it held.
 bool PrecompileLoad::HoldPipelines() {
     const bool now_loading = cache.DiskShadersActive() && Loading();
     if (!PipelineHoldActive(now_loading, tally.held_ns,
-                            !selecting.empty() || !unmerged.empty() ||
+                            !checking.empty() || !selecting.empty() || !unmerged.empty() ||
                                 cache.LoadBuildsRunning() > 0)) {
         return false;
     }
     const u64 began = CompilePolicy::Now();
     ++tally.holds;
+    const u32 built_before = tally.built;
     const size_t not_handed = selecting.size() + unmerged.size();
     const size_t building = cache.LoadBuildsRunning();
-    EndHold(began, tally.built, WaitPipelines(began), not_handed, building);
+    BuildReady(began + (HoldBudgetNs - tally.held_ns), checking);
+    EndHold(began, built_before, WaitPipelines(began), not_handed, building);
     return true;
 }
 

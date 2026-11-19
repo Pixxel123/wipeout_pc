@@ -141,6 +141,13 @@ void TestVariantStepsAsideWhileTheGameTranslates() {
     assert(!AddsVariant(false, LoadVariant::Missing));  // GOW3_PRECOMPILE_LOAD_VARIANTS=0
 }
 
+void TestThePumpBuildsNeededEntriesBeforeCheckedOnes() {
+    assert(NextPumpQueue(true, true) == PumpQueue::Ready);
+    assert(NextPumpQueue(true, false) == PumpQueue::Ready);
+    assert(NextPumpQueue(false, true) == PumpQueue::Checking);
+    assert(NextPumpQueue(false, false) == PumpQueue::None);
+}
+
 } // namespace
 
 int main() {
@@ -158,5 +165,6 @@ int main() {
     TestPipelineWaitEndsOnceAllAreHandedOverAndBuiltOrTimeIsUp();
     TestBuildWaitOnlyWhileLoadingFromWhatTheHoldsLeft();
     TestVariantStepsAsideWhileTheGameTranslates();
+    TestThePumpBuildsNeededEntriesBeforeCheckedOnes();
     return 0;
 }

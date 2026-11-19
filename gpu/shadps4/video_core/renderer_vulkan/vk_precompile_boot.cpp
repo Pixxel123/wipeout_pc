@@ -490,9 +490,10 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 /// translation is pending, or a read outside the recorded words drops it. A missing variant
 /// (permutation) of a program in use or saved is added (AddVariant), unless the game is
 /// translating one of that program or GOW3_PRECOMPILE_LOAD_VARIANTS=0, and the pipeline
-/// selected again; one not added drops it. It is handed to the compile workers inside the same
-/// recovery point, before the copy goes: the build's snapshot reads it. `trace`
-/// (GOW3_PRECOMPILE_LOAD_TRACE), when set, gets the key selected and why it was dropped.
+/// selected again; one not added, or one the program has an equal spec of already, drops it. It
+/// is handed to the compile workers inside the same recovery point, before the copy goes: the
+/// build's snapshot reads it. `trace` (GOW3_PRECOMPILE_LOAD_TRACE), when set, gets the key
+/// selected and why it was dropped.
 PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, PipelineTrace* trace) {
     if (cache.compiler->Depth() >= LoadQueueDepth) {
         return PipelineStep::Full;
@@ -574,7 +575,14 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, PipelineTrace* tra
                     break;
                 }
                 --variants.left;
-                ++(present ? variants.present : variants.added);
+                if (present) {
+                    // The program has an equal spec, yet the selection missed it: selecting
+                    // again would miss it again.
+                    ++variants.present;
+                    why = "variant left to the game: an equal spec already there";
+                    break;
+                }
+                ++variants.added;
             }
         } catch (...) {
             step = PipelineStep::Dropped;

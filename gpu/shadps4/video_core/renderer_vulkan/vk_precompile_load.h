@@ -32,8 +32,8 @@ struct RecordedKey;
 /// What the loader does with a list entry now.
 enum class EntryPlan {
     Skip,  ///< none of its programs is needed: nothing to build (counted once; not when checked)
-    Wait,  ///< one is, but the scan has not found the code of every stage yet
-    Build, ///< one is, and the code of every stage was found
+    Wait,  ///< one is, or it is checked, but the scan has not found every stage's code yet
+    Build, ///< one is, or it is checked, and the code of every stage was found
 };
 
 /// `stages`: the entry's, by RecordedStage::hash. `needed(hash)`: the program is neither in use
@@ -83,12 +83,20 @@ constexpr u64 HoldBudgetNs = 5'000'000'000;
 
 /// Whether a draw's pipeline miss waits for the pipelines of the entries built (the loader is
 /// active): only while loading with hold time left (`held_ns` in this loading state), when
-/// some are not handed to the compile workers yet or still building (`pipelines_pending`). A
-/// first use alone does not cover them: the loader's own selections load programs into
-/// program_cache, so later draws of those programs have no first use.
+/// some are not handed to the compile workers yet or still building, or checked entries (no
+/// needed program) wait to be built (`pipelines_pending`). A first use alone does not cover
+/// them: the loader's own selections load programs into program_cache, so later draws of those
+/// programs have no first use, and a checked entry has no program a first use waits for.
 [[nodiscard]] constexpr bool PipelineHoldActive(bool loading, u64 held_ns,
                                                 bool pipelines_pending) {
     return loading && held_ns < HoldBudgetNs && pipelines_pending;
+}
+
+/// Which queue the pump builds from next: entries with a needed program first, the checked ones
+/// after.
+enum class PumpQueue : u8 { None, Ready, Checking };
+[[nodiscard]] constexpr PumpQueue NextPumpQueue(bool ready, bool checking) {
+    return ready ? PumpQueue::Ready : checking ? PumpQueue::Checking : PumpQueue::None;
 }
 
 /// Whether the pass a hold waits for has finished: one that started after the `started`
