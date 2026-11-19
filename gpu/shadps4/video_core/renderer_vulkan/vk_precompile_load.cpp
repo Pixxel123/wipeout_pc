@@ -32,8 +32,11 @@
 // at most 5 s per loading state together, and never outside one.
 //
 // Diagnostic GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1: the pump still builds entries but hands
-// none of their pipelines over, so only a hold does. It shows what the pump's handover adds to
-// the pipelines a scene starts with, against what the holds and the draws build themselves.
+// none of their pipelines over, so only a hold does. With a count N > 1 instead it hands at most
+// N over per loading state (every entry its selections take off the queue counts, also one
+// dropped or built already) and then stops, as a short loading screen ends the pump part way;
+// the holds are not limited. It shows what the pump's handover adds to the pipelines a scene
+// starts with, against what the holds and the draws build themselves.
 //
 // Threads: the pump and the hold never run at once, both are on the GPU command thread. The
 // pump runs in Rasterizer::OnSubmit, which only Liverpool::Process calls, after a submission.
@@ -52,14 +55,18 @@
 // Linux only (the scan); elsewhere the switch logs that it is not supported.
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -85,10 +92,21 @@ constexpr u64 ReportIntervalNs = 5'000'000'000; ///< the line of programs used
 constexpr auto HoldPoll = std::chrono::milliseconds(1);
 constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as not verified
 
-/// Whether GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1 keeps the pump from handing pipelines over.
-[[nodiscard]] bool NoPumpPipelinesRequested() {
-    const char* off = std::getenv("GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES");
-    return off && off[0] == '1';
+/// How many pipelines the pump hands over per loading state at most: none for
+/// GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, N for a count N > 1; no limit when it is unset or
+/// not a count.
+[[nodiscard]] std::optional<u32> PumpPipelineLimit() {
+    const char* value = std::getenv("GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES");
+    if (!value) {
+        return std::nullopt;
+    }
+    const std::string_view text{value};
+    u32 count = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), count);
+    if (error != std::errc{} || end != text.data() + text.size() || count == 0) {
+        return std::nullopt;
+    }
+    return count == 1 ? 0 : count;
 }
 
 } // namespace
@@ -96,10 +114,14 @@ constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as no
 struct PrecompileLoad {
     PrecompileLoad(PipelineCache& cache_, ParsedList list_)
         : cache{cache_}, list{std::move(list_)}, builder{cache, list, code},
-          no_pump_pipelines{NoPumpPipelinesRequested()} {
-        if (no_pump_pipelines) {
+          pump_limit{PumpPipelineLimit()} {
+        if (pump_limit == 0u) {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, only holds "
                         "hand pipelines over\n");
+        } else if (pump_limit) {
+            std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=%u, the pump "
+                        "hands at most %u pipelines over per load, then only holds do\n",
+                        *pump_limit, *pump_limit);
         }
         waiting.resize(list.keys.size());
         std::iota(waiting.begin(), waiting.end(), 0u);
@@ -130,6 +152,7 @@ private:
         u64 published_before = 0, failed_before = 0; ///< the cache's load builds then
         u64 began_ns = 0; ///< CompilePolicy::Now() when the loading state began
         u32 holds = 0;    ///< Hold() and HoldPipelines() calls that held
+        u32 pumped = 0;   ///< entries the pump's pipeline selections took off `selecting`
         std::vector<std::pair<const char*, u32>> reasons;
     };
 
@@ -138,7 +161,7 @@ private:
     bool TakeFound();
     void Replan();
     void BuildReady(u64 until_ns);
-    u32 SelectPipelines(u64 until_ns);
+    u32 SelectPipelines(u64 until_ns, u32 most = std::numeric_limits<u32>::max());
     void Hold();
     u32 WaitPipelines(u64 began);
     void EndHold(u64 began, u32 built_before, u32 handed, size_t not_handed, size_t building);
@@ -165,7 +188,8 @@ private:
     std::unordered_set<u64> used;          ///< list programs first used since the load began
     std::unordered_set<u64> built;         ///< programs the loader wrote permutations of
     u64 next_report_ns = 0;
-    const bool no_pump_pipelines; ///< GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1
+    /// GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES: pipelines the pump hands over per loading state
+    const std::optional<u32> pump_limit;
 };
 
 EntryPlan PrecompileLoad::Plan(u32 index) const {
@@ -292,11 +316,12 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
     }
 }
 
-/// Hands built and merged entries' pipelines to the compile workers until `until_ns` or until
-/// their queue holds LoadQueueDepth tasks. Returns how many entries it took off `selecting`.
-u32 PrecompileLoad::SelectPipelines(u64 until_ns) {
+/// Hands built and merged entries' pipelines to the compile workers until `until_ns`, until
+/// their queue holds LoadQueueDepth tasks or until it took `most` entries off `selecting`.
+/// Returns how many it took.
+u32 PrecompileLoad::SelectPipelines(u64 until_ns, u32 most) {
     u32 taken = 0;
-    while (!selecting.empty() && CompilePolicy::Now() < until_ns) {
+    while (!selecting.empty() && taken < most && CompilePolicy::Now() < until_ns) {
         const auto step = builder.Pipeline(list.keys[selecting.front()]);
         if (step == PipelineStep::Full) {
             break; // again on a later call
@@ -453,8 +478,9 @@ void PrecompileLoad::Pump() {
     const u64 until = CompilePolicy::Now() + PumpNs;
     TakeFound();
     BuildReady(until);
-    if (!no_pump_pipelines) {
-        SelectPipelines(until);
+    if (const u32 most = pump_limit.value_or(std::numeric_limits<u32>::max());
+        tally.pumped < most) {
+        tally.pumped += SelectPipelines(until, most - tally.pumped);
     }
 }
 
