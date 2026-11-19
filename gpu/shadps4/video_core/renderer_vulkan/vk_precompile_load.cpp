@@ -778,12 +778,16 @@ void PrecompileLoad::Pump() {
     const u64 until = CompilePolicy::Now() + PumpNs;
     TakeFound();
     BuildReady(until, ready);
-    if (NextPumpQueue(!ready.empty(), !checking.empty()) == PumpQueue::Checking) {
-        BuildReady(until, checking);
-    }
+    // Pipelines are handed over before a checked entry is built: the checked queue can hold
+    // hundreds of entries, and the pipelines of the entries with a needed program must not
+    // wait behind all of them. The handover stops when the workers' queue is full, which
+    // leaves the checked entries the rest of the time.
     if (const u32 most = pump_limit.value_or(std::numeric_limits<u32>::max());
         tally.pumped < most) {
         tally.pumped += SelectPipelines(until, most - tally.pumped);
+    }
+    if (NextPumpQueue(!ready.empty(), !checking.empty()) == PumpQueue::Checking) {
+        BuildReady(until, checking);
     }
 }
 
