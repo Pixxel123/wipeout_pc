@@ -20,7 +20,7 @@ struct Stage {
 EntryPlan Plan(const std::vector<Stage>& stages, const std::set<u64>& needed,
                const std::set<u64>& found) {
     return PlanEntry(
-        stages, [&](u64 hash) { return needed.contains(hash); },
+        false, stages, [&](u64 hash) { return needed.contains(hash); },
         [&](u64 hash) { return found.contains(hash); });
 }
 
@@ -43,6 +43,17 @@ void TestStageInUseStillNeedsItsCode() {
 void TestOneNeededProgramIsEnough() {
     assert(Plan({{1}, {2}}, {2}, {1, 2}) == EntryPlan::Build);
     assert(Plan({{1}, {2}}, {1, 2}, {1, 2}) == EntryPlan::Build);
+}
+
+void TestAnEntryWithNoNeededProgramIsCheckedOnceItsCodeIsFound() {
+    const std::vector<Stage> stages{{1}, {2}};
+    const auto none = [](u64) { return false; };
+    const auto all = [](u64) { return true; };
+    const auto only1 = [](u64 h) { return h == 1; };
+    assert(PlanEntry(false, stages, none, all) == EntryPlan::Skip); // today's rule
+    assert(PlanEntry(true, stages, none, all) == EntryPlan::Build);
+    assert(PlanEntry(true, stages, none, only1) == EntryPlan::Wait);
+    assert(PlanEntry(true, stages, only1, all) == EntryPlan::Build);
 }
 
 bool Lacked(const std::vector<Stage>& stages, const std::set<u64>& needed,
@@ -137,6 +148,7 @@ int main() {
     TestNeededEntryWaitsUntilEveryStageWasFound();
     TestStageInUseStillNeedsItsCode();
     TestOneNeededProgramIsEnough();
+    TestAnEntryWithNoNeededProgramIsCheckedOnceItsCodeIsFound();
     TestFreshCodeCountsOnlyForAnEntryWithANeededProgram();
     TestLastPassFoundWhileItRanOrUntilTheNextOneFinishes();
     TestHoldOnlyWhileLoadingWithWorkAndTimeLeft();

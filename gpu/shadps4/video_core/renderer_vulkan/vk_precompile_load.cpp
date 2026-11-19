@@ -11,7 +11,9 @@
 // writes the needed programs' permutations to the store as the rebuild does; at most 4 ms of
 // entries per submission. When the queue runs empty after a build, the store is flushed and the new
 // permutations are added to its index, so a program's first use in this launch reads them
-// (LoadDiskProgram) instead of translating it.
+// (LoadDiskProgram) instead of translating it. An entry with no needed program is built too (it
+// only binds its stages, writes nothing) once its code is found, so its pipeline selection can
+// add variants to the programs that exist; with GOW3_PRECOMPILE_LOAD_VARIANTS=0 it is skipped.
 //
 // Then each built entry's pipeline is selected again, lookup-only as a draw-preparation worker
 // does but reading its programs from the store (LoadBuilder::Pipeline), and handed to the
@@ -357,6 +359,7 @@ private:
     /// One loading state's counts, for its line.
     struct Tally {
         u32 built = 0, skipped = 0, rejected = 0;
+        u32 checked = 0;    ///< built entries with no needed program, selected for their variants
         u32 no_info = 0;    ///< entries with a program in use whose translation is pending
         u32 unverified = 0; ///< list programs whose copies failed their checks
         u64 permutations = 0;
@@ -412,7 +415,8 @@ private:
 
 EntryPlan PrecompileLoad::Plan(u32 index) const {
     return PlanEntry(
-        list.keys[index].stages, [this](u64 hash) { return cache.ProgramNeeded(hash); },
+        variants, list.keys[index].stages,
+        [this](u64 hash) { return cache.ProgramNeeded(hash); },
         [this](u64 hash) { return code.contains(hash); });
 }
 
@@ -530,6 +534,9 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
             continue;
         }
         bool no_info = false;
+        const bool checked = std::ranges::none_of(list.keys[index].stages, [this](const auto& stage) {
+            return cache.ProgramNeeded(stage.hash);
+        });
         const char* why = builder.Build(index, list.keys[index], no_info);
         if (trace) {
             trace->Set(index,
@@ -540,6 +547,7 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
         }
         if (!why) {
             ++tally.built;
+            tally.checked += checked;
             unmerged.push_back(index);
             continue;
         }
@@ -697,13 +705,13 @@ void PrecompileLoad::ReportLoad() const {
         reasons += ")";
     }
     std::printf("Precompile load: %u entries built (%llu permutations), %u skipped, %u "
-                "rejected%s, %u with a program in use but untranslated, %u programs' code not "
+                "checked for variants, %u rejected%s, %u with a program in use but untranslated, %u programs' code not "
                 "verified, %llu pipelines built, %llu dropped, %llu left (%u taken by a draw "
                 "first, %zu not handed over, %zu still building), hold %llu ms, %llu scan passes "
                 "(last %llu ms), %u holds, variants of existing programs: %u added, %u already "
                 "there, %u left to the game\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
-                tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
+                tally.checked, tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -
                                                 tally.published_before),
                 static_cast<unsigned long long>(tally.dropped + cache.load_builds_failed -

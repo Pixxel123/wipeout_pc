@@ -31,7 +31,7 @@ struct RecordedKey;
 
 /// What the loader does with a list entry now.
 enum class EntryPlan {
-    Skip,  ///< none of its programs is needed: nothing to build (counted once)
+    Skip,  ///< none of its programs is needed: nothing to build (counted once; not when checked)
     Wait,  ///< one is, but the scan has not found the code of every stage yet
     Build, ///< one is, and the code of every stage was found
 };
@@ -39,10 +39,14 @@ enum class EntryPlan {
 /// `stages`: the entry's, by RecordedStage::hash. `needed(hash)`: the program is neither in use
 /// (program_cache) nor saved (the store's index); `found(hash)`: the scan found its code. A
 /// stage whose program is not needed is still selected (the next stage's spec depends on its
-/// bindings), so it needs its code too.
+/// bindings), so it needs its code too. `check_existing` (the loader adds variants): an entry
+/// with no needed program is built all the same, for the variants its pipeline selection adds to
+/// programs that exist, so it is never skipped.
 template <typename Stages, typename Needed, typename Found>
-[[nodiscard]] EntryPlan PlanEntry(const Stages& stages, Needed&& needed, Found&& found) {
-    if (std::ranges::none_of(stages, [&](const auto& stage) { return needed(stage.hash); })) {
+[[nodiscard]] EntryPlan PlanEntry(bool check_existing, const Stages& stages, Needed&& needed,
+                                  Found&& found) {
+    if (!check_existing &&
+        std::ranges::none_of(stages, [&](const auto& stage) { return needed(stage.hash); })) {
         return EntryPlan::Skip;
     }
     return std::ranges::all_of(stages, [&](const auto& stage) { return found(stage.hash); })
