@@ -130,9 +130,6 @@ private:
         u64 published_before = 0, failed_before = 0; ///< the cache's load builds then
         u64 began_ns = 0; ///< CompilePolicy::Now() when the loading state began
         u32 holds = 0;    ///< Hold() and HoldPipelines() calls that held
-        /// First uses of a needed list program that did not hold while built entries' pipelines
-        /// were not handed over or still building: the draw then builds its pipeline itself.
-        u32 unheld = 0;
         std::vector<std::pair<const char*, u32>> reasons;
     };
 
@@ -409,7 +406,7 @@ void PrecompileLoad::ReportLoad() const {
                 "rejected%s, %u with a program in use but untranslated, %u programs' code not "
                 "verified, %llu pipelines built, %llu dropped, %llu left (%u taken by a draw "
                 "first, %zu not handed over, %zu still building), hold %llu ms, %llu scan passes "
-                "(last %llu ms), %u holds, %u first uses not held with pipelines not ready\n",
+                "(last %llu ms), %u holds\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
                 tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -
@@ -421,7 +418,7 @@ void PrecompileLoad::ReportLoad() const {
                 tally.have, selecting.size() + unmerged.size(), cache.LoadBuildsRunning(),
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
-                static_cast<unsigned long long>(scan.LastPassMs()), tally.holds, tally.unheld);
+                static_cast<unsigned long long>(scan.LastPassMs()), tally.holds);
 }
 
 /// Every 5 s outside a load, and once more as the next load begins, before it clears the
@@ -479,9 +476,6 @@ void PrecompileLoad::FirstUse(u64 hash) {
                              LastPassFound(found_in, scan.Passes()))) {
         Hold();
     } else {
-        // Counted before the merge, which moves the unmerged entries to `selecting`.
-        tally.unheld += needed && (!selecting.empty() || !unmerged.empty() ||
-                                   cache.LoadBuildsRunning() > 0);
         Merge(); // nothing when nothing is unmerged
     }
 }
