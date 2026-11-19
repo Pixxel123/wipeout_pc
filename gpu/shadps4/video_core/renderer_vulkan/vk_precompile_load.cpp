@@ -38,6 +38,15 @@
 // the holds are not limited. It shows what the pump's handover adds to the pipelines a scene
 // starts with, against what the holds and the draws build themselves.
 //
+// Diagnostic GOW3_PRECOMPILE_LOAD_TRACE=1: when a scene's draw still builds a pipeline itself,
+// either the list has no entry for it (the recorder missed the draw) or the loader dropped its
+// entry or built another key; and how visible the skips are depends on how many frames they
+// fall in. So each entry keeps what became of it and the key its selection found; a dropped
+// selection prints why (at most 32 per loading state); a draw that starts its own build prints
+// its key and the entries with the same programs, their outcome and key (at most 200 per run);
+// and each flip after a frame with skipped draws prints their count (at most 300 per run). Its
+// index of the list's programs is built once, at the start; without it nothing is counted.
+//
 // Threads: the pump and the hold never run at once, both are on the GPU command thread. The
 // pump runs in Rasterizer::OnSubmit, which only Liverpool::Process calls, after a submission.
 // The hold runs in GetProgram for PipelineCache::sel only: draw-preparation workers and the
@@ -46,7 +55,9 @@
 // Dispatch calls use on the thread that decodes the command lists, Liverpool::Process again,
 // which resumes them; the draw recording thread never selects. So disk_permutations, which
 // has no lock, and the loader's state need none. The loading state is read from CompilePolicy's
-// atomics on this thread, so nothing of the loader is shared with the present thread. The
+// atomics on this thread, so nothing of the loader is shared with the present thread, but for
+// the trace's frame line: it is printed on the video-out thread at each flip (LoadTraceFlipped)
+// and reads only atomics, the skipped draws this thread counts and when the last load ended. The
 // pipeline selections run on this thread too and add programs to program_cache under its lock,
 // as GetProgram does; a hold inside GetProgram finds its program again afterwards.
 // HoldPipelines runs in GetGraphicsPipeline after sel's selection, on the same thread; the
@@ -55,6 +66,7 @@
 // Linux only (the scan); elsewhere the switch logs that it is not supported.
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -91,6 +103,10 @@ constexpr u64 PumpNs = 4'000'000;               ///< ready entries one pump buil
 constexpr u64 ReportIntervalNs = 5'000'000'000; ///< the line of programs used
 constexpr auto HoldPoll = std::chrono::milliseconds(1);
 constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as not verified
+constexpr u32 MaxTraceDropped = 32;  ///< trace lines of dropped selections per loading state
+constexpr u32 MaxTraceDraws = 200;   ///< trace lines of draws building their pipeline, per run
+constexpr u32 MaxTraceFrames = 300;  ///< trace lines of frames with skipped draws, per run
+constexpr size_t MaxTraceMatches = 4; ///< list entries a draw's trace line names
 
 /// How many pipelines the pump hands over per loading state at most: none for
 /// GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, N for a count N > 1; no limit when it is unset or
@@ -109,12 +125,185 @@ constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as no
     return count == 1 ? 0 : count;
 }
 
+[[nodiscard]] bool TraceRequested() {
+    const char* value = std::getenv("GOW3_PRECOMPILE_LOAD_TRACE");
+    return value && std::string_view{value} == "1";
+}
+
+/// With the trace: when the last loading state ended (CompilePolicy::Now()), 0 while one holds
+/// or before the first ended. Written on the GPU command thread, read at each flip too.
+std::atomic<u64> g_load_trace_ended_ns{0};
+std::atomic<u64> g_load_trace_flip_draws{0}; ///< the draw count at the last flip
+std::atomic<u32> g_load_trace_frames{0};     ///< frame lines printed
+
+/// The stages in the order they run: vs, hs, ds, gs, ps.
+[[nodiscard]] u32 StageOrder(u32 sw_stage) {
+    switch (Shader::SwStage(sw_stage)) {
+    case Shader::SwStage::Vertex:
+        return 0;
+    case Shader::SwStage::TessellationControl:
+        return 1;
+    case Shader::SwStage::TessellationEval:
+        return 2;
+    case Shader::SwStage::Geometry:
+        return 3;
+    case Shader::SwStage::Fragment:
+        return 4;
+    default:
+        return 5;
+    }
+}
+
+[[nodiscard]] const char* StageName(u32 sw_stage) {
+    switch (Shader::SwStage(sw_stage)) {
+    case Shader::SwStage::Vertex:
+        return "vs";
+    case Shader::SwStage::TessellationControl:
+        return "hs";
+    case Shader::SwStage::TessellationEval:
+        return "ds";
+    case Shader::SwStage::Geometry:
+        return "gs";
+    case Shader::SwStage::Fragment:
+        return "ps";
+    case Shader::SwStage::Compute:
+        return "cs";
+    default:
+        return "stage?";
+    }
+}
+
+[[nodiscard]] std::string Hex(u64 value) {
+    char text[24];
+    std::snprintf(text, sizeof(text), "0x%016llx", static_cast<unsigned long long>(value));
+    return text;
+}
+
+/// "vs 0x…, ps 0x…" of SwStage index and program hash pairs.
+[[nodiscard]] std::string StagesText(std::vector<std::pair<u32, u64>> stages) {
+    std::ranges::sort(stages, {}, [](const auto& stage) { return StageOrder(stage.first); });
+    std::string text;
+    for (const auto& [sw_stage, hash] : stages) {
+        text += (text.empty() ? "" : ", ") + std::string{StageName(sw_stage)} + " " + Hex(hash);
+    }
+    return text;
+}
+
+/// "while loading", or how long after the loading state that ended at `ended_ns` (0: none).
+[[nodiscard]] std::string WhenText(u64 now_ns, u64 ended_ns) {
+    if (ended_ns == 0) {
+        return "while loading";
+    }
+    const u64 ms = now_ns > ended_ns ? (now_ns - ended_ns) / 1'000'000 : 0;
+    return std::to_string(ms) + " ms after the load ended";
+}
+
+/// GOW3_PRECOMPILE_LOAD_TRACE: what became of each list entry, and an index of the list's
+/// programs for a draw's line.
+struct LoadTrace {
+    enum class Outcome : u8 {
+        Waiting,   ///< the scan has not found every stage's code
+        Ready,     ///< every stage's code found, not built yet
+        Skipped,   ///< no needed program: not built, so its pipeline is never selected
+        Rejected,  ///< its build failed (`why`)
+        NoInfo,    ///< a program in use whose translation was pending: not built
+        Built,     ///< built, its pipeline not selected yet
+        Cleared,   ///< built, its pipeline not handed over before the next load began
+        Queued,    ///< its pipeline handed to the compile workers
+        Have,      ///< its pipeline built or building already
+        Dropped,   ///< its pipeline selection dropped (`why`, `stage`)
+    };
+    struct Entry {
+        Outcome outcome = Outcome::Waiting;
+        const char* why = nullptr;
+        std::optional<u32> stage;
+        std::optional<u64> key_hash;
+    };
+
+    explicit LoadTrace(const ParsedList& list) : entries(list.keys.size()) {
+        for (u32 index = 0; index < list.keys.size(); ++index) {
+            auto programs = Programs(list.keys[index]);
+            for (const u64 hash : programs) {
+                ++entries_with[hash];
+            }
+            by_programs[std::move(programs)].push_back(index);
+        }
+    }
+
+    /// The entry's stage programs, sorted, each once.
+    [[nodiscard]] static std::vector<u64> Programs(const RecordedKey& key) {
+        std::vector<u64> programs;
+        for (const auto& stage : key.stages) {
+            programs.push_back(stage.hash);
+        }
+        std::ranges::sort(programs);
+        programs.erase(std::ranges::unique(programs).begin(), programs.end());
+        return programs;
+    }
+
+    [[nodiscard]] static std::vector<std::pair<u32, u64>> Stages(const RecordedKey& key) {
+        std::vector<std::pair<u32, u64>> stages;
+        for (const auto& stage : key.stages) {
+            stages.emplace_back(stage.sw_stage, stage.hash);
+        }
+        return stages;
+    }
+
+    [[nodiscard]] static std::string Why(const Entry& entry) {
+        std::string why = entry.stage ? std::string{StageName(*entry.stage)} + " " : "";
+        return why + (entry.why ? entry.why : "unknown");
+    }
+
+    [[nodiscard]] static std::string OutcomeText(const Entry& entry) {
+        switch (entry.outcome) {
+        case Outcome::Waiting:
+            return "waiting for code";
+        case Outcome::Ready:
+            return "ready, not built";
+        case Outcome::Skipped:
+            return "skipped (no needed program)";
+        case Outcome::Rejected:
+            return "rejected (" + Why(entry) + ")";
+        case Outcome::NoInfo:
+            return "not built (a program's translation pending)";
+        case Outcome::Built:
+            return "built, not selected";
+        case Outcome::Cleared:
+            return "built, not handed over before the next load";
+        case Outcome::Queued:
+            return "queued";
+        case Outcome::Have:
+            return "had (built or building already)";
+        case Outcome::Dropped:
+            return "dropped (" + Why(entry) + ")";
+        }
+        return "?";
+    }
+
+    void Set(u32 index, Outcome outcome, const char* why = nullptr) {
+        entries[index].outcome = outcome;
+        entries[index].why = why;
+        entries[index].stage.reset();
+    }
+
+    std::vector<Entry> entries;
+    std::map<std::vector<u64>, std::vector<u32>> by_programs; ///< Programs() -> entries
+    std::unordered_map<u64, u32> entries_with; ///< program hash -> entries holding it
+    u32 dropped_lines = 0; ///< this loading state's
+    u32 draw_lines = 0;
+    u64 ended_ns = 0; ///< when the last loading state ended, 0 while one holds or none ended
+};
+
 } // namespace
+
+std::atomic<bool> Precompile::g_load_trace{false};
+std::atomic<u32> Precompile::g_load_trace_skipped{0};
 
 struct PrecompileLoad {
     PrecompileLoad(PipelineCache& cache_, ParsedList list_)
         : cache{cache_}, list{std::move(list_)}, builder{cache, list, code},
-          pump_limit{PumpPipelineLimit()} {
+          pump_limit{PumpPipelineLimit()},
+          trace{TraceRequested() ? std::make_unique<LoadTrace>(list) : nullptr} {
         if (pump_limit == 0u) {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, only holds "
                         "hand pipelines over\n");
@@ -122,6 +311,12 @@ struct PrecompileLoad {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=%u, the pump "
                         "hands at most %u pipelines over per load, then only holds do\n",
                         *pump_limit, *pump_limit);
+        }
+        if (trace) {
+            std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_TRACE=1, lines for dropped "
+                        "selections, pipelines draws build themselves and frames with skipped "
+                        "draws\n");
+            g_load_trace.store(true, std::memory_order_relaxed);
         }
         waiting.resize(list.keys.size());
         std::iota(waiting.begin(), waiting.end(), 0u);
@@ -137,6 +332,7 @@ struct PrecompileLoad {
     void FirstUse(u64 hash);
     bool HoldPipelines();
     bool Wait(const std::function<bool(u64 left_ns)>& wait);
+    void TraceDraw(const PipelineSelection& selection);
 
 private:
     /// One loading state's counts, for its line.
@@ -162,6 +358,7 @@ private:
     void Replan();
     void BuildReady(u64 until_ns);
     u32 SelectPipelines(u64 until_ns, u32 most = std::numeric_limits<u32>::max());
+    void TraceSelection(u32 index, PipelineStep step, const PipelineTrace& found);
     void Hold();
     u32 WaitPipelines(u64 began);
     void EndHold(u64 began, u32 built_before, u32 handed, size_t not_handed, size_t building);
@@ -190,6 +387,7 @@ private:
     u64 next_report_ns = 0;
     /// GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES: pipelines the pump hands over per loading state
     const std::optional<u32> pump_limit;
+    const std::unique_ptr<LoadTrace> trace; ///< GOW3_PRECOMPILE_LOAD_TRACE, null without it
 };
 
 EntryPlan PrecompileLoad::Plan(u32 index) const {
@@ -216,6 +414,14 @@ bool PrecompileLoad::Loading() {
         tally.passes_before = scan.Passes();
         tally.published_before = cache.load_builds_published;
         tally.failed_before = cache.load_builds_failed;
+        if (trace) {
+            trace->dropped_lines = 0;
+            trace->ended_ns = 0;
+            g_load_trace_ended_ns.store(0, std::memory_order_relaxed);
+            for (const u32 index : selecting) {
+                trace->Set(index, LoadTrace::Outcome::Cleared);
+            }
+        }
         // Pipelines the last load did not hand over: the race has built what it drew of them,
         // and the rest would take this load's budget.
         selecting.clear();
@@ -223,6 +429,10 @@ bool PrecompileLoad::Loading() {
     } else {
         Merge(); // the load ended before the queue ran empty
         ReportLoad();
+        if (trace) {
+            trace->ended_ns = CompilePolicy::Now();
+            g_load_trace_ended_ns.store(trace->ended_ns, std::memory_order_relaxed);
+        }
     }
     return loading;
 }
@@ -276,6 +486,10 @@ void PrecompileLoad::Replan() {
             ready.push_back(index);
         }
         tally.skipped += plan == EntryPlan::Skip;
+        if (trace && plan != EntryPlan::Wait) {
+            trace->Set(index, plan == EntryPlan::Build ? LoadTrace::Outcome::Ready
+                                                       : LoadTrace::Outcome::Skipped);
+        }
         return plan != EntryPlan::Wait;
     });
 }
@@ -289,10 +503,20 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
         // The game may have used its programs since it was queued (found code stays found).
         if (Plan(index) != EntryPlan::Build) {
             ++tally.skipped;
+            if (trace) {
+                trace->Set(index, LoadTrace::Outcome::Skipped);
+            }
             continue;
         }
         bool no_info = false;
         const char* why = builder.Build(index, list.keys[index], no_info);
+        if (trace) {
+            trace->Set(index,
+                       !why      ? LoadTrace::Outcome::Built
+                       : no_info ? LoadTrace::Outcome::NoInfo
+                                 : LoadTrace::Outcome::Rejected,
+                       why);
+        }
         if (!why) {
             ++tally.built;
             unmerged.push_back(index);
@@ -322,7 +546,9 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
 u32 PrecompileLoad::SelectPipelines(u64 until_ns, u32 most) {
     u32 taken = 0;
     while (!selecting.empty() && taken < most && CompilePolicy::Now() < until_ns) {
-        const auto step = builder.Pipeline(list.keys[selecting.front()]);
+        const u32 index = selecting.front();
+        PipelineTrace found;
+        const auto step = builder.Pipeline(list.keys[index], trace ? &found : nullptr);
         if (step == PipelineStep::Full) {
             break; // again on a later call
         }
@@ -330,8 +556,30 @@ u32 PrecompileLoad::SelectPipelines(u64 until_ns, u32 most) {
         ++taken;
         tally.dropped += step == PipelineStep::Dropped;
         tally.have += step == PipelineStep::Have;
+        if (trace) {
+            TraceSelection(index, step, found);
+        }
     }
     return taken;
+}
+
+/// The trace: what entry `index`'s pipeline selection found, and a line when it was dropped.
+void PrecompileLoad::TraceSelection(u32 index, PipelineStep step, const PipelineTrace& found) {
+    auto& entry = trace->entries[index];
+    entry.outcome = step == PipelineStep::Queued ? LoadTrace::Outcome::Queued
+                    : step == PipelineStep::Have ? LoadTrace::Outcome::Have
+                                                 : LoadTrace::Outcome::Dropped;
+    entry.why = found.dropped;
+    entry.stage = found.stage;
+    entry.key_hash = found.key_hash;
+    if (step != PipelineStep::Dropped || trace->dropped_lines >= MaxTraceDropped) {
+        return;
+    }
+    ++trace->dropped_lines;
+    const auto& key = list.keys[index];
+    std::printf("Precompile load: trace dropped entry %u: %s; stages %s (recorded key %s)\n",
+                index, LoadTrace::Why(entry).c_str(), StagesText(LoadTrace::Stages(key)).c_str(),
+                Hex(key.key_hash).c_str());
 }
 
 /// Builds every queued entry, then has the scan run a pass that starts after that and builds
@@ -538,6 +786,78 @@ bool PrecompileLoad::Wait(const std::function<bool(u64 left_ns)>& wait) {
     return done;
 }
 
+/// GetGraphicsPipeline, a draw that starts its own build of the pipeline `selection` selected:
+/// with the trace, its key and the list entries with the same set of programs, what became of
+/// them and their key; when there is none, how many entries hold each of its programs. Reads
+/// the loading state as last seen: Loading() here would move the load's lines.
+void PrecompileLoad::TraceDraw(const PipelineSelection& selection) {
+    if (!trace || trace->draw_lines >= MaxTraceDraws) {
+        return;
+    }
+    ++trace->draw_lines;
+    const u64 key_hash = std::hash<GraphicsPipelineKey>{}(selection.graphics_key);
+    std::vector<std::pair<u32, u64>> stages;
+    std::vector<u64> programs;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (selection.infos[i]) {
+            stages.emplace_back(i, selection.infos[i]->pgm_hash);
+            programs.push_back(selection.infos[i]->pgm_hash);
+        }
+    }
+    std::ranges::sort(programs);
+    programs.erase(std::ranges::unique(programs).begin(), programs.end());
+    std::ranges::sort(stages, {}, [](const auto& stage) { return StageOrder(stage.first); });
+    std::string list_text;
+    const auto matched = trace->by_programs.find(programs);
+    if (matched != trace->by_programs.end()) {
+        list_text = std::to_string(matched->second.size()) + " entries with these programs";
+        // Those with this key first, then those with another: a key match must not be cut off.
+        auto indices = matched->second;
+        std::ranges::stable_sort(indices, {}, [&](u32 index) {
+            const auto& found = trace->entries[index].key_hash;
+            return found ? (*found == key_hash ? 0 : 1) : 2;
+        });
+        for (size_t i = 0; i < indices.size() && i < MaxTraceMatches; ++i) {
+            const u32 index = indices[i];
+            const auto& entry = trace->entries[index];
+            list_text += (i == 0 ? ": entry " : ", entry ") + std::to_string(index) + " " +
+                         LoadTrace::OutcomeText(entry);
+            if (entry.key_hash) {
+                list_text += " key " + Hex(*entry.key_hash) +
+                             (*entry.key_hash == key_hash ? " same key" : " other key");
+            }
+        }
+    } else {
+        list_text = "0 entries with these programs";
+        for (const auto& [sw_stage, hash] : stages) {
+            const auto held = trace->entries_with.find(hash);
+            list_text += std::string{"; "} + StageName(sw_stage) + " in " +
+                         std::to_string(held != trace->entries_with.end() ? held->second : 0) +
+                         " entries";
+        }
+    }
+    const u64 ended = loading ? 0 : trace->ended_ns;
+    std::printf("Precompile load: trace draw built %s, %s; stages %s; list: %s\n",
+                Hex(key_hash).c_str(), WhenText(CompilePolicy::Now(), ended).c_str(),
+                StagesText(stages).c_str(), list_text.c_str());
+}
+
+void Precompile::LoadTraceFlipped(u64 flip_ns, u64 draws) {
+    if (!g_load_trace.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const u64 frame_draws =
+        draws - g_load_trace_flip_draws.exchange(draws, std::memory_order_relaxed);
+    const u32 skipped = g_load_trace_skipped.exchange(0, std::memory_order_relaxed);
+    if (skipped == 0 ||
+        g_load_trace_frames.fetch_add(1, std::memory_order_relaxed) >= MaxTraceFrames) {
+        return;
+    }
+    std::printf("Precompile load: trace frame: %u of %llu draws skipped, %s\n", skipped,
+                static_cast<unsigned long long>(frame_draws),
+                WhenText(flip_ns, g_load_trace_ended_ns.load(std::memory_order_relaxed)).c_str());
+}
+
 void PrecompileLoadDeleter::operator()(PrecompileLoad* load) const {
     delete load;
 }
@@ -588,6 +908,12 @@ bool PipelineCache::PrecompileLoadHoldPipelines() {
 
 bool PipelineCache::PrecompileLoadWait(const std::function<bool(u64 left_ns)>& wait) {
     return precompile_load && precompile_load->Wait(wait);
+}
+
+void PipelineCache::PrecompileLoadTraceDraw() {
+    if (precompile_load) {
+        precompile_load->TraceDraw(sel);
+    }
 }
 
 } // namespace Vulkan

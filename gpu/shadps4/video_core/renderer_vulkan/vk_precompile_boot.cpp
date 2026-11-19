@@ -257,7 +257,7 @@ struct PrecompileBoot {
     PipelineCache::Result Program(const Shader::ShaderParams& params, HwStage hw_stage,
                                   SwStage sw_stage, Shader::Backend::Bindings& binding,
                                   const Shader::RuntimeInfo& runtime_info);
-    PipelineStep Pipeline(const RecordedKey& key);
+    PipelineStep Pipeline(const RecordedKey& key, PipelineTrace* trace);
 
     bool load = false; ///< the loader's build: programs not needed are only bound
     const char* log_name = "Precompile boot";
@@ -453,13 +453,17 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 /// the store first (PipelineSelection::from_store). A missing program or permutation, a
 /// program in use whose translation is pending, or a read outside the recorded words drops it.
 /// It is handed to the compile workers inside the same recovery point, before the copy goes:
-/// the build's snapshot reads it.
-PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key) {
+/// the build's snapshot reads it. `trace` (GOW3_PRECOMPILE_LOAD_TRACE), when set, gets the key
+/// selected and why it was dropped.
+PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, PipelineTrace* trace) {
     if (cache.compiler->Depth() >= LoadQueueDepth) {
         return PipelineStep::Full;
     }
     Shadow shadow;
     if (!MapShadow(key, shadow)) {
+        if (trace) {
+            trace->dropped = "no room for the shadow copy";
+        }
         return PipelineStep::Dropped;
     }
     const auto regs = Registers(key, shadow);
@@ -470,19 +474,36 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key) {
     selection.from_store = true;
     selection.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
     auto step = PipelineStep::Dropped;
+    const char* why = "a read faulted out of the selection"; // what a jump out of Guarded leaves
+    std::optional<u32> why_stage;
     Watch();
     Guarded([&] {
         try {
-            if (cache.RefreshGraphicsKey(selection) && !worker.failed &&
-                FaultState().faults == 0) {
-                step = cache.StartLoadPipeline(selection, worker);
+            const bool selected = cache.RefreshGraphicsKey(selection);
+            if (!selected || worker.failed) {
+                why = worker.failed && worker.failure ? worker.failure : "selection failed";
+                if (worker.failed && worker.failure) {
+                    why_stage = worker.failed_stage;
+                }
+            } else if (FaultState().faults != 0) {
+                why = "read outside the recorded words";
+            } else {
+                if (trace) {
+                    trace->key_hash = std::hash<GraphicsPipelineKey>{}(selection.graphics_key);
+                }
+                step = cache.StartLoadPipeline(selection, worker, &why);
             }
         } catch (...) {
             step = PipelineStep::Dropped;
+            why = "exception";
         }
     });
     FaultState().Stop();
     arena.Unmap(shadow.address, *shadow.layout);
+    if (trace && step == PipelineStep::Dropped) {
+        trace->dropped = why;
+        trace->stage = why_stage;
+    }
     return step;
 }
 
@@ -844,8 +865,8 @@ std::vector<std::pair<u64, u32>> LoadBuilder::TakeWritten() {
     return std::exchange(boot->written, {});
 }
 
-PipelineStep LoadBuilder::Pipeline(const RecordedKey& key) {
-    return boot->Pipeline(key);
+PipelineStep LoadBuilder::Pipeline(const RecordedKey& key, PipelineTrace* trace) {
+    return boot->Pipeline(key, trace);
 }
 
 bool PipelineCache::RebuildFromPrecompileList() {

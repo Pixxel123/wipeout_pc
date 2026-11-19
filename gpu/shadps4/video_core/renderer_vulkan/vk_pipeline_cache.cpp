@@ -916,6 +916,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!refreshed) {
         if (sel.compilation_pending) {
             ++g_gow3_pending_draws;
+            if (Precompile::g_load_trace.load(std::memory_order_relaxed)) {
+                Precompile::g_load_trace_skipped.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         return nullptr;
     }
@@ -943,7 +946,11 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (background || pending_graphics.contains(sel.graphics_key)) {
         if (background && !pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_gow3_snapshot_ns};
-            StartGraphicsBuild(sel, sel.infos, false);
+            const bool started = StartGraphicsBuild(sel, sel.infos, false) != nullptr;
+            capture.Stop();
+            if (started && precompile_load) {
+                PrecompileLoadTraceDraw(); // gow3 diagnostic, GOW3_PRECOMPILE_LOAD_TRACE
+            }
         }
         // gow3 (GOW3_PRECOMPILE_LOAD): one the loader is building is waited for while loading.
         if (const auto pending = pending_graphics.find(sel.graphics_key);
@@ -956,10 +963,16 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             }
         }
         ++g_gow3_pending_draws;
+        if (Precompile::g_load_trace.load(std::memory_order_relaxed)) {
+            Precompile::g_load_trace_skipped.fetch_add(1, std::memory_order_relaxed);
+        }
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     if (is_new) {
+        if (precompile_load) {
+            PrecompileLoadTraceDraw(); // gow3 diagnostic, GOW3_PRECOMPILE_LOAD_TRACE
+        }
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
@@ -1029,13 +1042,17 @@ std::shared_ptr<AsyncGraphicsCompilation> PipelineCache::StartGraphicsBuild(
 }
 
 Precompile::PipelineStep PipelineCache::StartLoadPipeline(const PipelineSelection& selection,
-                                                          const PrepWorker& worker) {
+                                                          const PrepWorker& worker,
+                                                          const char** why) {
     using Precompile::PipelineStep;
     const auto& key = selection.graphics_key;
     if (graphics_pipelines.contains(key) || pending_graphics.contains(key)) {
         return PipelineStep::Have;
     }
     if (EmulatorSettings.IsShaderCollect()) {
+        if (why) {
+            *why = "shader collection is on";
+        }
         return PipelineStep::Dropped; // no background build either (GetGraphicsPipeline)
     }
     // The published pipeline binds each program's own Info, as a draw's does; the worker's
@@ -1049,6 +1066,9 @@ Precompile::PipelineStep PipelineCache::StartLoadPipeline(const PipelineSelectio
             return &item.second == selection.infos[i];
         });
         if (found == worker.infos.end()) {
+            if (why) {
+                *why = "a stage's Info is not the selection's";
+            }
             return PipelineStep::Dropped;
         }
         live[i] = &found->first->info;
@@ -1520,6 +1540,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         const auto found_program = program_cache.find(params.hash);
         if (found_program == program_cache.end() || !found_program->second->info_template) {
             worker.failed = true;
+            worker.failure = found_program == program_cache.end()
+                                 ? "program neither in use nor in the store"
+                                 : "program's translation pending";
+            worker.failed_stage = u32(sw_stage);
             return {};
         }
         const Program* program = found_program->second.get();
@@ -1537,6 +1561,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         if (sigsetjmp(recover, 0)) {
             runtime_fault_recover = outer;
             worker.failed = true;
+            worker.failure = "read faulted in its specialization";
+            worker.failed_stage = u32(sw_stage);
             return {};
         }
         runtime_fault_recover = &recover;
@@ -1546,6 +1572,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
         if (it == program->modules.end()) {
             worker.failed = true;
+            worker.failure = "permutation missing";
+            worker.failed_stage = u32(sw_stage);
             return {};
         }
         info.AddBindings(binding);

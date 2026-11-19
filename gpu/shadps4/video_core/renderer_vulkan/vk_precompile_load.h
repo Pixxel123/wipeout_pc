@@ -11,8 +11,10 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 #include "common/types.h"
@@ -122,6 +124,22 @@ enum class PipelineStep {
     Dropped, ///< not selected: a program or permutation is missing, or a read faulted
 };
 
+/// GOW3_PRECOMPILE_LOAD_TRACE: what a loader selection found besides its PipelineStep.
+struct PipelineTrace {
+    std::optional<u64> key_hash;  ///< std::hash<GraphicsPipelineKey> of the key it selected
+    const char* dropped = nullptr; ///< why, for PipelineStep::Dropped (a static text)
+    std::optional<u32> stage;      ///< the SwStage `dropped` is about, when it is one stage's
+};
+
+/// GOW3_PRECOMPILE_LOAD_TRACE=1 with the loader on; set once as the loader starts.
+extern std::atomic<bool> g_load_trace;
+/// With the trace: draws skipped (g_gow3_pending_draws) since the last flip, which takes them.
+extern std::atomic<u32> g_load_trace_skipped;
+/// Each flip, after CompilePolicy::Flipped, with the same draw count (video-out thread): with
+/// the trace, a line for a frame that had skipped draws. `draws` (Gow3Stats::draws) counts
+/// Rasterizer::Draw only; a skipped DrawIndirect counts among the skips all the same.
+void LoadTraceFlipped(u64 flip_ns, u64 draws);
+
 } // namespace Precompile
 
 /// The start-up rebuild's entry build (vk_precompile_boot.cpp) for the loader: the code is the
@@ -142,7 +160,9 @@ public:
     [[nodiscard]] std::vector<std::pair<u64, u32>> TakeWritten();
     /// Entry `key`, built and its permutations in the store's index: its pipeline, selected
     /// and handed to the compile workers. Room in their queue (LoadQueueDepth) is checked first.
-    Precompile::PipelineStep Pipeline(const Precompile::RecordedKey& key);
+    /// `trace`, when set, gets the key selected and why it was dropped.
+    Precompile::PipelineStep Pipeline(const Precompile::RecordedKey& key,
+                                      Precompile::PipelineTrace* trace = nullptr);
 
 private:
     std::unique_ptr<PrecompileBoot> boot;

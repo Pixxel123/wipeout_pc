@@ -26,6 +26,7 @@ extern "C" void runtime_set_target_fps(double fps); // src/runtime_extra.c
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
+#include "video_core/renderer_vulkan/vk_precompile_load.h"
 #include "video_core/renderer_vulkan/vk_precompile_scan.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -319,9 +320,11 @@ void VideoOutDriver::Flip(const Request& req) {
     // gow3: after a loading screen, new pipelines may wait longer for a few seconds
     // (vk_compile_policy.h); the log line marks where that window starts.
     const u64 flip_ns = Vulkan::CompilePolicy::Now();
-    const bool first_scene = Vulkan::g_compile_policy.Flipped(
-        flip_ns, Gow3Stats::draws.load(std::memory_order_relaxed));
+    const u64 flip_draws = Gow3Stats::draws.load(std::memory_order_relaxed);
+    const bool first_scene = Vulkan::g_compile_policy.Flipped(flip_ns, flip_draws);
     Vulkan::Precompile::ScanFlipped(flip_ns, first_scene); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
+    // gow3 diagnostic, GOW3_PRECOMPILE_LOAD_TRACE: a line for a frame with skipped draws.
+    Vulkan::Precompile::LoadTraceFlipped(flip_ns, flip_draws);
     if (first_scene) {
         std::printf("Pipelines: first scene after a loading screen; new pipelines may wait "
                     "longer for %llu s (GOW3_LOAD_GRACE=0: no)\n",

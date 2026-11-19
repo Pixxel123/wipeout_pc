@@ -139,6 +139,10 @@ struct PrepWorker {
     std::unordered_map<const Program*, Shader::Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
     bool failed = false;
+    /// gow3 (GOW3_PRECOMPILE_LOAD_TRACE): why the lookup failed (a static text) and the
+    /// SwStage it failed at, so the loader's trace can say which program or permutation it was.
+    const char* failure = nullptr;
+    u32 failed_stage = 0;
 };
 
 struct PreparedDraw;
@@ -262,8 +266,10 @@ private:
     /// gow3 (GOW3_PRECOMPILE_LOAD): the pipeline a loader selection (`worker`, `from_store`)
     /// found, handed to the compile workers unless it is built or being built. GPU command
     /// thread, while the selection's shadow copy is mapped: the build's snapshot reads it.
+    /// `why`, when set, gets why it was dropped (GOW3_PRECOMPILE_LOAD_TRACE).
     Precompile::PipelineStep StartLoadPipeline(const PipelineSelection& selection,
-                                               const PrepWorker& worker);
+                                               const PrepWorker& worker,
+                                               const char** why = nullptr);
     /// gow3 (GOW3_PRECOMPILE_LOAD): whether every build the loader handed over is done by
     /// `until_ns` (CompilePolicy::Now), waiting for them until then.
     bool WaitLoadBuilds(u64 until_ns);
@@ -279,6 +285,9 @@ private:
     /// gow3 (GOW3_PRECOMPILE_LOAD): `wait(left_ns)` while loading with hold budget left, the
     /// time it takes counted as held; false (no wait) otherwise, else what `wait` returned.
     bool PrecompileLoadWait(const std::function<bool(u64 left_ns)>& wait);
+    /// gow3 (GOW3_PRECOMPILE_LOAD_TRACE): a draw starts its own build of the pipeline `sel`
+    /// selected; with the trace a line on what the list has of its programs. GPU command thread.
+    void PrecompileLoadTraceDraw();
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
