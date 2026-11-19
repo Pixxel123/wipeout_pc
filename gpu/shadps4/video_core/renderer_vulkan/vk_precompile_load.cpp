@@ -23,8 +23,13 @@
 //
 // The first draw of the race asks for programs before the pump has built them: a draw's first
 // use of a program while the loader is active holds the draw (Hold) until what the scan finds
-// is built and its pipelines too, and a draw of a pipeline the loader is building waits for it
-// (Wait); both at most 5 s per loading state together, and never outside one.
+// is built and its pipelines too. Once the pump has built every entry but not handed every
+// pipeline over, a scene's draws have no first use left to hold at (the loader's own
+// selections put their programs in program_cache), so a draw's pipeline miss while built
+// entries' pipelines are not handed over or still building waits for them as the end of a hold
+// does (HoldPipelines); without it the scene's first draws build those pipelines themselves
+// and are skipped. A draw of a pipeline the loader is building waits for it (Wait). All three
+// at most 5 s per loading state together, and never outside one.
 //
 // Diagnostic GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1: the pump still builds entries but hands
 // none of their pipelines over, so only a hold does. It shows what the pump's handover adds to
@@ -41,6 +46,8 @@
 // atomics on this thread, so nothing of the loader is shared with the present thread. The
 // pipeline selections run on this thread too and add programs to program_cache under its lock,
 // as GetProgram does; a hold inside GetProgram finds its program again afterwards.
+// HoldPipelines runs in GetGraphicsPipeline after sel's selection, on the same thread; the
+// selections it makes never come back to it, as only Rasterizer calls GetGraphicsPipeline.
 //
 // Linux only (the scan); elsewhere the switch logs that it is not supported.
 
@@ -106,6 +113,7 @@ struct PrecompileLoad {
 
     void Pump();
     void FirstUse(u64 hash);
+    bool HoldPipelines();
     bool Wait(const std::function<bool(u64 left_ns)>& wait);
 
 private:
@@ -121,7 +129,7 @@ private:
         u32 have = 0;          ///< pipeline selections whose pipeline was built or building
         u64 published_before = 0, failed_before = 0; ///< the cache's load builds then
         u64 began_ns = 0; ///< CompilePolicy::Now() when the loading state began
-        u32 holds = 0;    ///< Hold() calls
+        u32 holds = 0;    ///< Hold() and HoldPipelines() calls that held
         /// First uses of a needed list program that did not hold while built entries' pipelines
         /// were not handed over or still building: the draw then builds its pipeline itself.
         u32 unheld = 0;
@@ -135,6 +143,8 @@ private:
     void BuildReady(u64 until_ns);
     u32 SelectPipelines(u64 until_ns);
     void Hold();
+    u32 WaitPipelines(u64 began);
+    void EndHold(u64 began, u32 built_before, u32 handed, size_t not_handed, size_t building);
     void Merge();
     void ReportLoad() const;
     void ReportUsed() const;
@@ -304,18 +314,14 @@ u32 PrecompileLoad::SelectPipelines(u64 until_ns) {
 
 /// Builds every queued entry, then has the scan run a pass that starts after that and builds
 /// what it found, until such a pass finds no code an entry with a needed program lacked or the
-/// loading state's holds took HoldBudgetNs; then merges, so the GetProgram this holds finds
-/// what was built in the store, hands the entries' pipelines to the compile workers and waits
-/// for them in the same budget, and publishes them. Not a pending draw, and no grace wait.
-/// Prints a line per hold: when it began in the load, what it built and handed over, and what
-/// was left of the pipelines then.
+/// loading state's holds took HoldBudgetNs; then waits for the entries' pipelines in the same
+/// budget (WaitPipelines). Not a pending draw, and no grace wait.
 void PrecompileLoad::Hold() {
     const u64 began = CompilePolicy::Now();
     ++tally.holds;
     const u32 built_before = tally.built;
     const size_t not_handed = selecting.size() + unmerged.size();
     const size_t building = cache.LoadBuildsRunning();
-    u32 handed = 0;
     const u64 until = began + (HoldBudgetNs - tally.held_ns);
     const auto held = [&] { return tally.held_ns + (CompilePolicy::Now() - began); };
     for (;;) {
@@ -332,6 +338,17 @@ void PrecompileLoad::Hold() {
             break;
         }
     }
+    EndHold(began, built_before, WaitPipelines(began), not_handed, building);
+}
+
+/// The second half of a hold that began at `began`: merges, so a GetProgram finds what was
+/// built in the store, hands the built entries' pipelines to the compile workers and waits for
+/// them until this loading state's holds took HoldBudgetNs, and publishes them, so the draw
+/// finds them in graphics_pipelines. Returns how many it handed over.
+u32 PrecompileLoad::WaitPipelines(u64 began) {
+    u32 handed = 0;
+    const u64 until = began + (HoldBudgetNs - tally.held_ns);
+    const auto held = [&] { return tally.held_ns + (CompilePolicy::Now() - began); };
     Merge();
     for (;;) {
         handed += SelectPipelines(until);
@@ -345,7 +362,14 @@ void PrecompileLoad::Hold() {
         }
     }
     cache.PublishGraphics();
-    const u64 this_hold = held() - tally.held_ns;
+    return handed;
+}
+
+/// Counts the time of a hold that began at `began` as held and prints its line: when it began
+/// in the load, what it built and handed over, and what was left of the pipelines then.
+void PrecompileLoad::EndHold(u64 began, u32 built_before, u32 handed, size_t not_handed,
+                             size_t building) {
+    const u64 this_hold = CompilePolicy::Now() - began;
     tally.held_ns += this_hold;
     std::printf("Precompile load: hold %u at %llu ms of the load, %llu ms, %u entries built, %u "
                 "pipelines handed over, %zu not handed over and %zu building at its start\n",
@@ -462,6 +486,24 @@ void PrecompileLoad::FirstUse(u64 hash) {
     }
 }
 
+/// GetGraphicsPipeline, a pipeline miss: while loading, before the draw builds the pipeline
+/// itself, waits for the pipelines of the entries built that are not handed over or still
+/// building, as the end of a hold does, which may include this one. True when it held.
+bool PrecompileLoad::HoldPipelines() {
+    const bool now_loading = cache.DiskShadersActive() && Loading();
+    if (!PipelineHoldActive(now_loading, tally.held_ns,
+                            !selecting.empty() || !unmerged.empty() ||
+                                cache.LoadBuildsRunning() > 0)) {
+        return false;
+    }
+    const u64 began = CompilePolicy::Now();
+    ++tally.holds;
+    const size_t not_handed = selecting.size() + unmerged.size();
+    const size_t building = cache.LoadBuildsRunning();
+    EndHold(began, tally.built, WaitPipelines(began), not_handed, building);
+    return true;
+}
+
 /// GetGraphicsPipeline, a pipeline the loader is building: `wait` for it while loading, from
 /// what this loading state's holds left. Not a pending draw, and no grace wait.
 bool PrecompileLoad::Wait(const std::function<bool(u64 left_ns)>& wait) {
@@ -518,6 +560,10 @@ void PipelineCache::PrecompileLoadFirstUse(u64 hash) {
     if (precompile_load) {
         precompile_load->FirstUse(hash);
     }
+}
+
+bool PipelineCache::PrecompileLoadHoldPipelines() {
+    return precompile_load && precompile_load->HoldPipelines();
 }
 
 bool PipelineCache::PrecompileLoadWait(const std::function<bool(u64 left_ns)>& wait) {

@@ -1,7 +1,7 @@
 // Loader of the precompile diagnostics (vk_precompile_load.h): which list entries are built
-// while loading, when a draw's first use of a program waits for them and when a wait for their
-// pipelines ends, from fake sets of programs in use and found by the scan and fake scan pass
-// counters.
+// while loading, when a draw's first use of a program or a pipeline miss waits for them and when
+// a wait for their pipelines ends, from fake sets of programs in use and found by the scan and
+// fake scan pass counters.
 #include <cassert>
 #include <set>
 #include <vector>
@@ -78,6 +78,15 @@ void TestHoldOnlyWhileLoadingWithWorkAndTimeLeft() {
     assert(!HoldActive(true, 5 * Second, true, true)); // the load's holds took 5 s
 }
 
+void TestPipelineHoldOnlyWhileLoadingWithPipelinesPendingAndTimeLeft() {
+    constexpr u64 Second = 1'000'000'000;
+    assert(PipelineHoldActive(true, 0, true));
+    assert(!PipelineHoldActive(true, 0, false)); // every pipeline handed over and built
+    assert(!PipelineHoldActive(false, 0, true)); // never outside the loading state
+    assert(PipelineHoldActive(true, 5 * Second - 1, true));
+    assert(!PipelineHoldActive(true, 5 * Second, true)); // the load's holds took 5 s
+}
+
 void TestHoldWaitsForAPassThatStartedAfterItWokeTheScan() {
     // Pass 7 ran when the hold woke the scan (7 started, 6 finished): pass 8 is the one.
     assert(!WaitedPassDone(7, 6));
@@ -123,6 +132,7 @@ int main() {
     TestFreshCodeCountsOnlyForAnEntryWithANeededProgram();
     TestLastPassFoundWhileItRanOrUntilTheNextOneFinishes();
     TestHoldOnlyWhileLoadingWithWorkAndTimeLeft();
+    TestPipelineHoldOnlyWhileLoadingWithPipelinesPendingAndTimeLeft();
     TestHoldWaitsForAPassThatStartedAfterItWokeTheScan();
     TestHoldEndsWhenAPassFindsNothingNeededOrTimeIsUp();
     TestPipelineWaitEndsOnceAllAreHandedOverAndBuiltOrTimeIsUp();

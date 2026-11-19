@@ -923,6 +923,17 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     // gow3: the policy decides only for a missing build; one a worker already has stays with it.
     const bool background =
         AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect();
+    // gow3 (GOW3_PRECOMPILE_LOAD): a miss the draw would build itself and skip waits for the
+    // loader's pipelines not handed over yet, which may include this one; a key the loader did
+    // not build goes on to the draw's own build. Only `sel` gets here: the draw-preparation
+    // workers and the loader's own selections never call GetGraphicsPipeline.
+    if (background && !pending_graphics.contains(sel.graphics_key) &&
+        PrecompileLoadHoldPipelines()) {
+        if (const auto found = graphics_pipelines.find(sel.graphics_key);
+            found != graphics_pipelines.end()) {
+            return found->second.get();
+        }
+    }
     if (background || pending_graphics.contains(sel.graphics_key)) {
         if (background && !pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_gow3_snapshot_ns};

@@ -75,6 +75,16 @@ constexpr u64 HoldBudgetNs = 5'000'000'000;
     return loading && held_ns < HoldBudgetNs && (queued || last_pass_found);
 }
 
+/// Whether a draw's pipeline miss waits for the pipelines of the entries built (the loader is
+/// active): only while loading with hold time left (`held_ns` in this loading state), when
+/// some are not handed to the compile workers yet or still building (`pipelines_pending`). A
+/// first use alone does not cover them: the loader's own selections load programs into
+/// program_cache, so later draws of those programs have no first use.
+[[nodiscard]] constexpr bool PipelineHoldActive(bool loading, u64 held_ns,
+                                                bool pipelines_pending) {
+    return loading && held_ns < HoldBudgetNs && pipelines_pending;
+}
+
 /// Whether the pass a hold waits for has finished: one that started after the `started`
 /// passes that had when the hold woke the scan (ShaderScan::Started(), Passes()).
 [[nodiscard]] constexpr bool WaitedPassDone(u64 started, u64 finished) {

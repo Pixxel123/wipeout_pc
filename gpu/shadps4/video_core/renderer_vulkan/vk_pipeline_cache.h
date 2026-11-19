@@ -272,6 +272,10 @@ private:
     /// gow3 (GOW3_PRECOMPILE_LOAD): a draw of a pipeline the loader is building waits for it
     /// while loading, from the loading state's hold budget; true when it is built.
     bool WaitLoadBuild(const AsyncGraphicsCompilation& build);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): a draw's pipeline miss, before it builds the pipeline
+    /// itself: while loading, waits for the loader's pipelines not handed over or still
+    /// building, from the loading state's hold budget; true when it held. False without it.
+    bool PrecompileLoadHoldPipelines();
     /// gow3 (GOW3_PRECOMPILE_LOAD): `wait(left_ns)` while loading with hold budget left, the
     /// time it takes counted as held; false (no wait) otherwise, else what `wait` returned.
     bool PrecompileLoadWait(const std::function<bool(u64 left_ns)>& wait);
