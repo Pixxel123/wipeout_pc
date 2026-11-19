@@ -669,6 +669,12 @@ void PipelineCache::PublishShaders(bool wait) {
 }
 
 void PipelineCache::PublishGraphics(bool wait) {
+    // gow3: called for every draw. The map keeps the buckets of its largest size (about 2048
+    // after ~700 builds were pending at once), and begin() walks all of them to find the first
+    // entry, also when there is none: nothing pending, nothing to walk.
+    if (pending_graphics.empty()) {
+        return;
+    }
     for (auto it = pending_graphics.begin(); it != pending_graphics.end();) {
         auto build = it.value();
         if (wait) {
