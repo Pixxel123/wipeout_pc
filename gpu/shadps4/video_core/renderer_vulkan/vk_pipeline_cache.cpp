@@ -832,15 +832,13 @@ void PipelineCache::ReportCompilerStats() {
     if (compiler) {
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; fast first builds "
-                    "%u, optimised rebuilds: %u queued, %u swapped in, %zu pending, %.1f ms; "
-                    "pending pipelines %zu in %zu buckets\n",
+                    "%u, optimised rebuilds: %u queued, %u swapped in, %zu pending, %.1f ms\n",
                     capture_compiler->Depth(), compiler->Depth(),
                     capture_compiler->QueueWaitNs() / 1e6, compiler->QueueWaitNs() / 1e6,
                     compiler_pools.Retained(), g_gow3_pool_reuses.exchange(0),
                     g_gow3_fast_builds.exchange(0), g_gow3_rebuilds_queued.exchange(0),
                     g_gow3_rebuild_swaps.exchange(0), g_gow3_rebuilds_pending.load(),
-                    g_gow3_rebuild_ns.exchange(0) / 1e6, pending_graphics.size(),
-                    pending_graphics.bucket_count());
+                    g_gow3_rebuild_ns.exchange(0) / 1e6);
     }
 }
 
