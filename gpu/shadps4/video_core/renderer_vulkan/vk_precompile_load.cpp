@@ -26,6 +26,10 @@
 // is built and its pipelines too, and a draw of a pipeline the loader is building waits for it
 // (Wait); both at most 5 s per loading state together, and never outside one.
 //
+// Diagnostic GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1: the pump still builds entries but hands
+// none of their pipelines over, so only a hold does. It shows what the pump's handover adds to
+// the pipelines a scene starts with, against what the holds and the draws build themselves.
+//
 // Threads: the pump and the hold never run at once, both are on the GPU command thread. The
 // pump runs in Rasterizer::OnSubmit, which only Liverpool::Process calls, after a submission.
 // The hold runs in GetProgram for PipelineCache::sel only: draw-preparation workers and the
@@ -74,11 +78,22 @@ constexpr u64 ReportIntervalNs = 5'000'000'000; ///< the line of programs used
 constexpr auto HoldPoll = std::chrono::milliseconds(1);
 constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as not verified
 
+/// Whether GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1 keeps the pump from handing pipelines over.
+[[nodiscard]] bool NoPumpPipelinesRequested() {
+    const char* off = std::getenv("GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES");
+    return off && off[0] == '1';
+}
+
 } // namespace
 
 struct PrecompileLoad {
     PrecompileLoad(PipelineCache& cache_, ParsedList list_)
-        : cache{cache_}, list{std::move(list_)}, builder{cache, list, code} {
+        : cache{cache_}, list{std::move(list_)}, builder{cache, list, code},
+          no_pump_pipelines{NoPumpPipelinesRequested()} {
+        if (no_pump_pipelines) {
+            std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, only holds "
+                        "hand pipelines over\n");
+        }
         waiting.resize(list.keys.size());
         std::iota(waiting.begin(), waiting.end(), 0u);
         for (const auto& key : list.keys) {
@@ -105,6 +120,11 @@ private:
         u32 dropped = 0;       ///< pipeline selections that found no pipeline
         u32 have = 0;          ///< pipeline selections whose pipeline was built or building
         u64 published_before = 0, failed_before = 0; ///< the cache's load builds then
+        u64 began_ns = 0; ///< CompilePolicy::Now() when the loading state began
+        u32 holds = 0;    ///< Hold() calls
+        /// First uses of a needed list program that did not hold while built entries' pipelines
+        /// were not handed over or still building: the draw then builds its pipeline itself.
+        u32 unheld = 0;
         std::vector<std::pair<const char*, u32>> reasons;
     };
 
@@ -113,7 +133,7 @@ private:
     bool TakeFound();
     void Replan();
     void BuildReady(u64 until_ns);
-    void SelectPipelines(u64 until_ns);
+    u32 SelectPipelines(u64 until_ns);
     void Hold();
     void Merge();
     void ReportLoad() const;
@@ -138,6 +158,7 @@ private:
     std::unordered_set<u64> used;          ///< list programs first used since the load began
     std::unordered_set<u64> built;         ///< programs the loader wrote permutations of
     u64 next_report_ns = 0;
+    const bool no_pump_pipelines; ///< GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1
 };
 
 EntryPlan PrecompileLoad::Plan(u32 index) const {
@@ -160,6 +181,7 @@ bool PrecompileLoad::Loading() {
         ReportUsed();
         used.clear();
         tally = {};
+        tally.began_ns = CompilePolicy::Now();
         tally.passes_before = scan.Passes();
         tally.published_before = cache.load_builds_published;
         tally.failed_before = cache.load_builds_failed;
@@ -264,17 +286,20 @@ void PrecompileLoad::BuildReady(u64 until_ns) {
 }
 
 /// Hands built and merged entries' pipelines to the compile workers until `until_ns` or until
-/// their queue holds LoadQueueDepth tasks.
-void PrecompileLoad::SelectPipelines(u64 until_ns) {
+/// their queue holds LoadQueueDepth tasks. Returns how many entries it took off `selecting`.
+u32 PrecompileLoad::SelectPipelines(u64 until_ns) {
+    u32 taken = 0;
     while (!selecting.empty() && CompilePolicy::Now() < until_ns) {
         const auto step = builder.Pipeline(list.keys[selecting.front()]);
         if (step == PipelineStep::Full) {
             break; // again on a later call
         }
         selecting.pop_front();
+        ++taken;
         tally.dropped += step == PipelineStep::Dropped;
         tally.have += step == PipelineStep::Have;
     }
+    return taken;
 }
 
 /// Builds every queued entry, then has the scan run a pass that starts after that and builds
@@ -282,8 +307,15 @@ void PrecompileLoad::SelectPipelines(u64 until_ns) {
 /// loading state's holds took HoldBudgetNs; then merges, so the GetProgram this holds finds
 /// what was built in the store, hands the entries' pipelines to the compile workers and waits
 /// for them in the same budget, and publishes them. Not a pending draw, and no grace wait.
+/// Prints a line per hold: when it began in the load, what it built and handed over, and what
+/// was left of the pipelines then.
 void PrecompileLoad::Hold() {
     const u64 began = CompilePolicy::Now();
+    ++tally.holds;
+    const u32 built_before = tally.built;
+    const size_t not_handed = selecting.size() + unmerged.size();
+    const size_t building = cache.LoadBuildsRunning();
+    u32 handed = 0;
     const u64 until = began + (HoldBudgetNs - tally.held_ns);
     const auto held = [&] { return tally.held_ns + (CompilePolicy::Now() - began); };
     for (;;) {
@@ -302,7 +334,7 @@ void PrecompileLoad::Hold() {
     }
     Merge();
     for (;;) {
-        SelectPipelines(until);
+        handed += SelectPipelines(until);
         const bool left = !selecting.empty();
         const bool done = !left && cache.WaitLoadBuilds(until);
         if (PipelineWaitEnds(left, done, held())) {
@@ -313,7 +345,13 @@ void PrecompileLoad::Hold() {
         }
     }
     cache.PublishGraphics();
-    tally.held_ns = held();
+    const u64 this_hold = held() - tally.held_ns;
+    tally.held_ns += this_hold;
+    std::printf("Precompile load: hold %u at %llu ms of the load, %llu ms, %u entries built, %u "
+                "pipelines handed over, %zu not handed over and %zu building at its start\n",
+                tally.holds, static_cast<unsigned long long>((began - tally.began_ns) / 1'000'000),
+                static_cast<unsigned long long>(this_hold / 1'000'000), tally.built - built_before,
+                handed, not_handed, building);
 }
 
 /// Flushes the store and adds the permutations written since the last merge to its index; the
@@ -333,7 +371,8 @@ void PrecompileLoad::Merge() {
 
 /// The built entries' pipelines: built, dropped (a selection without one, a failed build) or
 /// left (built or building already, not handed over, or still building), which add up to the
-/// entries built.
+/// entries built; the left are split so a scene start that draws them itself shows why (taken by
+/// a draw first: its own build came first).
 void PrecompileLoad::ReportLoad() const {
     std::string reasons;
     for (const auto& [why, count] : tally.reasons) {
@@ -344,8 +383,9 @@ void PrecompileLoad::ReportLoad() const {
     }
     std::printf("Precompile load: %u entries built (%llu permutations), %u skipped, %u "
                 "rejected%s, %u with a program in use but untranslated, %u programs' code not "
-                "verified, %llu pipelines built, %llu dropped, %llu left, hold %llu ms, %llu "
-                "scan passes (last %llu ms)\n",
+                "verified, %llu pipelines built, %llu dropped, %llu left (%u taken by a draw "
+                "first, %zu not handed over, %zu still building), hold %llu ms, %llu scan passes "
+                "(last %llu ms), %u holds, %u first uses not held with pipelines not ready\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
                 tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -
@@ -354,9 +394,10 @@ void PrecompileLoad::ReportLoad() const {
                                                 tally.failed_before),
                 static_cast<unsigned long long>(tally.have + selecting.size() + unmerged.size() +
                                                 cache.LoadBuildsRunning()),
+                tally.have, selecting.size() + unmerged.size(), cache.LoadBuildsRunning(),
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
-                static_cast<unsigned long long>(scan.LastPassMs()));
+                static_cast<unsigned long long>(scan.LastPassMs()), tally.holds, tally.unheld);
 }
 
 /// Every 5 s outside a load, and once more as the next load begins, before it clears the
@@ -391,7 +432,9 @@ void PrecompileLoad::Pump() {
     const u64 until = CompilePolicy::Now() + PumpNs;
     TakeFound();
     BuildReady(until);
-    SelectPipelines(until);
+    if (!no_pump_pipelines) {
+        SelectPipelines(until);
+    }
 }
 
 /// GetProgram, a program not in program_cache: before the store is asked for it. Only a
@@ -407,11 +450,14 @@ void PrecompileLoad::FirstUse(u64 hash) {
         return;
     }
     TakeFound();
-    if (list_program && cache.ProgramNeeded(hash) &&
-        HoldActive(loading, tally.held_ns, !ready.empty(),
-                   LastPassFound(found_in, scan.Passes()))) {
+    const bool needed = list_program && cache.ProgramNeeded(hash);
+    if (needed && HoldActive(loading, tally.held_ns, !ready.empty(),
+                             LastPassFound(found_in, scan.Passes()))) {
         Hold();
     } else {
+        // Counted before the merge, which moves the unmerged entries to `selecting`.
+        tally.unheld += needed && (!selecting.empty() || !unmerged.empty() ||
+                                   cache.LoadBuildsRunning() > 0);
         Merge(); // nothing when nothing is unmerged
     }
 }
