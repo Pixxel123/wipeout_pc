@@ -700,8 +700,8 @@ void PrecompileLoad::ReportLoad() const {
                 "rejected%s, %u with a program in use but untranslated, %u programs' code not "
                 "verified, %llu pipelines built, %llu dropped, %llu left (%u taken by a draw "
                 "first, %zu not handed over, %zu still building), hold %llu ms, %llu scan passes "
-                "(last %llu ms), %u holds, variants of existing programs: %u added, %u left to "
-                "the game\n",
+                "(last %llu ms), %u holds, variants of existing programs: %u added, %u already "
+                "there, %u left to the game\n",
                 tally.built, static_cast<unsigned long long>(tally.permutations), tally.skipped,
                 tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -
@@ -714,7 +714,7 @@ void PrecompileLoad::ReportLoad() const {
                 static_cast<unsigned long long>(tally.held_ns / 1'000'000),
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
                 static_cast<unsigned long long>(scan.LastPassMs()), tally.holds,
-                builder.Variants().added, builder.Variants().left);
+                builder.Variants().added, builder.Variants().present, builder.Variants().left);
 }
 
 /// Every 5 s outside a load, and once more as the next load begins, before it clears the

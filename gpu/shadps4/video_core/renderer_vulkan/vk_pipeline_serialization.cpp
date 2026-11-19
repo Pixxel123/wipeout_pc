@@ -1616,7 +1616,8 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
 // game's own translation would take, so the store's names and pipeline keys stay those the game
 // would write; the SPIR-V before the meta, as the shader compiler writes them.
 bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
-                                      Shader::StageSpecialization&& spec, size_t& index_out) {
+                                      Shader::StageSpecialization&& spec, size_t& index_out,
+                                      bool& inserted_out) {
     const auto it_pgm = program_cache.find(hash);
     if (it_pgm == program_cache.end() || it_pgm->second->pending) {
         return false; // a pending translation takes the next index
@@ -1626,9 +1627,13 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
     const auto it = std::ranges::find(program.modules, spec, &Program::Module::spec);
     if (it != program.modules.end()) {
         index_out = std::distance(program.modules.begin(), it);
+        inserted_out = false;
         return true;
     }
     const size_t index = NewPermutationIndex(program);
+    if (index >= Precompile::MaxPermutations) {
+        return false; // the entry build's Translate never reads an index this high
+    }
     // Not CompileSPV, which asserts: a module the driver refuses is left to the game.
     const vk::ShaderModuleCreateInfo module_info{
         .codeSize = spv.size() * sizeof(u32),
@@ -1646,6 +1651,7 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
         program.InsertPermut(module, std::move(spec), index);
     }
     index_out = index;
+    inserted_out = true;
     return true;
 }
 

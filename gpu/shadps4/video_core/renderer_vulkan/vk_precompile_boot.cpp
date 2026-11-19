@@ -83,7 +83,6 @@ using Shader::SwStage;
 
 constexpr u32 MaxDetails = 8;        ///< detail lines per reason
 constexpr auto ProgressInterval = std::chrono::seconds(1);
-constexpr size_t MaxPermutations = 64; ///< IndexDiskShaders reads indices below 64
 /// Variants one loader selection adds at most: a stage can miss once the one before it has its
 /// variant, and the motion pass selects every stage again.
 constexpr u32 MaxEntryVariants = 4;
@@ -288,7 +287,7 @@ struct PrecompileBoot {
 
 private:
     void SetEntry(const RecordedKey& key);
-    bool AddVariant(const PrepWorker& worker);
+    bool AddVariant(const PrepWorker& worker, bool& present);
     std::optional<Reject> Select(const RecordedKey& key, Shadow& shadow);
     PipelineCache::Result Bind(const Shader::ShaderParams& params,
                                Shader::Backend::Bindings& binding);
@@ -547,7 +546,12 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, PipelineTrace* tra
                 why = worker.failed && worker.failure ? worker.failure : "selection failed";
                 why_stage = worker.failed && worker.failure ? std::optional{worker.failed_stage}
                                                             : std::nullopt;
-                if (!worker.missing_spec || added == MaxEntryVariants) {
+                if (!worker.missing_spec) {
+                    break;
+                }
+                if (added == MaxEntryVariants) {
+                    ++variants.left;
+                    why = "variant left to the game: 4 added already";
                     break;
                 }
                 // In program_cache: the lookup just found it there.
@@ -564,12 +568,13 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, PipelineTrace* tra
                     SetEntry(key);
                 }
                 why = VariantLeft(Reject::Faulted);
-                if (!AddVariant(worker)) {
+                bool present = false;
+                if (!AddVariant(worker, present)) {
                     why = left_why;
                     break;
                 }
                 --variants.left;
-                ++variants.added;
+                ++(present ? variants.present : variants.added);
             }
         } catch (...) {
             step = PipelineStep::Dropped;
@@ -801,7 +806,7 @@ std::optional<std::vector<u32>> PrecompileBoot::TranslateChecked(
 /// would give it (InsertLoadVariant). False, with `left_why`, when a check failed or the program
 /// did not take it; the entry does not stop. Nothing of the rebuild's own is touched: programs,
 /// written, permutations.
-bool PrecompileBoot::AddVariant(const PrepWorker& worker) {
+bool PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) {
     const auto& lookup = *worker.missing_spec;
     const auto& looked_up = *lookup.info; // the worker's copy of the program's Info
     const auto* base = reinterpret_cast<const u32*>(looked_up.pgm_base);
@@ -829,10 +834,13 @@ bool PrecompileBoot::AddVariant(const PrepWorker& worker) {
         return false;
     }
     size_t index = 0;
-    if (!cache.InsertLoadVariant(params.hash, std::move(*spv), std::move(spec), index)) {
+    bool inserted = false;
+    if (!cache.InsertLoadVariant(params.hash, std::move(*spv), std::move(spec), index,
+                                 inserted)) {
         left_why = "variant left to the game: the program did not take it";
         return false;
     }
+    present = !inserted;
     return true;
 }
 
