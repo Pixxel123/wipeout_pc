@@ -285,6 +285,9 @@ struct PrecompileBoot {
     /// The loader's: a selection's missing variant is added (GOW3_PRECOMPILE_LOAD_VARIANTS).
     bool variants_on = false;
     VariantCounts variants; ///< the loader's selections' variants, added and left to the game
+    /// The loader's: per program hash, the specs of variants AddVariant could not add in this
+    /// loading state, which are not translated again in it.
+    std::unordered_map<u64, std::vector<Shader::StageSpecialization>> failed_variants;
 
 private:
     void SetEntry(const RecordedKey& key);
@@ -491,7 +494,9 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 /// translation is pending, or a read outside the recorded words drops it. A missing variant
 /// (permutation) of a program in use or saved is added (AddVariant), unless the game is
 /// translating one of that program or GOW3_PRECOMPILE_LOAD_VARIANTS=0, and the pipeline
-/// selected again; one not added, or one the program has an equal spec of already, drops it. It
+/// selected again; one not added, or one the program has an equal spec of already, drops it.
+/// One this loading state failed to add, or the game's own translation failed, is not
+/// translated again (failed_variants, the program's failed_permutations). It
 /// is handed to the compile workers inside the same recovery point, before the copy goes: the
 /// build's snapshot reads it. A variant after the first one of a call is added only before
 /// `until_ns` (CompilePolicy::Now), so one call does not run several translations; past it the
@@ -561,13 +566,25 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                     break;
                 }
                 // In program_cache: the lookup just found it there.
-                const auto& program = *cache.program_cache.at(worker.missing_spec->info->pgm_hash);
+                const auto& spec = *worker.missing_spec;
+                const u64 hash = spec.info->pgm_hash;
+                const auto& program = *cache.program_cache.at(hash);
                 const auto found = program.pending ? LoadVariant::Pending : LoadVariant::Missing;
                 ++variants.left; // also what a fault jumping out of AddVariant leaves
                 if (!AddsVariant(variants_on, found)) {
                     why = variants_on
                               ? "variant left to the game: the game's translation pending"
                               : "variant left to the game: GOW3_PRECOMPILE_LOAD_VARIANTS=0";
+                    break;
+                }
+                // Not translated again: one this loading state failed to add, or one the game's
+                // own translation failed (GetProgram's test).
+                const auto failed_here = failed_variants.find(hash);
+                if ((failed_here != failed_variants.end() &&
+                     std::ranges::find(failed_here->second, spec) != failed_here->second.end()) ||
+                    std::ranges::find(program.failed_permutations, spec) !=
+                        program.failed_permutations.end()) {
+                    why = "variant left to the game: failed before in this load";
                     break;
                 }
                 if (added > 0 && CompilePolicy::Now() >= until_ns) {
@@ -579,11 +596,18 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                     SetEntry(key);
                 }
                 why = VariantLeft(Reject::Faulted);
+                // Taken back once added: what a fault jumping out of AddVariant leaves too. The
+                // copy points at the program's Info, as the cache's failed_permutations do: the
+                // lookup's is the worker's, which the next selection resets.
+                auto& failed = failed_variants[hash];
+                failed.push_back(spec);
+                failed.back().info = &program.info;
                 bool present = false;
                 if (!AddVariant(worker, present)) {
                     why = left_why;
                     break;
                 }
+                failed.pop_back();
                 --variants.left;
                 if (present) {
                     // The program has an equal spec, yet the selection missed it: selecting
@@ -1044,6 +1068,10 @@ const VariantCounts& LoadBuilder::Variants() const {
 
 void LoadBuilder::ResetVariants() {
     boot->variants = {};
+}
+
+void LoadBuilder::ForgetFailedVariants() {
+    boot->failed_variants.clear();
 }
 
 bool PipelineCache::RebuildFromPrecompileList() {

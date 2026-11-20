@@ -166,8 +166,8 @@ enum class LoadVariant : u8 {
 }
 
 /// One loading state's variants of programs in use or saved: added by the loader, or left to
-/// the game (switched off, the game translating, the translation failed its checks or four were
-/// added already).
+/// the game (switched off, the game translating, the translation failed its checks or failed
+/// before in this loading state or the game's, or four were added already).
 struct VariantCounts {
     u32 added = 0, present = 0, left = 0; ///< `present`: the program had an equal spec already
 };
@@ -222,6 +222,8 @@ public:
     [[nodiscard]] const Precompile::VariantCounts& Variants() const;
     /// When a loading state begins.
     void ResetVariants();
+    /// When a loading state begins: the variants Pipeline could not add may be tried again.
+    void ForgetFailedVariants();
 
 private:
     std::unique_ptr<PrecompileBoot> boot;

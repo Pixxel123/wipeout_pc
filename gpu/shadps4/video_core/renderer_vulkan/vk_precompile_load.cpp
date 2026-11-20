@@ -453,6 +453,7 @@ bool PrecompileLoad::Loading() {
         used.clear();
         tally = {};
         builder.ResetVariants();
+        builder.ForgetFailedVariants();
         tally.began_ns = CompilePolicy::Now();
         tally.passes_before = scan.Passes();
         tally.published_before = cache.load_builds_published;
