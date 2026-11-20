@@ -291,7 +291,7 @@ struct PrecompileBoot {
 
 private:
     void SetEntry(const RecordedKey& key);
-    bool AddVariant(const PrepWorker& worker, bool& present);
+    const char* AddVariant(const PrepWorker& worker, bool& present);
     std::optional<Reject> Select(const RecordedKey& key, Shadow& shadow);
     PipelineCache::Result Bind(const Shader::ShaderParams& params,
                                Shader::Backend::Bindings& binding);
@@ -336,7 +336,6 @@ private:
     std::vector<std::pair<u64, u32>> recorded; ///< its words by guest address
     std::optional<Reject> stopped;
     std::string stop_detail;
-    const char* left_why = nullptr; ///< why AddVariant added nothing (VariantLeft)
 
     CrashMarker marker;
     u32 translated = 0, permutations = 0, skipped = 0;
@@ -496,7 +495,7 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 /// translating one of that program or GOW3_PRECOMPILE_LOAD_VARIANTS=0, and the pipeline
 /// selected again; one not added, or one the program has an equal spec of already, drops it.
 /// One this loading state failed to add, or the game's own translation failed, is not
-/// translated again (failed_variants, the program's failed_permutations). It
+/// translated again (failed_variants, the program's failed_permutations). The pipeline
 /// is handed to the compile workers inside the same recovery point, before the copy goes: the
 /// build's snapshot reads it. A variant after the first one of a call is added only before
 /// `until_ns` (CompilePolicy::Now), so one call does not run several translations; past it the
@@ -597,16 +596,17 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                 if (entry != &key) {
                     SetEntry(key);
                 }
+                // What a fault jumping out of AddVariant leaves.
                 why = VariantLeft(Reject::Faulted);
-                // Taken back once added: what a fault jumping out of AddVariant leaves too. The
+                // Taken back once added; a fault jumping out of AddVariant leaves it too. The
                 // copy points at the program's Info, as the cache's failed_permutations do: the
                 // lookup's is the worker's, which the next selection resets.
                 auto& failed = failed_variants[hash];
                 failed.push_back(spec);
                 failed.back().info = &program.info;
                 bool present = false;
-                if (!AddVariant(worker, present)) {
-                    why = left_why;
+                if (const char* left = AddVariant(worker, present)) {
+                    why = left;
                     break;
                 }
                 --variants.left;
@@ -848,10 +848,10 @@ std::optional<std::vector<u32>> PrecompileBoot::TranslateChecked(
 /// `worker`'s selection missed in a program in use or saved, translated from what that lookup
 /// read (the copy's code and its user data, led into the copy as Registers leads them), checked
 /// as an entry's translation is, then inserted into the program and saved at the index the game
-/// would give it (InsertLoadVariant). False, with `left_why`, when a check failed or the program
-/// did not take it; the entry does not stop. Nothing of the rebuild's own is touched: programs,
-/// written, permutations.
-bool PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) {
+/// would give it (InsertLoadVariant). Null when added or already there (`present`); else why
+/// it was left (VariantLeft), when a check failed or the program did not take it; the entry
+/// does not stop. Nothing of the rebuild's own is touched: programs, written, permutations.
+const char* PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) {
     const auto& lookup = *worker.missing_spec;
     const auto& looked_up = *lookup.info; // the worker's copy of the program's Info
     const auto* base = reinterpret_cast<const u32*>(looked_up.pgm_base);
@@ -875,18 +875,14 @@ bool PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) {
         Stop(Reject::Exception, "unknown");
     }
     if (!spv) {
-        left_why = VariantLeft(stopped.value_or(Reject::Faulted));
-        return false;
+        return VariantLeft(stopped.value_or(Reject::Faulted));
     }
-    size_t index = 0;
     bool inserted = false;
-    if (!cache.InsertLoadVariant(params.hash, std::move(*spv), std::move(spec), index,
-                                 inserted)) {
-        left_why = "variant left to the game: the program did not take it";
-        return false;
+    if (!cache.InsertLoadVariant(params.hash, std::move(*spv), std::move(spec), inserted)) {
+        return "variant left to the game: the program did not take it";
     }
     present = !inserted;
-    return true;
+    return nullptr;
 }
 
 /// Runs the program's walker on the stage's recorded user data and words alone, served by the

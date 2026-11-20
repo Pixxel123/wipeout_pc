@@ -1209,7 +1209,7 @@ void PipelineCache::IndexDiskShaders() {
         }
         const u64 hash = std::strtoull(name.substr(0, sep).c_str(), nullptr, 16);
         const auto idx = std::strtoul(name.c_str() + sep + 1, nullptr, 10);
-        if (hash && idx < 64) {
+        if (hash && idx < Precompile::MaxPermutations) {
             disk_permutations[hash].push_back(u32(idx));
         }
     }
@@ -1267,12 +1267,8 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
         // Not CompileSPV, which asserts: a saved blob the driver refuses is translated again.
         std::vector<u32> code(spv.size() / sizeof(u32));
         std::memcpy(code.data(), spv.data(), spv.size());
-        const vk::ShaderModuleCreateInfo module_info{
-            .codeSize = code.size() * sizeof(u32),
-            .pCode = code.data(),
-        };
-        const auto [module_result, module] = instance.GetDevice().createShaderModule(module_info);
-        if (module_result != vk::Result::eSuccess || !module) {
+        const auto module = TryCreateShaderModule(code);
+        if (!module) {
             reject();
             continue;
         }
@@ -1612,11 +1608,22 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
     return true;
 }
 
+// gow3 (GOW3_PRECOMPILE_LOAD): a module from SPIR-V without CompileSPV's assert; null when the
+// driver refuses it.
+vk::ShaderModule PipelineCache::TryCreateShaderModule(std::span<const u32> spv) {
+    const vk::ShaderModuleCreateInfo module_info{
+        .codeSize = spv.size() * sizeof(u32),
+        .pCode = spv.data(),
+    };
+    const auto [module_result, module] = instance.GetDevice().createShaderModule(module_info);
+    return module_result == vk::Result::eSuccess ? module : vk::ShaderModule{};
+}
+
 // gow3 (GOW3_PRECOMPILE_LOAD): as a merge into a program the game already uses, at the index the
 // game's own translation would take, so the store's names and pipeline keys stay those the game
 // would write; the SPIR-V before the meta, as the shader compiler writes them.
 bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
-                                      Shader::StageSpecialization&& spec, size_t& index_out,
+                                      Shader::StageSpecialization&& spec,
                                       bool& inserted_out) {
     const auto it_pgm = program_cache.find(hash);
     if (it_pgm == program_cache.end() || it_pgm->second->pending) {
@@ -1626,7 +1633,6 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
     spec.info = &program.info;
     const auto it = std::ranges::find(program.modules, spec, &Program::Module::spec);
     if (it != program.modules.end()) {
-        index_out = std::distance(program.modules.begin(), it);
         inserted_out = false;
         return true;
     }
@@ -1641,12 +1647,8 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
         return false;
     }
     // Not CompileSPV, which asserts: a module the driver refuses is left to the game.
-    const vk::ShaderModuleCreateInfo module_info{
-        .codeSize = spv.size() * sizeof(u32),
-        .pCode = spv.data(),
-    };
-    const auto [module_result, module] = instance.GetDevice().createShaderModule(module_info);
-    if (module_result != vk::Result::eSuccess || !module) {
+    const auto module = TryCreateShaderModule(spv);
+    if (!module) {
         return false;
     }
     Vulkan::SetObjectName(instance.GetDevice(), module, GetShaderName(hw_stage, hash, index));
@@ -1658,7 +1660,6 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
         program.InsertPermut(module, std::move(spec), index);
     }
     disk_stats.compiled += DiskShadersActive();
-    index_out = index;
     inserted_out = true;
     return true;
 }

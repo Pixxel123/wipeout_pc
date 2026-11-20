@@ -36,6 +36,12 @@ enum class EntryPlan {
     Build, ///< one is, or it is checked, and the code of every stage was found
 };
 
+/// Whether none of the entry's `stages` has a needed program (`needed(hash)`, as PlanEntry's).
+template <typename Stages, typename Needed>
+[[nodiscard]] bool NoNeededProgram(const Stages& stages, Needed&& needed) {
+    return std::ranges::none_of(stages, [&](const auto& stage) { return needed(stage.hash); });
+}
+
 /// `stages`: the entry's, by RecordedStage::hash. `needed(hash)`: the program is neither in use
 /// (program_cache) nor saved (the store's index); `found(hash)`: the scan found its code. A
 /// stage whose program is not needed is still selected (the next stage's spec depends on its
@@ -45,8 +51,7 @@ enum class EntryPlan {
 template <typename Stages, typename Needed, typename Found>
 [[nodiscard]] EntryPlan PlanEntry(bool check_existing, const Stages& stages, Needed&& needed,
                                   Found&& found) {
-    if (!check_existing &&
-        std::ranges::none_of(stages, [&](const auto& stage) { return needed(stage.hash); })) {
+    if (!check_existing && NoNeededProgram(stages, needed)) {
         return EntryPlan::Skip;
     }
     return std::ranges::all_of(stages, [&](const auto& stage) { return found(stage.hash); })

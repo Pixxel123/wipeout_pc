@@ -438,9 +438,8 @@ EntryPlan PrecompileLoad::Plan(u32 index) const {
 /// (check_existing) it is built all the same, only for the variants its pipeline selection adds
 /// to programs that exist, a checked entry.
 bool PrecompileLoad::Checked(u32 index) const {
-    return std::ranges::none_of(list.keys[index].stages, [this](const auto& stage) {
-        return cache.ProgramNeeded(stage.hash);
-    });
+    return NoNeededProgram(list.keys[index].stages,
+                           [this](u64 hash) { return cache.ProgramNeeded(hash); });
 }
 
 /// Whether the loading state holds now. A load that begins prints the last line of programs

@@ -54,6 +54,7 @@ void TestAnEntryWithNoNeededProgramIsCheckedOnceItsCodeIsFound() {
     assert(PlanEntry(true, stages, none, all) == EntryPlan::Build);
     assert(PlanEntry(true, stages, none, only1) == EntryPlan::Wait);
     assert(PlanEntry(true, stages, only1, all) == EntryPlan::Build);
+    assert(NoNeededProgram(stages, none) && !NoNeededProgram(stages, only1));
 }
 
 bool Lacked(const std::vector<Stage>& stages, const std::set<u64>& needed,
@@ -144,8 +145,10 @@ void TestCheckedEntriesGetABoundedShareOfAHold() {
 
 void TestVariantStepsAsideWhileTheGameTranslates() {
     assert(AddsVariant(true, LoadVariant::Missing));
-    assert(!AddsVariant(true, LoadVariant::Pending));   // the game's translation takes the next index
-    assert(!AddsVariant(false, LoadVariant::Missing));  // GOW3_PRECOMPILE_LOAD_VARIANTS=0
+    // The game's translation takes the next index.
+    assert(!AddsVariant(true, LoadVariant::Pending));
+    // GOW3_PRECOMPILE_LOAD_VARIANTS=0
+    assert(!AddsVariant(false, LoadVariant::Missing));
 }
 
 void TestThePumpBuildsNeededEntriesBeforeCheckedOnes() {
