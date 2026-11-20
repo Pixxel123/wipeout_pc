@@ -609,15 +609,16 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                     why = left_why;
                     break;
                 }
-                failed.pop_back();
                 --variants.left;
                 if (present) {
                     // The program has an equal spec, yet the selection missed it: selecting
-                    // again would miss it again.
+                    // again would miss it again. The spec stays recorded, so the next entry
+                    // that misses it does not translate it once more to find the same.
                     ++variants.present;
                     why = "variant left to the game: an equal spec already there";
                     break;
                 }
+                failed.pop_back();
                 ++variants.added;
             }
         } catch (...) {
