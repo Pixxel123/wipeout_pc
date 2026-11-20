@@ -151,10 +151,13 @@ void TestVariantStepsAsideWhileTheGameTranslates() {
 }
 
 void TestThePumpBuildsNeededEntriesBeforeCheckedOnes() {
-    assert(NextPumpQueue(true, true) == PumpQueue::Ready);
-    assert(NextPumpQueue(true, false) == PumpQueue::Ready);
-    assert(NextPumpQueue(false, true) == PumpQueue::Checking);
-    assert(NextPumpQueue(false, false) == PumpQueue::None);
+    assert(NextPumpQueue(true, true, true) == PumpQueue::Ready);
+    assert(NextPumpQueue(true, false, false) == PumpQueue::Ready);
+    assert(NextPumpQueue(false, true, false) == PumpQueue::Checking);
+    assert(NextPumpQueue(false, false, false) == PumpQueue::None);
+    // Checked entries left from an earlier load: last.
+    assert(NextPumpQueue(false, false, true) == PumpQueue::Stale);
+    assert(NextPumpQueue(false, true, true) == PumpQueue::Checking);
 }
 
 } // namespace

@@ -15,7 +15,9 @@
 // only binds its stages, writes nothing) once its code is found, so its pipeline selection can
 // add variants to the programs that exist; with GOW3_PRECOMPILE_LOAD_VARIANTS=0 it is skipped.
 // Such a checked entry waits in a queue of its own, which the pump builds only while no entry
-// with a needed program is queued, and a first use never holds for it (see below).
+// with a needed program is queued, and a first use never holds for it (see below). Checked
+// entries not built when the next loading state begins move to a third queue, which only the
+// pump builds, after this load's checked ones; no hold waits for them.
 //
 // Then each built entry's pipeline is selected again, lookup-only as a draw-preparation worker
 // does but reading its programs from the store (LoadBuilder::Pipeline), and handed to the
@@ -405,6 +407,9 @@ private:
     std::vector<u32> waiting; ///< entries the scan has not found every program of
     std::deque<u32> ready;    ///< entries with a needed program to build
     std::deque<u32> checking; ///< checked entries to build (no needed program), after `ready`
+    /// Checked entries still in `checking` when a loading state began: only the pump builds
+    /// them, after `checking`; no hold waits for them.
+    std::deque<u32> stale_checking;
     std::vector<u32> unmerged; ///< entries built since the last merge
     std::deque<u32> selecting; ///< entries built and merged whose pipeline is not handed over
     bool loading = false;
@@ -469,6 +474,10 @@ bool PrecompileLoad::Loading() {
         // Pipelines the last load did not hand over: the race has built what it drew of them,
         // and the rest would take this load's budget.
         selecting.clear();
+        // The last load's checked entries not built: the pump builds them after this load's,
+        // and they neither start nor lengthen a hold.
+        stale_checking.insert(stale_checking.end(), checking.begin(), checking.end());
+        checking.clear();
         Replan(); // the game has used programs since the last load
     } else {
         Merge(); // the load ended before the queue ran empty
@@ -539,8 +548,8 @@ void PrecompileLoad::Replan() {
     });
 }
 
-/// Builds the entries of `queue` (`ready` or `checking`) until `until_ns`; merges once `ready`
-/// is empty (also when an earlier call's builds are still unmerged).
+/// Builds the entries of `queue` (`ready`, `checking` or `stale_checking`) until `until_ns`;
+/// merges once `ready` is empty (also when an earlier call's builds are still unmerged).
 void PrecompileLoad::BuildReady(u64 until_ns, std::deque<u32>& queue) {
     while (!queue.empty() && CompilePolicy::Now() < until_ns) {
         const u32 index = queue.front();
@@ -792,8 +801,16 @@ void PrecompileLoad::Pump() {
         tally.pumped < most) {
         tally.pumped += SelectPipelines(until, most - tally.pumped);
     }
-    if (NextPumpQueue(!ready.empty(), !checking.empty()) == PumpQueue::Checking) {
+    switch (NextPumpQueue(!ready.empty(), !checking.empty(), !stale_checking.empty())) {
+    case PumpQueue::Checking:
         BuildReady(until, checking);
+        break;
+    case PumpQueue::Stale:
+        BuildReady(until, stale_checking);
+        break;
+    case PumpQueue::None:
+    case PumpQueue::Ready:
+        break;
     }
 }
 

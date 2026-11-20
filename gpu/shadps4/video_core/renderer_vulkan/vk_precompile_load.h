@@ -107,10 +107,13 @@ constexpr u64 CheckedHoldNs = 1'000'000'000;
 }
 
 /// Which queue the pump builds from next: entries with a needed program first, the checked ones
-/// after.
-enum class PumpQueue : u8 { None, Ready, Checking };
-[[nodiscard]] constexpr PumpQueue NextPumpQueue(bool ready, bool checking) {
-    return ready ? PumpQueue::Ready : checking ? PumpQueue::Checking : PumpQueue::None;
+/// after, those left over from an earlier loading state (`stale`) last.
+enum class PumpQueue : u8 { None, Ready, Checking, Stale };
+[[nodiscard]] constexpr PumpQueue NextPumpQueue(bool ready, bool checking, bool stale) {
+    return ready      ? PumpQueue::Ready
+           : checking ? PumpQueue::Checking
+           : stale    ? PumpQueue::Stale
+                      : PumpQueue::None;
 }
 
 /// Whether the pass a hold waits for has finished: one that started after the `started`
