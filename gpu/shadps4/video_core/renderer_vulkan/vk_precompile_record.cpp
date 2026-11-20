@@ -154,7 +154,7 @@ private:
     size_t list_entries;    ///< the file's key entries, kept and written: MaxListEntries
     RecordTally record{}, record_reported{};
     bool full_logged = false;
-    std::set<u64> keys;                ///< the file's keys, by StagesDigest
+    std::set<u64> keys;                ///< the file's keys, by EntryDigest
     std::unordered_set<u64> code_seen; ///< programs whose code is in the file or not found
     RecordSlots slots;
     std::unordered_set<u64> seen; ///< key hashes already captured or skipped
@@ -274,7 +274,7 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     }
     key.words = c.words;
     key.pointers = c.pointers;
-    const u64 content = StagesDigest(key.stages);
+    const u64 content = EntryDigest(key);
     const bool known = keys.contains(content);
     if (!known && list_entries >= MaxListEntries) {
         ListFull();

@@ -304,6 +304,26 @@ void TestStagesDigest() {
     assert(digest(one_stage) != digest(SampleKey(1)));
 }
 
+void TestEntryDigest() {
+    // The same stages drawn with another render state are another pipeline: both are kept.
+    auto other_state = SampleKey(1);
+    other_state.key_hash ^= 0xFF;
+    other_state.regs[0].second += 0x1000;
+    assert(StagesDigest(other_state.stages) == StagesDigest(SampleKey(1).stages));
+    assert(EntryDigest(other_state) != EntryDigest(SampleKey(1)));
+    // The same pipeline at other guest addresses is one entry.
+    auto moved = SampleKey(1);
+    moved.stages[0].user_data[0] += 0x40;
+    for (auto& word : moved.words) {
+        word.base += 0x40;
+    }
+    assert(EntryDigest(moved) == EntryDigest(SampleKey(1)));
+    // Other stages under the same key hash are another entry.
+    auto other_spec = SampleKey(1);
+    other_spec.stages[1].spec_digest ^= 1;
+    assert(EntryDigest(other_spec) != EntryDigest(SampleKey(1)));
+}
+
 void TestAppendKeeps() {
     // No file yet: written anew, without a reason to log.
     const auto none = PlanListAppend({});
@@ -317,7 +337,7 @@ void TestAppendKeeps() {
     Append(file, EncodeListEntry(SampleKey(2)));
     const auto plan = PlanListAppend(file);
     assert(plan.keep && !plan.why && plan.bytes == file.size());
-    assert(plan.keys == (std::set<u64>{StagesDigest(key.stages), StagesDigest(SampleKey(2).stages)}));
+    assert(plan.keys == (std::set<u64>{EntryDigest(key), EntryDigest(SampleKey(2))}));
     assert(plan.code == std::set<u64>{fragment});
     assert(plan.entries == 2);
     // The entry cap counts entries, the dedupe set distinct stages.
@@ -338,7 +358,7 @@ void TestAppendAfterCutOff() {
     for (size_t size = first_end + 1; size < whole.size(); ++size) {
         const auto plan = PlanListAppend(std::span<const u8>{whole.data(), size});
         assert(plan.keep && plan.bytes == first_end);
-        assert(plan.keys == std::set<u64>{StagesDigest(SampleKey(1).stages)});
+        assert(plan.keys == std::set<u64>{EntryDigest(SampleKey(1))});
         std::vector<u8> file{whole.begin(), whole.begin() + plan.bytes};
         Append(file, EncodeListEntry(SampleKey(3)));
         const auto list = ParseList(file, 100);
@@ -361,7 +381,7 @@ void TestAppendAfterBadSize() {
     std::memcpy(bad.data() + first_end, &size, sizeof(size));
     const auto plan = PlanListAppend(bad);
     assert(plan.keep && plan.bytes == first_end);
-    assert(plan.keys == std::set<u64>{StagesDigest(SampleKey(1).stages)});
+    assert(plan.keys == std::set<u64>{EntryDigest(SampleKey(1))});
     std::vector<u8> file{bad.begin(), bad.begin() + plan.bytes};
     Append(file, EncodeListEntry(SampleKey(4)));
     const auto list = ParseList(file, 100);
@@ -423,6 +443,7 @@ int main() {
     TestCodeBody();
     TestOldVersion();
     TestStagesDigest();
+    TestEntryDigest();
     TestAppendKeeps();
     TestAppendAfterCutOff();
     TestAppendAfterBadSize();

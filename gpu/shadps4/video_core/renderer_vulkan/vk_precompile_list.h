@@ -568,7 +568,7 @@ struct ParsedList {
 
 /// What the rebuild makes of an entry: per stage its program and spec. Entries alike in this
 /// translate to the same permutations, whatever their guest addresses and registers (which
-/// differ between launches): a recording keeps one of them.
+/// differ between launches).
 [[nodiscard]] inline u64 StagesDigest(std::span<const RecordedStage> stages) {
     std::vector<u8> bytes;
     for (const auto& stage : stages) {
@@ -576,6 +576,20 @@ struct ParsedList {
         ListDetail::Put(bytes, stage.hash);
         ListDetail::Put(bytes, stage.spec_digest);
     }
+    return Fnv1a(bytes);
+}
+
+/// What a recording keeps one entry of: the stages and the pipeline key the draw selected.
+/// Entries alike in their stages can still be different pipelines (another blend mode, another
+/// render target's samples or depth format), and the loader builds each entry's pipeline, so
+/// each is kept. The key hash holds permutation numbers, which follow the order of first use:
+/// it was the same in every launch looked at (the loader selects the recorded hash again), and
+/// a launch that numbers them otherwise records the pipeline a second time, which the loader
+/// finds built already.
+[[nodiscard]] inline u64 EntryDigest(const RecordedKey& key) {
+    std::vector<u8> bytes;
+    ListDetail::Put(bytes, StagesDigest(key.stages));
+    ListDetail::Put(bytes, key.key_hash);
     return Fnv1a(bytes);
 }
 
@@ -591,7 +605,7 @@ struct ListAppend {
     bool keep = false;          ///< append to the file; otherwise it is written anew
     const char* why = nullptr;  ///< why an existing file is written anew
     size_t bytes = 0;           ///< kept: the header and every entry that could be framed
-    std::set<u64> keys;         ///< kept keys, by StagesDigest
+    std::set<u64> keys;         ///< kept keys, by EntryDigest
     size_t entries = 0;         ///< kept key entries: what the entry cap counts
     std::set<u64> code;         ///< programs whose code is kept
 };
@@ -627,7 +641,7 @@ struct ListAppend {
     }
     plan.entries = list.keys.size();
     for (const auto& key : list.keys) {
-        plan.keys.insert(StagesDigest(key.stages));
+        plan.keys.insert(EntryDigest(key));
     }
     for (const auto& [hash, words] : list.code) {
         plan.code.insert(hash);
