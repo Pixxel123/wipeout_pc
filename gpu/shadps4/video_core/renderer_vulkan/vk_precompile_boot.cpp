@@ -17,13 +17,14 @@
 // the meta with the program's first Info), and nothing of the pipeline cache's own state is
 // touched: program_cache, the pending builds, the failure lists and the pipelines.
 //
-// Single-threaded and blocking, Linux only (the fault handler). Every SRT walker this rebuild
-// creates is watched: a read of one that faults is served as zero and rejects the entry, so the
-// SRT walker patch never rewrites a walker that the store then saves. A walker that reads a
-// word or follows a pointer the recording did not would read the shadow's gaps or a stale guest
-// address without faulting, so each walk is first run on the recorded words alone (CheckWalk).
-// An assert in the translator ends the game instead: a marker file beside the list names the
-// entry being translated, and the next start skips the entries it names (CrashMarker).
+// Single-threaded and blocking, on Linux and Windows (the fault handler, vk_precompile_guard).
+// Every SRT walker this rebuild creates is watched: a read of one that faults is served as zero
+// and rejects the entry, so the SRT walker patch never rewrites a walker that the store then
+// saves. A walker that reads a word or follows a pointer the recording did not would read the
+// shadow's gaps or a stale guest address without faulting, so each walk is first run on the
+// recorded words alone (CheckWalk). An assert in the translator ends the game instead: a marker
+// file beside the list names the entry being translated, and the next start skips the entries
+// it names (CrashMarker).
 //
 // Once the store has indexed what the rebuild wrote, the pipeline of each entry it built is
 // selected and handed to the compile workers as the loader's are (Pipeline, below), and the
@@ -291,6 +292,7 @@ struct PrecompileBoot {
     /// The rebuild's (Run): the entries it translated, by index, and how long it took.
     std::vector<u32> built;
     u64 run_ms = 0;
+    std::chrono::steady_clock::time_point started; ///< when Run began
     bool load = false; ///< the loader's build: programs not needed are only bound
     const char* log_name = "Precompile boot";
     /// The loader's: the permutations written, program hash and index.
@@ -353,7 +355,6 @@ private:
     CrashMarker marker;
     u32 translated = 0, permutations = 0, skipped = 0;
     std::array<u32, size_t(Reject::Count)> rejects{};
-    std::chrono::steady_clock::time_point started;
 };
 
 /// False when the crash marker cannot be written: then nothing is translated.
@@ -1152,16 +1153,23 @@ void PipelineCache::BuildPrecompilePipelines() {
     boot.variants_on = true;
     const u32 entries = u32(boot.built.size());
     const u64 published_before = load_builds_published, failed_before = load_builds_failed;
+    // One per fast first build published; nothing takes them while the pass runs.
+    const size_t rebuilds_before = waiting_rebuilds.size();
     constexpr u64 no_limit = std::numeric_limits<u64>::max();
     u32 had = 0, dropped = 0;
     const auto started = std::chrono::steady_clock::now();
     auto last_progress = started;
-    const auto progress = [&](u32 done) {
+    const auto progress = [&](const auto& print) {
         if (const auto now = std::chrono::steady_clock::now();
             now - last_progress >= PipelineProgressInterval) {
             last_progress = now;
-            std::printf("Precompile boot: pipelines: %u of %u entries\n", done, entries);
+            print();
         }
+    };
+    const auto entries_done = [&](u32 done) {
+        progress([&] {
+            std::printf("Precompile boot: pipelines: %u of %u entries\n", done, entries);
+        });
     };
     // A build counts as running until PublishGraphics takes it: wait, then publish.
     const auto wait_and_publish = [this] {
@@ -1169,31 +1177,49 @@ void PipelineCache::BuildPrecompilePipelines() {
         PublishGraphics();
     };
     for (u32 done = 0; done < entries; ++done) {
-        progress(done);
-        const auto& key = run->list.keys[boot.built[done]];
-        auto step = boot.Pipeline(key, no_limit, nullptr);
+        entries_done(done);
+        const u32 index = boot.built[done];
+        const auto& key = run->list.keys[index];
+        // Why the first MaxDetails were dropped.
+        PipelineTrace found;
+        PipelineTrace* const trace = dropped < MaxDetails ? &found : nullptr;
+        auto step = boot.Pipeline(key, no_limit, trace);
         while (step == PipelineStep::Full) {
-            progress(done);
+            entries_done(done);
             wait_and_publish();
-            step = boot.Pipeline(key, no_limit, nullptr);
+            found = {};
+            step = boot.Pipeline(key, no_limit, trace);
         }
         had += step == PipelineStep::Have;
-        dropped += step == PipelineStep::Dropped;
+        if (step == PipelineStep::Dropped && ++dropped <= MaxDetails) {
+            std::printf("Precompile boot: pipelines: entry %u (recorded key %016llx) dropped%s, "
+                        "%s\n",
+                        index, static_cast<unsigned long long>(key.key_hash),
+                        found.stage ? fmt::format(" at sw stage {}", *found.stage).c_str() : "",
+                        found.dropped ? found.dropped : "no reason given");
+        }
     }
     do {
-        progress(entries);
+        progress([&] {
+            std::printf("Precompile boot: pipelines: waiting for %zu builds\n",
+                        LoadBuildsRunning());
+        });
         wait_and_publish();
     } while (LoadBuildsRunning() > 0);
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - started)
-                        .count();
+    const auto now = std::chrono::steady_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count();
+    const auto total_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - boot.started).count();
     std::printf("Precompile boot: pipelines: %u entries, %llu built, %u built already, %u "
-                "dropped, %llu failed, %u variants added, in %lld ms (translation %llu ms)\n",
+                "dropped, %llu failed, %u variants added, %zu fast first builds waiting for "
+                "their optimised rebuild, in %lld ms (translation %llu ms), %lld ms since the "
+                "rebuild began\n",
                 entries,
                 static_cast<unsigned long long>(load_builds_published - published_before), had,
                 dropped, static_cast<unsigned long long>(load_builds_failed - failed_before),
-                boot.variants.added, static_cast<long long>(ms),
-                static_cast<unsigned long long>(boot.run_ms));
+                boot.variants.added, waiting_rebuilds.size() - rebuilds_before,
+                static_cast<long long>(ms), static_cast<unsigned long long>(boot.run_ms),
+                static_cast<long long>(total_ms));
 }
 
 } // namespace Vulkan
