@@ -144,6 +144,21 @@ constexpr size_t MaxTraceMatches = 4; ///< list entries a draw's trace line name
     return count == 1 ? 0 : count;
 }
 
+/// Probe switches (off unless set to a count > 0): GOW3_PRECOMPILE_LOAD_PUMP_MS, the pump's time
+/// per submission in place of PumpNs; GOW3_PRECOMPILE_LOAD_MERGE_EVERY, the pump and the holds
+/// merge after that many built entries and the pump hands pipelines over before it builds, so
+/// the compile workers start during a wave instead of after it.
+[[nodiscard]] u32 EnvCount(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value) {
+        return 0;
+    }
+    const std::string_view text{value};
+    u32 count = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), count);
+    return error == std::errc{} && end == text.data() + text.size() ? count : 0;
+}
+
 /// Off only for GOW3_PRECOMPILE_LOAD_VARIANTS=0.
 [[nodiscard]] bool VariantsRequested() {
     const char* value = std::getenv("GOW3_PRECOMPILE_LOAD_VARIANTS");
@@ -328,11 +343,16 @@ struct PrecompileLoad {
     PrecompileLoad(PipelineCache& cache_, ParsedList list_)
         : cache{cache_}, list{std::move(list_)}, variants{VariantsRequested()},
           builder{cache, list, code, variants}, pump_limit{PumpPipelineLimit()},
+          pump_ms{EnvCount("GOW3_PRECOMPILE_LOAD_PUMP_MS")},
+          merge_every{EnvCount("GOW3_PRECOMPILE_LOAD_MERGE_EVERY")},
           trace{TraceRequested() ? std::make_unique<LoadTrace>(list) : nullptr} {
         if (!variants) {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_VARIANTS=0, a variant missing from "
                         "a program in use or saved is left to the game\n");
         }
+        std::printf("Precompile load: probe switches: pump %llu ms a submission, merge every %u "
+                    "built entries (0 = when the queue is empty)\n",
+                    static_cast<unsigned long long>(PumpBudgetNs() / 1'000'000), merge_every);
         if (pump_limit == 0u) {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, only holds "
                         "hand pipelines over\n");
@@ -381,7 +401,20 @@ private:
         u32 holds = 0;    ///< Hold() and HoldPipelines() calls that held
         u32 pumped = 0;   ///< entries the pump's pipeline selections took off `selecting`
         std::vector<std::pair<const char*, u32>> reasons;
+        // Probe: where a loading state's time went (ms of the load are from began_ns).
+        u32 pumps = 0, pump_built = 0;
+        u64 pump_take_ns = 0, pump_build_ns = 0, pump_select_ns = 0, pump_max_ns = 0;
+        u64 wave_ns = 0;            ///< when `ready` first held 100 entries or more
+        u64 ready_empty_ns = 0;     ///< when `ready` was first empty after that
+        u64 selecting_empty_ns = 0; ///< when `selecting` and `unmerged` were first empty after that
+        u64 hold_build_ns = 0, hold_pass_ns = 0, hold_pipeline_ns = 0; ///< of the current hold
+        u32 hold_passes = 0;
     };
+
+    [[nodiscard]] u64 PumpBudgetNs() const {
+        return pump_ms ? u64{pump_ms} * 1'000'000 : PumpNs;
+    }
+    void ProbeMarks();
 
     [[nodiscard]] EntryPlan Plan(u32 index) const;
     [[nodiscard]] bool Checked(u32 index) const;
@@ -424,6 +457,8 @@ private:
     u64 next_report_ns = 0;
     /// GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES: pipelines the pump hands over per loading state
     const std::optional<u32> pump_limit;
+    const u32 pump_ms;     ///< GOW3_PRECOMPILE_LOAD_PUMP_MS, 0 = PumpNs
+    const u32 merge_every; ///< GOW3_PRECOMPILE_LOAD_MERGE_EVERY, 0 = merge when `ready` is empty
     const std::unique_ptr<LoadTrace> trace; ///< GOW3_PRECOMPILE_LOAD_TRACE, null without it
 };
 
@@ -581,6 +616,9 @@ void PrecompileLoad::BuildReady(u64 until_ns, std::deque<u32>& queue) {
             ++tally.built;
             tally.checked += checked;
             unmerged.push_back(index);
+            if (merge_every && unmerged.size() >= merge_every) {
+                Merge();
+            }
             continue;
         }
         if (no_info) {
@@ -658,7 +696,10 @@ void PrecompileLoad::Hold() {
     const u64 until = began + (HoldBudgetNs - tally.held_ns);
     const auto held = [&] { return tally.held_ns + (CompilePolicy::Now() - began); };
     for (;;) {
+        const u64 t0 = CompilePolicy::Now();
         BuildReady(until, ready);
+        const u64 t1 = CompilePolicy::Now();
+        tally.hold_build_ns += t1 - t0;
         if (held() >= HoldBudgetNs) {
             break;
         }
@@ -667,11 +708,16 @@ void PrecompileLoad::Hold() {
         while (!WaitedPassDone(started, scan.Passes()) && held() < HoldBudgetNs) {
             std::this_thread::sleep_for(HoldPoll);
         }
+        tally.hold_pass_ns += CompilePolicy::Now() - t1;
+        ++tally.hold_passes;
         if (HoldEnds(TakeFound(), held())) {
             break;
         }
     }
-    EndHold(began, built_before, WaitPipelines(began), not_handed, building);
+    const u64 t2 = CompilePolicy::Now();
+    const u32 handed = WaitPipelines(began);
+    tally.hold_pipeline_ns += CompilePolicy::Now() - t2;
+    EndHold(began, built_before, handed, not_handed, building);
 }
 
 /// The second half of a hold that began at `began`: merges, so a GetProgram finds what was
@@ -709,6 +755,32 @@ void PrecompileLoad::EndHold(u64 began, u32 built_before, u32 handed, size_t not
                 tally.holds, static_cast<unsigned long long>((began - tally.began_ns) / 1'000'000),
                 static_cast<unsigned long long>(this_hold / 1'000'000), tally.built - built_before,
                 handed, not_handed, building);
+    std::printf("Precompile load: probe hold %u: %llu ms building entries, %llu ms waiting for "
+                "%u scan passes, %llu ms on pipelines\n",
+                tally.holds, static_cast<unsigned long long>(tally.hold_build_ns / 1'000'000),
+                static_cast<unsigned long long>(tally.hold_pass_ns / 1'000'000), tally.hold_passes,
+                static_cast<unsigned long long>(tally.hold_pipeline_ns / 1'000'000));
+    tally.hold_build_ns = tally.hold_pass_ns = tally.hold_pipeline_ns = 0;
+    tally.hold_passes = 0;
+    ProbeMarks();
+}
+
+/// Probe: notes when the big wave arrived and when its queues first ran empty.
+void PrecompileLoad::ProbeMarks() {
+    const u64 at = CompilePolicy::Now() - tally.began_ns;
+    if (!tally.wave_ns) {
+        if (ready.size() >= 100) {
+            tally.wave_ns = at;
+        }
+        return;
+    }
+    if (!tally.ready_empty_ns && ready.empty()) {
+        tally.ready_empty_ns = at;
+    }
+    if (!tally.selecting_empty_ns && tally.ready_empty_ns && selecting.empty() &&
+        unmerged.empty()) {
+        tally.selecting_empty_ns = at;
+    }
 }
 
 /// Flushes the store and adds the permutations written since the last merge to its index; the
@@ -757,6 +829,15 @@ void PrecompileLoad::ReportLoad() const {
                 static_cast<unsigned long long>(scan.Passes() - tally.passes_before),
                 static_cast<unsigned long long>(scan.LastPassMs()), tally.holds,
                 builder.Variants().added, builder.Variants().present, builder.Variants().left);
+    const auto ms = [](u64 ns) { return static_cast<unsigned long long>(ns / 1'000'000); };
+    std::printf("Precompile load: probe: load %llu ms; %u pumps built %u entries, %llu ms taking "
+                "found code, %llu ms building, %llu ms selecting, longest pump %llu ms; wave of "
+                "100+ entries at %llu ms, queue empty at %llu ms, pipelines handed over at %llu "
+                "ms (0 = not before the scene)\n",
+                ms(CompilePolicy::Now() - tally.began_ns), tally.pumps, tally.pump_built,
+                ms(tally.pump_take_ns), ms(tally.pump_build_ns), ms(tally.pump_select_ns),
+                ms(tally.pump_max_ns), ms(tally.wave_ns), ms(tally.ready_empty_ns),
+                ms(tally.selecting_empty_ns));
 }
 
 /// Every 5 s outside a load, and once more as the next load begins, before it clears the
@@ -788,9 +869,24 @@ void PrecompileLoad::Pump() {
         }
         return;
     }
-    const u64 until = CompilePolicy::Now() + PumpNs;
+    const u64 p0 = CompilePolicy::Now();
+    const u64 until = p0 + PumpBudgetNs();
+    const u32 built_before = tally.built;
     TakeFound();
+    ProbeMarks();
+    const u64 p1 = CompilePolicy::Now();
+    u64 early_ns = 0;
+    if (merge_every) {
+        // Pipelines of the entries merged so far first, for half the time at most: it stops
+        // at once when the workers' queue is full.
+        if (const u32 most = pump_limit.value_or(std::numeric_limits<u32>::max());
+            tally.pumped < most) {
+            tally.pumped += SelectPipelines(p1 + PumpBudgetNs() / 2, most - tally.pumped);
+        }
+        early_ns = CompilePolicy::Now() - p1;
+    }
     BuildReady(until, ready);
+    const u64 p2 = CompilePolicy::Now();
     // Pipelines are handed over before a checked entry is built: the checked queue can hold
     // hundreds of entries, and the pipelines of the entries with a needed program must not
     // wait behind all of them. The handover stops when the workers' queue is full, which
@@ -800,6 +896,11 @@ void PrecompileLoad::Pump() {
         tally.pumped < most) {
         tally.pumped += SelectPipelines(until, most - tally.pumped);
     }
+    const u64 p3 = CompilePolicy::Now();
+    ++tally.pumps;
+    tally.pump_take_ns += p1 - p0;
+    tally.pump_build_ns += p2 - p1 - early_ns;
+    tally.pump_select_ns += p3 - p2 + early_ns;
     switch (NextPumpQueue(!ready.empty(), !checking.empty(), !stale_checking.empty())) {
     case PumpQueue::Checking:
         BuildReady(until, checking);
@@ -811,6 +912,11 @@ void PrecompileLoad::Pump() {
     case PumpQueue::Ready:
         break;
     }
+    const u64 p4 = CompilePolicy::Now();
+    tally.pump_build_ns += p4 - p3;
+    tally.pump_built += tally.built - built_before;
+    tally.pump_max_ns = std::max(tally.pump_max_ns, p4 - p0);
+    ProbeMarks();
 }
 
 /// GetProgram, a program not in program_cache: before the store is asked for it. Only a
@@ -857,6 +963,7 @@ bool PrecompileLoad::HoldPipelines() {
     const size_t building = cache.LoadBuildsRunning();
     // What is pending first: the checked queue can hold hundreds of entries.
     u32 handed = WaitPipelines(began);
+    tally.hold_pipeline_ns += CompilePolicy::Now() - began;
     const u64 left =
         CheckedHoldLeftNs(tally.held_ns + (CompilePolicy::Now() - began), tally.checked_held_ns);
     if (!checking.empty() && left > 0) {
@@ -864,8 +971,11 @@ bool PrecompileLoad::HoldPipelines() {
         const u32 checked_before = tally.built;
         BuildReady(checked_began + left, checking);
         tally.checked_held_ns += CompilePolicy::Now() - checked_began;
+        tally.hold_build_ns += CompilePolicy::Now() - checked_began;
         if (tally.built != checked_before) {
+            const u64 t = CompilePolicy::Now();
             handed += WaitPipelines(began);
+            tally.hold_pipeline_ns += CompilePolicy::Now() - t;
         }
     }
     EndHold(began, built_before, handed, not_handed, building);
