@@ -92,7 +92,11 @@ struct RecordedStage {
 
 /// One new pipeline of the recording launch.
 struct RecordedKey {
-    u64 key_hash; ///< in the recording launch, for reference: permutation numbers change
+    /// The pipeline key's hash without its stage hashes (those hold permutation numbers, which
+    /// change between launches): the render state, which EntryDigest tells entries apart by.
+    /// Lists recorded before this hold the whole key's hash: record a new list instead of
+    /// appending to one of those, or every pipeline is written a second time.
+    u64 key_hash;
     u32 vertex_sgpr_offset;
     u32 instance_sgpr_offset;
     std::vector<std::pair<u32, u32>> regs; ///< nonzero register words: index, value
@@ -579,13 +583,10 @@ struct ParsedList {
     return Fnv1a(bytes);
 }
 
-/// What a recording keeps one entry of: the stages and the pipeline key the draw selected.
-/// Entries alike in their stages can still be different pipelines (another blend mode, another
-/// render target's samples or depth format), and the loader builds each entry's pipeline, so
-/// each is kept. The key hash holds permutation numbers, which follow the order of first use:
-/// it was the same in every launch looked at (the loader selects the recorded hash again), and
-/// a launch that numbers them otherwise records the pipeline a second time, which the loader
-/// finds built already.
+/// What a recording keeps one entry of: the stages and the rest of the pipeline key the draw
+/// selected (RecordedKey::key_hash). Entries alike in their stages can still be different
+/// pipelines (another blend mode, another render target's samples or depth format), and the
+/// loader builds each entry's pipeline, so each is kept.
 [[nodiscard]] inline u64 EntryDigest(const RecordedKey& key) {
     std::vector<u8> bytes;
     ListDetail::Put(bytes, StagesDigest(key.stages));

@@ -84,6 +84,7 @@ struct KeyCapture {
     std::unique_ptr<AmdGpu::Regs> regs;
     DrawIndirectParams draw_indirect_params;
     u64 key_hash;
+    u64 state_hash; ///< the key's hash without its stage hashes (RecordedKey::key_hash)
     std::vector<StageCapture> stages;
     std::vector<GuestWord> words;
     std::vector<GuestPointer> pointers;
@@ -216,6 +217,12 @@ void PrecompileRecord::Capture(PipelineCache& cache) {
     c.regs = std::make_unique<AmdGpu::Regs>(*sel.regs);
     c.draw_indirect_params = sel.draw_indirect_params;
     c.key_hash = key_hash;
+    // The stage hashes hold permutation numbers, which follow the order of first use and so
+    // differ between launches and tracks: the rest of the key is what tells two pipelines of
+    // the same stages apart in every launch.
+    auto state = sel.graphics_key;
+    state.stage_hashes.fill(0);
+    c.state_hash = std::hash<GraphicsPipelineKey>{}(state);
     for (u32 i = 0; i < MaxShaderStages; ++i) {
         const auto* info = sel.infos[i];
         if (!info) {
@@ -260,7 +267,7 @@ void PrecompileRecord::Record(const KeyCapture& c) {
         return;
     }
     RecordedKey key{};
-    key.key_hash = c.key_hash;
+    key.key_hash = c.state_hash;
     key.vertex_sgpr_offset = c.draw_indirect_params.vertex_sgpr_offset;
     key.instance_sgpr_offset = c.draw_indirect_params.instance_sgpr_offset;
     for (u32 i = 0; i < AmdGpu::Regs::NumRegs; ++i) {
