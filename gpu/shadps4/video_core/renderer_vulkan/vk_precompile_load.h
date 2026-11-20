@@ -64,6 +64,19 @@ template <typename Stages, typename Needed, typename Fresh>
 
 /// The holds of one loading state take at most this long together.
 constexpr u64 HoldBudgetNs = 5'000'000'000;
+/// Of that, a pipeline miss's hold builds checked entries (no needed program) at most this long
+/// per loading state together; the pump builds the rest.
+constexpr u64 CheckedHoldNs = 1'000'000'000;
+
+/// How long a pipeline miss's hold may still build checked entries: the smaller of what this
+/// loading state's holds (`held_ns`) left of HoldBudgetNs and what their checked builds
+/// (`checked_held_ns`) left of CheckedHoldNs, nothing when either is spent.
+[[nodiscard]] constexpr u64 CheckedHoldLeftNs(u64 held_ns, u64 checked_held_ns) {
+    if (held_ns >= HoldBudgetNs || checked_held_ns >= CheckedHoldNs) {
+        return 0;
+    }
+    return std::min(HoldBudgetNs - held_ns, CheckedHoldNs - checked_held_ns);
+}
 
 /// Whether the last finished scan pass found code an entry with a needed program lacked.
 /// `found_in`: ShaderScan::Started() when the loader last took such code (0: never);
@@ -84,9 +97,10 @@ constexpr u64 HoldBudgetNs = 5'000'000'000;
 /// Whether a draw's pipeline miss waits for the pipelines of the entries built (the loader is
 /// active): only while loading with hold time left (`held_ns` in this loading state), when
 /// some are not handed to the compile workers yet or still building, or checked entries (no
-/// needed program) wait to be built (`pipelines_pending`). A first use alone does not cover
-/// them: the loader's own selections load programs into program_cache, so later draws of those
-/// programs have no first use, and a checked entry has no program a first use waits for.
+/// needed program) wait to be built and CheckedHoldLeftNs is not spent (`pipelines_pending`).
+/// A first use alone does not cover them: the loader's own selections load programs into
+/// program_cache, so later draws of those programs have no first use, and a checked entry has
+/// no program a first use waits for.
 [[nodiscard]] constexpr bool PipelineHoldActive(bool loading, u64 held_ns,
                                                 bool pipelines_pending) {
     return loading && held_ns < HoldBudgetNs && pipelines_pending;

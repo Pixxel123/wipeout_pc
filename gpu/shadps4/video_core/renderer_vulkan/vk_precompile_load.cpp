@@ -37,10 +37,12 @@
 // selections put their programs in program_cache), so a draw's pipeline miss while built
 // entries' pipelines are not handed over or still building waits for them as the end of a hold
 // does (HoldPipelines); without it the scene's first draws build those pipelines themselves
-// and are skipped. That hold also builds the checked entries first, as their pipelines too are
-// ones a draw would otherwise build itself; a first use's hold does not, as a checked entry has
-// no program a first use waits for. A draw of a pipeline the loader is building waits for it
-// (Wait). All three at most 5 s per loading state together, and never outside one.
+// and are skipped. Once those are waited for, that hold also builds checked entries, as their
+// pipelines too are ones a draw would otherwise build itself, at most 1 s per loading state
+// (CheckedHoldNs), and waits for their pipelines; the pump builds the rest. A first use's hold
+// does not, as a checked entry has no program a first use waits for. A draw of a pipeline the
+// loader is building waits for it (Wait). All three at most 5 s per loading state together, and
+// never outside one.
 //
 // Diagnostic GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1: the pump still builds entries but hands
 // none of their pipelines over, so only a hold does. With a count N > 1 instead it hands at most
@@ -368,6 +370,7 @@ private:
         u32 unverified = 0; ///< list programs whose copies failed their checks
         u64 permutations = 0;
         u64 held_ns = 0;
+        u64 checked_held_ns = 0; ///< of `held_ns`, pipeline misses' holds building `checking`
         u64 passes_before = 0; ///< scan passes when the loading state began
         u32 dropped = 0;       ///< pipeline selections that found no pipeline
         u32 have = 0;          ///< pipeline selections whose pipeline was built or building
@@ -814,13 +817,17 @@ void PrecompileLoad::FirstUse(u64 hash) {
 }
 
 /// GetGraphicsPipeline, a pipeline miss: while loading, before the draw builds the pipeline
-/// itself, builds the checked entries (`checking`) and waits for the pipelines of the entries
-/// built that are not handed over or still building, as the end of a hold does, which may
-/// include this one; in this loading state's HoldBudgetNs. True when it held.
+/// itself, waits for the pipelines of the entries built that are not handed over or still
+/// building, as the end of a hold does, which may include this one; then builds checked entries
+/// (`checking`) for what CheckedHoldLeftNs leaves and waits for their pipelines too. What is
+/// left in `checking` stays for the pump. In this loading state's HoldBudgetNs. True when it
+/// held.
 bool PrecompileLoad::HoldPipelines() {
     const bool now_loading = cache.DiskShadersActive() && Loading();
+    const bool checked_left =
+        !checking.empty() && CheckedHoldLeftNs(tally.held_ns, tally.checked_held_ns) > 0;
     if (!PipelineHoldActive(now_loading, tally.held_ns,
-                            !checking.empty() || !selecting.empty() || !unmerged.empty() ||
+                            checked_left || !selecting.empty() || !unmerged.empty() ||
                                 cache.LoadBuildsRunning() > 0)) {
         return false;
     }
@@ -829,8 +836,20 @@ bool PrecompileLoad::HoldPipelines() {
     const u32 built_before = tally.built;
     const size_t not_handed = selecting.size() + unmerged.size();
     const size_t building = cache.LoadBuildsRunning();
-    BuildReady(began + (HoldBudgetNs - tally.held_ns), checking);
-    EndHold(began, built_before, WaitPipelines(began), not_handed, building);
+    // What is pending first: the checked queue can hold hundreds of entries.
+    u32 handed = WaitPipelines(began);
+    const u64 left =
+        CheckedHoldLeftNs(tally.held_ns + (CompilePolicy::Now() - began), tally.checked_held_ns);
+    if (!checking.empty() && left > 0) {
+        const u64 checked_began = CompilePolicy::Now();
+        const u32 checked_before = tally.built;
+        BuildReady(checked_began + left, checking);
+        tally.checked_held_ns += CompilePolicy::Now() - checked_began;
+        if (tally.built != checked_before) {
+            handed += WaitPipelines(began);
+        }
+    }
+    EndHold(began, built_before, handed, not_handed, building);
     return true;
 }
 

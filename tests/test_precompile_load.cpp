@@ -133,6 +133,15 @@ void TestBuildWaitOnlyWhileLoadingFromWhatTheHoldsLeft() {
     assert(HoldLeftNs(false, 0) == 0);         // never outside the loading state
 }
 
+void TestCheckedEntriesGetABoundedShareOfAHold() {
+    constexpr u64 S = 1'000'000'000;
+    assert(CheckedHoldLeftNs(0, 0) == 1 * S);
+    assert(CheckedHoldLeftNs(0, S / 2) == S / 2);
+    assert(CheckedHoldLeftNs(0, S) == 0);
+    assert(CheckedHoldLeftNs(5 * S - S / 4, 0) == S / 4); // the hold budget is the tighter one
+    assert(CheckedHoldLeftNs(5 * S, 0) == 0);
+}
+
 void TestVariantStepsAsideWhileTheGameTranslates() {
     assert(AddsVariant(true, LoadVariant::Missing));
     assert(!AddsVariant(true, LoadVariant::Pending));   // the game's translation takes the next index
@@ -164,6 +173,7 @@ int main() {
     TestHoldEndsWhenAPassFindsNothingNeededOrTimeIsUp();
     TestPipelineWaitEndsOnceAllAreHandedOverAndBuiltOrTimeIsUp();
     TestBuildWaitOnlyWhileLoadingFromWhatTheHoldsLeft();
+    TestCheckedEntriesGetABoundedShareOfAHold();
     TestVariantStepsAsideWhileTheGameTranslates();
     TestThePumpBuildsNeededEntriesBeforeCheckedOnes();
     return 0;
