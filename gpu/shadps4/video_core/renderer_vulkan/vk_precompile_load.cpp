@@ -85,11 +85,13 @@
 // Linux only (the scan); elsewhere the switch logs that it is not supported.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <limits>
@@ -104,6 +106,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/hash.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -240,6 +243,84 @@ std::atomic<u32> g_load_trace_frames{0};     ///< frame lines printed
     return std::to_string(ms) + " ms after the load ended";
 }
 
+/// The trace's draw line: the fields in which a draw's key and an entry's selected key differ,
+/// "name draw/entry" each, values in hex; a stage hash as its permutation number when it is
+/// one of `programs`' (SwStage index to program hash, 0 for none).
+[[nodiscard]] std::string KeyDiff(const GraphicsPipelineKey& draw, const GraphicsPipelineKey& entry,
+                                  const std::array<u64, MaxShaderStages>& programs) {
+    std::string text;
+    const auto hex = [](const void* data, size_t size) {
+        std::string out;
+        const auto* bytes = static_cast<const u8*>(data);
+        char two[4];
+        for (size_t i = size; i-- > 0;) { // little endian: most significant byte first
+            std::snprintf(two, sizeof(two), "%02x", bytes[i]);
+            out += two;
+        }
+        return out;
+    };
+    const auto add = [&](const std::string& name, const void* a, const void* b, size_t size) {
+        if (std::memcmp(a, b, size) != 0) {
+            text += (text.empty() ? "" : ", ") + name + " " + hex(a, size) + "/" + hex(b, size);
+        }
+    };
+    const auto permutation = [&](u32 stage, u64 stage_hash) -> std::string {
+        if (stage_hash == 0) {
+            return "none";
+        }
+        for (u64 index = 0; index < MaxPermutations; ++index) {
+            if (HashCombine(programs[stage], index) == stage_hash) {
+                return "perm " + std::to_string(index);
+            }
+        }
+        return "?";
+    };
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (draw.stage_hashes[i] != entry.stage_hashes[i]) {
+            text += (text.empty() ? "" : ", ") + std::string{StageName(i)} + " " +
+                    permutation(i, draw.stage_hashes[i]) + "/" +
+                    permutation(i, entry.stage_hashes[i]);
+        }
+    }
+#define KEY_FIELD(field) add(#field, &draw.field, &entry.field, sizeof(draw.field))
+#define KEY_ARRAY(field)                                                                           \
+    for (size_t i = 0; i < draw.field.size(); ++i) {                                               \
+        add(#field "[" + std::to_string(i) + "]", &draw.field[i], &entry.field[i],                 \
+            sizeof(draw.field[i]));                                                                \
+    }
+#define KEY_BITS(field)                                                                            \
+    if (draw.field != entry.field) {                                                               \
+        text += (text.empty() ? "" : ", ") + std::string{#field " "} +                             \
+                std::to_string(u32(draw.field)) + "/" + std::to_string(u32(entry.field));          \
+    }
+    KEY_ARRAY(vertex_buffer_formats)
+    KEY_FIELD(patch_control_points);
+    KEY_FIELD(num_color_attachments);
+    KEY_ARRAY(color_buffers)
+    KEY_ARRAY(blend_controls)
+    KEY_ARRAY(write_masks)
+    KEY_FIELD(cb_shader_mask);
+    KEY_FIELD(logic_op);
+    KEY_FIELD(num_samples);
+    KEY_FIELD(depth_samples);
+    KEY_ARRAY(color_samples)
+    KEY_FIELD(mrt_mask);
+    KEY_FIELD(motion_vectors);
+    KEY_BITS(z_format)
+    KEY_BITS(stencil_format)
+    KEY_BITS(depth_clamp_enable)
+    KEY_BITS(prim_type)
+    KEY_BITS(polygon_mode)
+    KEY_BITS(clip_space)
+    KEY_BITS(provoking_vtx_last)
+    KEY_BITS(depth_clip_enable)
+    KEY_BITS(ps_iter_samples)
+#undef KEY_FIELD
+#undef KEY_ARRAY
+#undef KEY_BITS
+    return text.empty() ? "no field (padding?)" : text;
+}
+
 /// GOW3_PRECOMPILE_LOAD_TRACE: what became of each list entry, and an index of the list's
 /// programs for a draw's line.
 struct LoadTrace {
@@ -260,6 +341,7 @@ struct LoadTrace {
         const char* why = nullptr;
         std::optional<u32> stage;
         std::optional<u64> key_hash;
+        std::vector<u8> key; ///< the selected GraphicsPipelineKey's bytes
     };
 
     explicit LoadTrace(const ParsedList& list) : entries(list.keys.size()) {
@@ -668,6 +750,7 @@ void PrecompileLoad::TraceSelection(u32 index, PipelineStep step, const Pipeline
     entry.why = found.dropped;
     entry.stage = found.stage;
     entry.key_hash = found.key_hash;
+    entry.key = found.key;
     if (step != PipelineStep::Dropped || trace->dropped_lines >= MaxTraceDropped) {
         return;
     }
@@ -994,8 +1077,10 @@ void PrecompileLoad::TraceDraw(const PipelineSelection& selection) {
     const u64 key_hash = std::hash<GraphicsPipelineKey>{}(selection.graphics_key);
     std::vector<std::pair<u32, u64>> stages;
     std::vector<u64> programs;
+    std::array<u64, MaxShaderStages> stage_programs{};
     for (u32 i = 0; i < MaxShaderStages; ++i) {
         if (selection.infos[i]) {
+            stage_programs[i] = selection.infos[i]->pgm_hash;
             stages.emplace_back(i, selection.infos[i]->pgm_hash);
             programs.push_back(selection.infos[i]->pgm_hash);
         }
@@ -1021,6 +1106,13 @@ void PrecompileLoad::TraceDraw(const PipelineSelection& selection) {
             if (entry.key_hash) {
                 list_text += " key " + Hex(*entry.key_hash) +
                              (*entry.key_hash == key_hash ? " same key" : " other key");
+                if (*entry.key_hash != key_hash &&
+                    entry.key.size() == sizeof(GraphicsPipelineKey)) {
+                    GraphicsPipelineKey entry_key;
+                    std::memcpy(&entry_key, entry.key.data(), sizeof(entry_key));
+                    list_text += " (draw/entry: " +
+                                 KeyDiff(selection.graphics_key, entry_key, stage_programs) + ")";
+                }
             }
         }
     } else {

@@ -549,6 +549,8 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                     if (trace) {
                         trace->key_hash =
                             std::hash<GraphicsPipelineKey>{}(selection.graphics_key);
+                        const auto* bytes = reinterpret_cast<const u8*>(&selection.graphics_key);
+                        trace->key.assign(bytes, bytes + sizeof(GraphicsPipelineKey));
                     }
                     step = cache.StartLoadPipeline(selection, worker, &why);
                     break;

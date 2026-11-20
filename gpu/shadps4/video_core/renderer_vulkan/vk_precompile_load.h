@@ -186,6 +186,7 @@ constexpr size_t MaxPermutations = 64;
 /// GOW3_PRECOMPILE_LOAD_TRACE: what a loader selection found besides its PipelineStep.
 struct PipelineTrace {
     std::optional<u64> key_hash;  ///< std::hash<GraphicsPipelineKey> of the key it selected
+    std::vector<u8> key;          ///< that key's bytes, for the draw line's field comparison
     const char* dropped = nullptr; ///< why, for PipelineStep::Dropped (a static text)
     std::optional<u32> stage;      ///< the SwStage `dropped` is about, when it is one stage's
 };
