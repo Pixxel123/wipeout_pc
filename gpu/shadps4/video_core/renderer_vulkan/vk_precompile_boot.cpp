@@ -25,6 +25,10 @@
 // An assert in the translator ends the game instead: a marker file beside the list names the
 // entry being translated, and the next start skips the entries it names (CrashMarker).
 //
+// Once the store has indexed what the rebuild wrote, the pipeline of each entry it built is
+// selected and handed to the compile workers as the loader's are (Pipeline, below), and the
+// start waits for them (BuildPrecompilePipelines); GOW3_PRECOMPILE_BOOT_PIPELINES=0 skips that.
+//
 // The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way, with
 // its own checked copies of the code the shader scan found in guest memory in place of the
 // list's, so a list without code works. Only programs the loader calls needed (neither in use
@@ -44,11 +48,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -84,6 +90,10 @@ using Shader::SwStage;
 
 constexpr u32 MaxDetails = 8;        ///< detail lines per reason
 constexpr auto ProgressInterval = std::chrono::seconds(1);
+constexpr auto PipelineProgressInterval = std::chrono::seconds(5);
+/// The pipeline pass waits for the compile workers this long at a time, then looks at their
+/// queue again (as the loader's HoldPoll): wait_for takes no unbounded time.
+constexpr u64 PipelineWaitNs = 1'000'000;
 /// Variants one loader selection adds at most: a stage can miss once the one before it has its
 /// variant, and the motion pass selects every stage again.
 constexpr u32 MaxEntryVariants = 4;
@@ -278,6 +288,9 @@ struct PrecompileBoot {
                                   const Shader::RuntimeInfo& runtime_info);
     PipelineStep Pipeline(const RecordedKey& key, u64 until_ns, PipelineTrace* trace);
 
+    /// The rebuild's (Run): the entries it translated, by index, and how long it took.
+    std::vector<u32> built;
+    u64 run_ms = 0;
     bool load = false; ///< the loader's build: programs not needed are only bound
     const char* log_name = "Precompile boot";
     /// The loader's: the permutations written, program hash and index.
@@ -381,9 +394,14 @@ bool PrecompileBoot::Run() {
                         marker.Path().c_str(), std::strerror(errno), index);
             break;
         }
-        Entry(index, key);
+        if (!Entry(index, key)) {
+            built.push_back(index);
+        }
     }
     marker.Finish();
+    run_ms = u64(std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started)
+                     .count());
     Report();
     return true;
 }
@@ -1075,6 +1093,19 @@ void LoadBuilder::ForgetFailedVariants() {
     boot->failed_variants.clear();
 }
 
+/// The rebuild with the list it refers to, which is declared first.
+struct PrecompileBootRun {
+    PrecompileBootRun(PipelineCache& cache, ParsedList&& list_, std::string marker_path)
+        : list{std::move(list_)}, boot{cache, list, list.code, std::move(marker_path)} {}
+
+    ParsedList list;
+    PrecompileBoot boot;
+};
+
+void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
+    delete run;
+}
+
 bool PipelineCache::RebuildFromPrecompileList() {
     const char* path = std::getenv("GOW3_PRECOMPILE_LIST");
     // With GOW3_PRECOMPILE_LOAD=1 the loader builds the list instead (it logs that).
@@ -1089,10 +1120,80 @@ bool PipelineCache::RebuildFromPrecompileList() {
     if (!parsed || !SetUpFaultGuard()) {
         return false;
     }
-    auto boot_run = std::make_unique<PrecompileBoot>(*this, *parsed, parsed->code,
-                                                     std::string{path} + ".boot");
-    return boot_run->Run();
+    // Kept for the pipeline pass (BuildPrecompilePipelines), which releases it.
+    PrecompileBootPtr run{
+        new PrecompileBootRun{*this, std::move(*parsed), std::string{path} + ".boot"}};
+    if (!run->boot.Run()) {
+        return false;
+    }
+    precompile_boot = std::move(run);
+    return true;
 #endif
+}
+
+/// Each entry the rebuild built, its pipeline selected from the store as the loader selects it
+/// (PrecompileBoot::Pipeline, the variant step included) and handed to the compile workers;
+/// while their queue is full (Full) this waits for them, publishes and tries the entry again.
+/// No time limit: the whole pass runs before the game does. Optimised rebuilds of fast first
+/// builds are not waited for; they run later on the low lane, as any other's do.
+void PipelineCache::BuildPrecompilePipelines() {
+    // Released when this returns, also with the pass off.
+    const PrecompileBootPtr run = std::move(precompile_boot);
+    if (!run) {
+        return;
+    }
+    if (const char* pipelines = std::getenv("GOW3_PRECOMPILE_BOOT_PIPELINES");
+        pipelines && std::string_view{pipelines} == "0") {
+        std::printf("Precompile boot: pipelines off (GOW3_PRECOMPILE_BOOT_PIPELINES=0)\n");
+        return;
+    }
+    auto& boot = run->boot;
+    // The loader's variant step, which only a loader object switches on otherwise.
+    boot.variants_on = true;
+    const u32 entries = u32(boot.built.size());
+    const u64 published_before = load_builds_published, failed_before = load_builds_failed;
+    constexpr u64 no_limit = std::numeric_limits<u64>::max();
+    u32 had = 0, dropped = 0;
+    const auto started = std::chrono::steady_clock::now();
+    auto last_progress = started;
+    const auto progress = [&](u32 done) {
+        if (const auto now = std::chrono::steady_clock::now();
+            now - last_progress >= PipelineProgressInterval) {
+            last_progress = now;
+            std::printf("Precompile boot: pipelines: %u of %u entries\n", done, entries);
+        }
+    };
+    // A build counts as running until PublishGraphics takes it: wait, then publish.
+    const auto wait_and_publish = [this] {
+        WaitLoadBuilds(CompilePolicy::Now() + PipelineWaitNs);
+        PublishGraphics();
+    };
+    for (u32 done = 0; done < entries; ++done) {
+        progress(done);
+        const auto& key = run->list.keys[boot.built[done]];
+        auto step = boot.Pipeline(key, no_limit, nullptr);
+        while (step == PipelineStep::Full) {
+            progress(done);
+            wait_and_publish();
+            step = boot.Pipeline(key, no_limit, nullptr);
+        }
+        had += step == PipelineStep::Have;
+        dropped += step == PipelineStep::Dropped;
+    }
+    do {
+        progress(entries);
+        wait_and_publish();
+    } while (LoadBuildsRunning() > 0);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+    std::printf("Precompile boot: pipelines: %u entries, %llu built, %u built already, %u "
+                "dropped, %llu failed, %u variants added, in %lld ms (translation %llu ms)\n",
+                entries,
+                static_cast<unsigned long long>(load_builds_published - published_before), had,
+                dropped, static_cast<unsigned long long>(load_builds_failed - failed_before),
+                boot.variants.added, static_cast<long long>(ms),
+                static_cast<unsigned long long>(boot.run_ms));
 }
 
 } // namespace Vulkan

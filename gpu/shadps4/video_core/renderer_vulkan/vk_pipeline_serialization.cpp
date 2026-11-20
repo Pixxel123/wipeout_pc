@@ -1185,6 +1185,9 @@ void PipelineCache::StartOnDemand() {
             if (rebuilt) {
                 db.Flush();
                 IndexDiskShaders();
+                // The pass's selections read programs from the store (DiskShadersActive).
+                disk_shaders = true;
+                BuildPrecompilePipelines();
             }
         } else {
             IndexDiskShaders();

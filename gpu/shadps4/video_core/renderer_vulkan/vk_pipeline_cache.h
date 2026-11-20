@@ -155,6 +155,14 @@ struct PrepWorker {
 
 struct PreparedDraw;
 
+/// gow3 (GOW3_PRECOMPILE_BOOT, vk_precompile_boot.cpp): the start-up rebuild and the list it
+/// translated, kept for its pipeline pass (PipelineCache::BuildPrecompilePipelines).
+struct PrecompileBootRun;
+struct PrecompileBootDeleter {
+    void operator()(PrecompileBootRun* run) const;
+};
+using PrecompileBootPtr = std::unique_ptr<PrecompileBootRun, PrecompileBootDeleter>;
+
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
@@ -246,6 +254,10 @@ private:
     /// gow3 diagnostic GOW3_PRECOMPILE_BOOT (vk_precompile_boot.cpp): translates a precompile
     /// list into the store after a recompiler change dropped its shaders; false when off.
     bool RebuildFromPrecompileList();
+    /// gow3 (GOW3_PRECOMPILE_BOOT): after RebuildFromPrecompileList and IndexDiskShaders, builds
+    /// the pipeline of every entry the rebuild built before the start goes on, unless
+    /// GOW3_PRECOMPILE_BOOT_PIPELINES=0; then releases the rebuild. Nothing without one.
+    void BuildPrecompilePipelines();
     Result BootProgram(PipelineSelection& sel, Shader::HwStage hw_stage, Shader::SwStage sw_stage,
                        const Shader::ShaderParams& params, Shader::Backend::Bindings& binding,
                        const Shader::RuntimeInfo& runtime_info);
@@ -384,6 +396,8 @@ private:
 
     PrecompileRecordPtr precompile; ///< gow3: the recorder, null unless GOW3_PRECOMPILE_RECORD
     PrecompileLoadPtr precompile_load; ///< gow3: the loader, null unless GOW3_PRECOMPILE_LOAD
+    /// gow3: the start-up rebuild until its pipeline pass ends, null otherwise.
+    PrecompileBootPtr precompile_boot;
     /// gow3 (GOW3_PRECOMPILE_LOAD): the loader's builds published and failed (PublishGraphics).
     u64 load_builds_published = 0, load_builds_failed = 0;
 
