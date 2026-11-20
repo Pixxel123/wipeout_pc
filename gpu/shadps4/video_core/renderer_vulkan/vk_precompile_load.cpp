@@ -8,7 +8,7 @@
 // may be writing or reusing that memory, and the copy is what gets translated, so nothing the
 // game does later reaches the translation. An entry with a needed program whose stages all have
 // a copy is built by the start-up rebuild's entry build (LoadBuilder) from the copies, which
-// writes the needed programs' permutations to the store as the rebuild does; at most 4 ms of
+// writes the needed programs' permutations to the store as the rebuild does; at most 16 ms of
 // entries per submission. When the queue runs empty after a build, the store is flushed and the new
 // permutations are added to its index, so a program's first use in this launch reads them
 // (LoadDiskProgram) instead of translating it. An entry with no needed program is built too (it
@@ -118,7 +118,11 @@ using namespace Precompile;
 
 namespace {
 
-constexpr u64 PumpNs = 4'000'000;               ///< queued entries one pump builds, at most
+/// Queued entries one pump builds, at most. The game loads a track's shaders in the last seconds
+/// of its loading screen: at 4 ms a short load ended with hundreds of entries unbuilt and their
+/// pipelines not handed over, and the scene's first draw held for 2-3 s; at 16 ms the queue is
+/// empty about 0.5 s after the shaders appear (GOW3_PRECOMPILE_LOAD_PUMP_MS to compare).
+constexpr u64 PumpNs = 16'000'000;
 constexpr u64 ReportIntervalNs = 5'000'000'000; ///< the line of programs used
 constexpr auto HoldPoll = std::chrono::milliseconds(1);
 constexpr u32 MaxFailedCopies = 2; ///< of a program: then its code counts as not verified
@@ -144,10 +148,8 @@ constexpr size_t MaxTraceMatches = 4; ///< list entries a draw's trace line name
     return count == 1 ? 0 : count;
 }
 
-/// Probe switches (off unless set to a count > 0): GOW3_PRECOMPILE_LOAD_PUMP_MS, the pump's time
-/// per submission in place of PumpNs; GOW3_PRECOMPILE_LOAD_MERGE_EVERY, the pump and the holds
-/// merge after that many built entries and the pump hands pipelines over before it builds, so
-/// the compile workers start during a wave instead of after it.
+/// A count > 0 from the environment, else 0. GOW3_PRECOMPILE_LOAD_PUMP_MS: the pump's time per
+/// submission in place of PumpNs.
 [[nodiscard]] u32 EnvCount(const char* name) {
     const char* value = std::getenv(name);
     if (!value) {
@@ -344,15 +346,13 @@ struct PrecompileLoad {
         : cache{cache_}, list{std::move(list_)}, variants{VariantsRequested()},
           builder{cache, list, code, variants}, pump_limit{PumpPipelineLimit()},
           pump_ms{EnvCount("GOW3_PRECOMPILE_LOAD_PUMP_MS")},
-          merge_every{EnvCount("GOW3_PRECOMPILE_LOAD_MERGE_EVERY")},
           trace{TraceRequested() ? std::make_unique<LoadTrace>(list) : nullptr} {
         if (!variants) {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_VARIANTS=0, a variant missing from "
                         "a program in use or saved is left to the game\n");
         }
-        std::printf("Precompile load: probe switches: pump %llu ms a submission, merge every %u "
-                    "built entries (0 = when the queue is empty)\n",
-                    static_cast<unsigned long long>(PumpBudgetNs() / 1'000'000), merge_every);
+        std::printf("Precompile load: pump %llu ms a submission\n",
+                    static_cast<unsigned long long>(PumpBudgetNs() / 1'000'000));
         if (pump_limit == 0u) {
             std::printf("Precompile load: GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES=1, only holds "
                         "hand pipelines over\n");
@@ -458,7 +458,6 @@ private:
     /// GOW3_PRECOMPILE_LOAD_NO_PUMP_PIPELINES: pipelines the pump hands over per loading state
     const std::optional<u32> pump_limit;
     const u32 pump_ms;     ///< GOW3_PRECOMPILE_LOAD_PUMP_MS, 0 = PumpNs
-    const u32 merge_every; ///< GOW3_PRECOMPILE_LOAD_MERGE_EVERY, 0 = merge when `ready` is empty
     const std::unique_ptr<LoadTrace> trace; ///< GOW3_PRECOMPILE_LOAD_TRACE, null without it
 };
 
@@ -616,9 +615,6 @@ void PrecompileLoad::BuildReady(u64 until_ns, std::deque<u32>& queue) {
             ++tally.built;
             tally.checked += checked;
             unmerged.push_back(index);
-            if (merge_every && unmerged.size() >= merge_every) {
-                Merge();
-            }
             continue;
         }
         if (no_info) {
@@ -875,23 +871,13 @@ void PrecompileLoad::Pump() {
     TakeFound();
     ProbeMarks();
     const u64 p1 = CompilePolicy::Now();
-    u64 early_ns = 0;
-    if (merge_every) {
-        // Pipelines of the entries merged so far first, for half the time at most: it stops
-        // at once when the workers' queue is full.
-        if (const u32 most = pump_limit.value_or(std::numeric_limits<u32>::max());
-            tally.pumped < most) {
-            tally.pumped += SelectPipelines(p1 + PumpBudgetNs() / 2, most - tally.pumped);
-        }
-        early_ns = CompilePolicy::Now() - p1;
-    }
     BuildReady(until, ready);
     const u64 p2 = CompilePolicy::Now();
     // Pipelines are handed over before a checked entry is built: the checked queue can hold
     // hundreds of entries, and the pipelines of the entries with a needed program must not
     // wait behind all of them. The handover stops when the workers' queue is full, which
     // leaves the checked entries the rest of the time. A selection that adds variants starts
-    // none after its first past `until`, but that one translation may overshoot the 4 ms.
+    // none after its first past `until`, but that one translation may overshoot the pump's time.
     if (const u32 most = pump_limit.value_or(std::numeric_limits<u32>::max());
         tally.pumped < most) {
         tally.pumped += SelectPipelines(until, most - tally.pumped);
@@ -899,8 +885,8 @@ void PrecompileLoad::Pump() {
     const u64 p3 = CompilePolicy::Now();
     ++tally.pumps;
     tally.pump_take_ns += p1 - p0;
-    tally.pump_build_ns += p2 - p1 - early_ns;
-    tally.pump_select_ns += p3 - p2 + early_ns;
+    tally.pump_build_ns += p2 - p1;
+    tally.pump_select_ns += p3 - p2;
     switch (NextPumpQueue(!ready.empty(), !checking.empty(), !stale_checking.empty())) {
     case PumpQueue::Checking:
         BuildReady(until, checking);
