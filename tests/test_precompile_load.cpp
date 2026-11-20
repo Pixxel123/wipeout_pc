@@ -50,7 +50,7 @@ void TestAnEntryWithNoNeededProgramIsCheckedOnceItsCodeIsFound() {
     const auto none = [](u64) { return false; };
     const auto all = [](u64) { return true; };
     const auto only1 = [](u64 h) { return h == 1; };
-    assert(PlanEntry(false, stages, none, all) == EntryPlan::Skip); // today's rule
+    assert(PlanEntry(false, stages, none, all) == EntryPlan::Skip); // variants off
     assert(PlanEntry(true, stages, none, all) == EntryPlan::Build);
     assert(PlanEntry(true, stages, none, only1) == EntryPlan::Wait);
     assert(PlanEntry(true, stages, only1, all) == EntryPlan::Build);
@@ -145,8 +145,6 @@ void TestCheckedEntriesGetABoundedShareOfAHold() {
 void TestVariantStepsAsideWhileTheGameTranslates() {
     assert(AddsVariant(true, LoadVariant::Missing));
     assert(!AddsVariant(true, LoadVariant::Pending));   // the game's translation takes the next index
-    assert(!AddsVariant(true, LoadVariant::Found));
-    assert(!AddsVariant(true, LoadVariant::NoProgram));
     assert(!AddsVariant(false, LoadVariant::Missing));  // GOW3_PRECOMPILE_LOAD_VARIANTS=0
 }
 

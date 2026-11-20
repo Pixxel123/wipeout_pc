@@ -153,12 +153,10 @@ enum class PipelineStep {
     Dropped, ///< not selected: a program or permutation is missing, or a read faulted
 };
 
-/// What a loader selection found of a stage's variant (permutation) in its program.
+/// What a loader selection found of a stage's variant (permutation) it missed in its program.
 enum class LoadVariant : u8 {
-    Found,     ///< the program has it
-    Missing,   ///< the program is in use or saved, without it
-    Pending,   ///< the program is in use and the game is translating a variant of it
-    NoProgram, ///< neither in use nor saved, or its first translation is pending
+    Missing, ///< the program is in use or saved, without it
+    Pending, ///< the program is in use and the game is translating a variant of it
 };
 
 /// Whether the loader translates a missing variant into the program and selects again: not
@@ -172,7 +170,9 @@ enum class LoadVariant : u8 {
 /// the game (switched off, the game translating, the translation failed its checks or failed
 /// before in this loading state or the game's, or four were added already).
 struct VariantCounts {
-    u32 added = 0, present = 0, left = 0; ///< `present`: the program had an equal spec already
+    /// `present`: the program had an equal spec already; `present` and `left` count entries
+    /// (selections), as each ends its selection.
+    u32 added = 0, present = 0, left = 0;
 };
 
 /// Permutations a program takes: IndexDiskShaders reads indices below it.

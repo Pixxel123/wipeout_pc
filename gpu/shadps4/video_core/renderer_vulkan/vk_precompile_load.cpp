@@ -744,7 +744,7 @@ void PrecompileLoad::ReportLoad() const {
                 "untranslated, %u programs' code not verified, %llu pipelines built, %llu "
                 "dropped, %llu left (%u taken by a draw first, %zu not handed over, %zu still "
                 "building), hold %llu ms, %llu scan passes (last %llu ms), %u holds, variants of "
-                "existing programs: %u added, %u already there, %u left to the game\n",
+                "existing programs: %u added, %u already there, %u entries left to the game\n",
                 tally.built, tally.checked, static_cast<unsigned long long>(tally.permutations),
                 tally.skipped, tally.rejected, reasons.c_str(), tally.no_info, tally.unverified,
                 static_cast<unsigned long long>(cache.load_builds_published -

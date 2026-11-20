@@ -1634,6 +1634,12 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
     if (index >= Precompile::MaxPermutations) {
         return false; // the entry build's Translate never reads an index this high
     }
+    // A shader patch for this permutation replaces the translation: CompileModule and the
+    // async build load it, so the game builds it.
+    const auto hw_stage = program.info.hw_stage;
+    if (EmulatorSettings.IsPatchShaders() && GetShaderPatch(hash, hw_stage, index, "spv")) {
+        return false;
+    }
     // Not CompileSPV, which asserts: a module the driver refuses is left to the game.
     const vk::ShaderModuleCreateInfo module_info{
         .codeSize = spv.size() * sizeof(u32),
@@ -1643,6 +1649,7 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
     if (module_result != vk::Result::eSuccess || !module) {
         return false;
     }
+    Vulkan::SetObjectName(instance.GetDevice(), module, GetShaderName(hw_stage, hash, index));
     RegisterShaderBinary(std::move(spv), hash, index);
     RegisterShaderMeta(program.info, spec.fetch_shader_data, spec, HashCombine(hash, u64(index)),
                        index);
@@ -1650,6 +1657,7 @@ bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
         std::unique_lock lock{programs_mutex};
         program.InsertPermut(module, std::move(spec), index);
     }
+    disk_stats.compiled += DiskShadersActive();
     index_out = index;
     inserted_out = true;
     return true;

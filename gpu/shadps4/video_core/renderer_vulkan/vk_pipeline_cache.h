@@ -264,9 +264,9 @@ private:
     /// gow3 (GOW3_PRECOMPILE_LOAD): a variant the loader translated for a program in use,
     /// inserted at the index the game would give it (NewPermutationIndex) and saved there.
     /// False, writing nothing, when the program is gone, has a translation pending, would take
-    /// an index of Precompile::MaxPermutations or more or its module cannot be created; an equal
-    /// spec already there gives its index, inserts nothing and sets `inserted_out` false.
-    /// GPU command thread.
+    /// an index of Precompile::MaxPermutations or more, has a shader patch at that index (with
+    /// patching on) or its module cannot be created; an equal spec already there gives its
+    /// index, inserts nothing and sets `inserted_out` false. GPU command thread.
     bool InsertLoadVariant(u64 hash, std::vector<u32>&& spv, Shader::StageSpecialization&& spec,
                            size_t& index_out, bool& inserted_out);
     /// gow3 (GOW3_PRECOMPILE_LOAD): GetProgram, a program not in program_cache; while loading

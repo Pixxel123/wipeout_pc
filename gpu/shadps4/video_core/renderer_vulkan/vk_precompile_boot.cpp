@@ -561,8 +561,10 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                     break;
                 }
                 if (added == MaxEntryVariants) {
+                    static const std::string most_added = fmt::format(
+                        "variant left to the game: {} added already", MaxEntryVariants);
                     ++variants.left;
-                    why = "variant left to the game: 4 added already";
+                    why = most_added.c_str();
                     break;
                 }
                 // In program_cache: the lookup just found it there.
