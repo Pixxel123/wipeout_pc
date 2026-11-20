@@ -414,7 +414,15 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     // gow3: the compiler threads always exist; the in-game menu switches async compilation live
     // (Gow3Settings::async_shaders, GOW3_ASYNC_SHADERS at start).
     {
-        const auto count = std::clamp(Gow3Threads::Available() / 2, 1u, 6u);
+        auto count = std::clamp(Gow3Threads::Available() / 2, 1u, 6u);
+        // Probe GOW3_COMPILE_WORKERS=<1-16>: the number of compile workers, to see what the
+        // loader's pipeline builds gain from more of them during a loading screen.
+        if (const char* env = std::getenv("GOW3_COMPILE_WORKERS")) {
+            if (const int asked = std::atoi(env); asked >= 1 && asked <= 16) {
+                count = unsigned(asked);
+                std::printf("Compile workers: %u (GOW3_COMPILE_WORKERS)\n", count);
+            }
+        }
         const auto capture_count = std::min(2u, std::max(1u, Gow3Threads::Available() / 4));
         for (unsigned i = 0; i < count; ++i) {
             auto [result, worker_cache] = instance.GetDevice().createPipelineCacheUnique({});
