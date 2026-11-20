@@ -593,16 +593,17 @@ void PrecompileLoad::BuildReady(u64 until_ns, std::deque<u32>& queue) {
 }
 
 /// Hands built and merged entries' pipelines to the compile workers until `until_ns`, until
-/// their queue holds LoadQueueDepth tasks or until it took `most` entries off `selecting`.
-/// Returns how many it took.
+/// their queue holds LoadQueueDepth tasks or until it took `most` entries off `selecting`; a
+/// selection adds no variant after its first past `until_ns` either (inside a hold that is the
+/// hold's bound). Returns how many it took.
 u32 PrecompileLoad::SelectPipelines(u64 until_ns, u32 most) {
     u32 taken = 0;
     while (!selecting.empty() && taken < most && CompilePolicy::Now() < until_ns) {
         const u32 index = selecting.front();
         PipelineTrace found;
-        const auto step = builder.Pipeline(list.keys[index], trace ? &found : nullptr);
+        const auto step = builder.Pipeline(list.keys[index], until_ns, trace ? &found : nullptr);
         if (step == PipelineStep::Full) {
-            break; // again on a later call
+            break; // again on a later call (the queue was full or time is up)
         }
         selecting.pop_front();
         ++taken;
@@ -784,7 +785,8 @@ void PrecompileLoad::Pump() {
     // Pipelines are handed over before a checked entry is built: the checked queue can hold
     // hundreds of entries, and the pipelines of the entries with a needed program must not
     // wait behind all of them. The handover stops when the workers' queue is full, which
-    // leaves the checked entries the rest of the time.
+    // leaves the checked entries the rest of the time. A selection that adds variants starts
+    // none after its first past `until`, but that one translation may overshoot the 4 ms.
     if (const u32 most = pump_limit.value_or(std::numeric_limits<u32>::max());
         tally.pumped < most) {
         tally.pumped += SelectPipelines(until, most - tally.pumped);

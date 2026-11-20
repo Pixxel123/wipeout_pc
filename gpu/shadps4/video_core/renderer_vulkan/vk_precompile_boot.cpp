@@ -66,6 +66,7 @@
 #include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/recompiler.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_precompile_guard.h"
@@ -275,7 +276,7 @@ struct PrecompileBoot {
     PipelineCache::Result Program(const Shader::ShaderParams& params, HwStage hw_stage,
                                   SwStage sw_stage, Shader::Backend::Bindings& binding,
                                   const Shader::RuntimeInfo& runtime_info);
-    PipelineStep Pipeline(const RecordedKey& key, PipelineTrace* trace);
+    PipelineStep Pipeline(const RecordedKey& key, u64 until_ns, PipelineTrace* trace);
 
     bool load = false; ///< the loader's build: programs not needed are only bound
     const char* log_name = "Precompile boot";
@@ -492,9 +493,13 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 /// translating one of that program or GOW3_PRECOMPILE_LOAD_VARIANTS=0, and the pipeline
 /// selected again; one not added, or one the program has an equal spec of already, drops it. It
 /// is handed to the compile workers inside the same recovery point, before the copy goes: the
-/// build's snapshot reads it. `trace` (GOW3_PRECOMPILE_LOAD_TRACE), when set, gets the key
-/// selected and why it was dropped.
-PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, PipelineTrace* trace) {
+/// build's snapshot reads it. A variant after the first one of a call is added only before
+/// `until_ns` (CompilePolicy::Now), so one call does not run several translations; past it the
+/// call returns Full and the entry is selected again later, the variants added staying. One
+/// translation may still run past `until_ns`, and past the pump's 4 ms. `trace`
+/// (GOW3_PRECOMPILE_LOAD_TRACE), when set, gets the key selected and why it was dropped.
+PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
+                                      PipelineTrace* trace) {
     if (cache.compiler->Depth() >= LoadQueueDepth) {
         return PipelineStep::Full;
     }
@@ -563,6 +568,11 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, PipelineTrace* tra
                     why = variants_on
                               ? "variant left to the game: the game's translation pending"
                               : "variant left to the game: GOW3_PRECOMPILE_LOAD_VARIANTS=0";
+                    break;
+                }
+                if (added > 0 && CompilePolicy::Now() >= until_ns) {
+                    --variants.left; // not left: selected again later
+                    step = PipelineStep::Full;
                     break;
                 }
                 if (entry != &key) {
@@ -1024,8 +1034,8 @@ std::vector<std::pair<u64, u32>> LoadBuilder::TakeWritten() {
     return std::exchange(boot->written, {});
 }
 
-PipelineStep LoadBuilder::Pipeline(const RecordedKey& key, PipelineTrace* trace) {
-    return boot->Pipeline(key, trace);
+PipelineStep LoadBuilder::Pipeline(const RecordedKey& key, u64 until_ns, PipelineTrace* trace) {
+    return boot->Pipeline(key, until_ns, trace);
 }
 
 const VariantCounts& LoadBuilder::Variants() const {

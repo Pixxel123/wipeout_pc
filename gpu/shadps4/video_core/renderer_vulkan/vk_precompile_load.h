@@ -146,7 +146,7 @@ constexpr size_t LoadQueueDepth = 48;
 enum class PipelineStep {
     Have,    ///< built or being built already
     Queued,  ///< handed to the compile workers
-    Full,    ///< the workers' queue holds LoadQueueDepth tasks: again later
+    Full,    ///< the workers' queue holds LoadQueueDepth tasks, or time is up: again later
     Dropped, ///< not selected: a program or permutation is missing, or a read faulted
 };
 
@@ -213,9 +213,10 @@ public:
     /// Entry `key`, built and its permutations in the store's index: its pipeline, selected
     /// and handed to the compile workers. Room in their queue (LoadQueueDepth) is checked first.
     /// A variant missing from a program in use or saved is translated into it and saved, and
-    /// the pipeline selected again. `trace`, when set, gets the key selected and why it was
-    /// dropped.
-    Precompile::PipelineStep Pipeline(const Precompile::RecordedKey& key,
+    /// the pipeline selected again; past `until_ns` (CompilePolicy::Now) no variant after the
+    /// first is added: Full, and the entry is selected again later. `trace`, when set, gets the
+    /// key selected and why it was dropped.
+    Precompile::PipelineStep Pipeline(const Precompile::RecordedKey& key, u64 until_ns,
                                       Precompile::PipelineTrace* trace = nullptr);
     /// The variants Pipeline added or left to the game since the last ResetVariants.
     [[nodiscard]] const Precompile::VariantCounts& Variants() const;
