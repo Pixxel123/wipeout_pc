@@ -3,6 +3,7 @@ vk_precompile_list.h: header, then entries of u32 size, FNV-1a 64, body)."""
 import contextlib
 import importlib.util
 import io
+import random
 import struct
 import tempfile
 import unittest
@@ -57,21 +58,30 @@ def blob(program, body=(1, 2, 3, 4)):
 
 
 def psarc(*files, block=64):
-    """A PSARC holding `files`: each file's first block stored (whole), the rest zlib."""
+    """A PSARC holding `files`: each block zlib, or stored when that is not smaller (a full block
+    stored is 0 in the size table, whose entries are as wide as the block size needs)."""
+    width = 2 if block <= 1 << 16 else 3
     toc, sizes, data = [], [], b''
     for file in files:
         toc.append((len(sizes), len(file), len(data)))
         for at in range(0, len(file), block):
             part = file[at:at + block]
-            packed = part if len(part) == block else zlib.compress(part)
-            sizes.append(0 if len(part) == block else len(packed))
+            packed = zlib.compress(part)
+            if len(packed) >= len(part):
+                packed = part
+            sizes.append(0 if len(packed) == block else len(packed))
             data += packed
-    toc_len = 32 + 30 * len(files) + 2 * len(sizes)
+    toc_len = 32 + 30 * len(files) + width * len(sizes)
     out = struct.pack('>4sI4sIIIII', b'PSAR', 0x10004, b'zlib', toc_len, 30, len(files), block, 0)
     for first, size, offset in toc:
         out += bytes(16) + struct.pack('>I', first) + size.to_bytes(5, 'big')
         out += (offset + toc_len).to_bytes(5, 'big')
-    return out + b''.join(struct.pack('>H', s) for s in sizes) + data
+    return out + b''.join(s.to_bytes(width, 'big') for s in sizes) + data
+
+
+def noise(size):
+    """Bytes zlib cannot shrink: a block of them is stored."""
+    return random.Random(size).randbytes(size)
 
 
 def run(*args):
@@ -140,11 +150,16 @@ class ListInfoTest(unittest.TestCase):
         k1, k2 = program_key(0x11, 0x22), program_key(0x22)
         data = header() + k1 + k2
         a, b = blob(0x11), blob(0x22, body=tuple(range(20)))
-        archive = psarc(bytes(40) + a + bytes(8) + b + bytes(30))
+        file = noise(48) + a + bytes(8) + b + bytes(30)
+        archive = psarc(file)
+        table = archive[62:62 + 2 * 4]
+        self.assertEqual(table[:2], bytes(2))  # the first block (noise and a's start) stored
+        self.assertTrue(all(0 < int.from_bytes(table[i:i + 2], 'big') < 64 for i in (2, 4)))
         status, out, dst = self.add_code(data, ('data00.psarc', archive))
         self.assertEqual(status, 0, out)
         self.assertIn('programs found: 2', out)
         self.assertIn('programs without code: 0', out)
+        self.assertNotIn('code records', out)  # only the add-code report
         result = dst.read_bytes()
         _, entries = info.read_list(result)
         self.assertEqual([e[0] for e in entries], [info.CODE, info.CODE, info.KEY, info.KEY])
@@ -180,6 +195,27 @@ class ListInfoTest(unittest.TestCase):
         self.assertIn('0x0000000000000033', out)
         _, entries = info.read_list(dst.read_bytes())
         self.assertEqual([e[0] for e in entries], [info.CODE, info.KEY])
+
+    def test_add_code_skips_bad_archive(self):
+        good = psarc(bytes(40) + blob(0x11))
+        status, out, dst = self.add_code(header() + program_key(0x11), ('data00.psarc', good),
+                                         ('data01.psarc', b''),
+                                         ('data02.psarc', b'NOPE' + good[4:]),
+                                         ('data03.psarc', good[:40]))
+        self.assertEqual(status, 0, out)
+        for name in ('data01', 'data02', 'data03'):
+            self.assertIn(f'{name}.psarc', out)
+        self.assertEqual(out.count('skipped: '), 3, out)
+        self.assertIn('programs found: 1', out)
+
+    def test_add_code_wide_block_table(self):
+        a = blob(0x11)
+        archive = psarc(bytes((128 << 10) - 24) + a + bytes(10), block=128 << 10)
+        status, out, dst = self.add_code(header() + program_key(0x11), ('data00.psarc', archive))
+        self.assertEqual(status, 0, out)
+        self.assertIn('programs found: 1', out)
+        _, entries = info.read_list(dst.read_bytes())
+        self.assertEqual(entries[0][1][28:], a)
 
     def test_add_code_refuses_list_with_code(self):
         status, out, dst = self.add_code(header() + code() + program_key(0x11),

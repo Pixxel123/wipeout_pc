@@ -16,8 +16,8 @@ byte. Exits 1 on a bad magic, version, layout or checksum, or an entry cut off. 
 --add-code writes a code-free list with each program's Code record before the first key that uses
 it, as the recorder does, the code read out of the game dirs' eboot.bin and *.psarc files (eboot.bin
 first, then the archives highest dataNN first, a later dir first; it stops once every program has
-code). Prints the programs found per file and the hashes of those without code, never the code.
-Exits 1 on a list that already holds Code records.
+code). Prints the programs found per file and the hashes of those without code, never the code;
+an archive it cannot read is named and skipped. Exits 1 on a list that already holds Code records.
 """
 import re
 import struct
@@ -166,32 +166,47 @@ def find_code(data, wanted, found, name):
 
 
 def psarc_files(path):
-    """Each file a PSARC (version 1.4, zlib) holds, unpacked, one at a time."""
-    with open(path, "rb") as f:
-        _, _, _, toc_len, entry_size, count, block, _ = struct.unpack(">4sI4sIIIII", f.read(32))
-        toc = f.read(toc_len - 32)
-        entries = []
-        for i in range(count):
-            e = toc[i * entry_size:(i + 1) * entry_size]
-            entries.append((struct.unpack_from(">I", e, 16)[0], int.from_bytes(e[20:25], "big"),
-                            int.from_bytes(e[25:30], "big")))
-        table = toc[count * entry_size:]
-        sizes = [int.from_bytes(table[i:i + 2], "big") for i in range(0, len(table) - 1, 2)]
-        for first, size, offset in entries:
-            f.seek(offset)
-            parts, got, index = [], 0, first
-            while got < size:
-                stored = sizes[index] or block
-                part = f.read(stored)
-                if stored != block:
-                    try:
-                        part = zlib.decompress(part)
-                    except zlib.error:  # a short last block kept as it is
-                        pass
-                parts.append(part)
-                got += len(part)
-                index += 1
-            yield b"".join(parts)[:size]
+    """Each file a PSARC (zlib, 30-byte TOC entries) holds, unpacked, one at a time. Raises
+    ListError naming the file when it is not such an archive or is cut off."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+            if len(head) < 32:
+                raise ListError(f"{path}: cut off")
+            magic, _, compression, toc_len, entry_size, count, block, _ = struct.unpack(
+                ">4sI4sIIIII", head)
+            if magic != b"PSAR" or compression != b"zlib" or entry_size != 30:
+                raise ListError(f"{path}: not a zlib PSARC")
+            if not 32 + count * entry_size <= toc_len <= Path(path).stat().st_size:
+                raise ListError(f"{path}: bad table of contents")
+            toc = f.read(toc_len - 32)
+            entries = []
+            for i in range(count):
+                e = toc[i * entry_size:(i + 1) * entry_size]
+                entries.append((struct.unpack_from(">I", e, 16)[0],
+                                int.from_bytes(e[20:25], "big"), int.from_bytes(e[25:30], "big")))
+            # A block size table entry is as wide as a block's size needs.
+            width = 2 if block <= 1 << 16 else 3 if block <= 1 << 24 else 4
+            table = toc[count * entry_size:]
+            sizes = [int.from_bytes(table[i:i + width], "big")
+                     for i in range(0, len(table) - width + 1, width)]
+            for first, size, offset in entries:
+                f.seek(offset)
+                parts, got, index = [], 0, first
+                while got < size:
+                    stored = sizes[index] or block
+                    part = f.read(stored)
+                    if stored != block:
+                        try:
+                            part = zlib.decompress(part)
+                        except zlib.error:  # a short last block kept as it is
+                            pass
+                    parts.append(part)
+                    got += len(part)
+                    index += 1
+                yield b"".join(parts)[:size]
+    except (struct.error, IndexError):
+        raise ListError(f"{path}: cut off") from None
 
 
 def game_files(dirs):
@@ -228,10 +243,13 @@ def add_code(data, out, dirs):
         if path.name == "eboot.bin":
             find_code(path.read_bytes(), wanted, found, str(path))
         else:
-            for file in psarc_files(path):
-                find_code(file, wanted, found, str(path))
-                if len(found) == len(wanted):
-                    break
+            try:
+                for file in psarc_files(path):
+                    find_code(file, wanted, found, str(path))
+                    if len(found) == len(wanted):
+                        break
+            except ListError as e:
+                print(f"skipped: {e}")
     with open(out, "wb") as f:
         f.write(data[:HEADER.size])
         written = set()
@@ -278,10 +296,11 @@ def main(argv):
     try:
         with open(args[0], "rb") as f:
             data = f.read()
-        version, keys, codes, sizes = summary(data)
         if dirs:
             add_code(data, out, dirs)
-        elif out:
+            return 0
+        version, keys, codes, sizes = summary(data)
+        if out:
             _, entries = read_list(data)
             with open(out, "wb") as f:
                 f.write(data[:HEADER.size])
