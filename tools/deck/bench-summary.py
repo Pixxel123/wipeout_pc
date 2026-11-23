@@ -10,7 +10,7 @@ from pathlib import Path
 COUNTDOWN = (500, 3000)       # ms after countdown_ms
 PHOTO = (3000, 23000)         # ms after the first steady photo-mode frame
 PHOTO_SEARCH = 6000           # ms before photo_ms where that frame is looked for (after the countdown)
-COUNTDOWN_MIN_DRAWS = 3500    # the grid is 4100-4250 draws a frame
+COUNTDOWN_MIN_DRAWS = 3500    # the grid averages about 3,700 draws a frame, alternating between about 3,400 and 4,000
 PHOTO_MIN_DRAWS = 3000        # photo mode on the grid is about 3217 with the menu open
 PHOTO_CONSTANT_SHARE = 0.9
 PHOTO_TOLERANCE = 0.01        # a steady frame is within 1 % of the span's median draws
@@ -134,7 +134,7 @@ def analyse_run(run_dir, marks):
     if not countdown:
         result['invalid'] = 'countdown cut short'
         return result
-    if statistics.median(countdown['per_frame_draws']) < COUNTDOWN_MIN_DRAWS:
+    if countdown['draws'] < COUNTDOWN_MIN_DRAWS:
         result['invalid'] = 'countdown not reached (no grid-sized frames at its mark)'
         return result
     p0 = steady_start(rows, max(start + marks['photo_ms'] - PHOTO_SEARCH, c0 + COUNTDOWN[1]))

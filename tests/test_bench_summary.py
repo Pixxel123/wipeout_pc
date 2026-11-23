@@ -54,6 +54,15 @@ class SpanMetrics(unittest.TestCase):
             self.assertAlmostEqual(photo['fps'], 60.0, delta=0.1)
             self.assertAlmostEqual(run['countdown']['draws'], 4260, delta=1)
 
+    def test_countdown_alternating_low_high_is_judged_by_its_average(self):
+        with tempfile.TemporaryDirectory() as root:
+            # 155 countdown frames at 16 ms, low on both ends: the median is the low value, the average is not
+            alternating = [3380 if i % 2 == 0 else 4000 for i in range(600, 900)]
+            frames = [100] * 600 + alternating + [2500] * 300 + [3434] * 1500
+            run = bench.analyse_run(make_run(root, '01-A', frames, frame_ms=16.0), MARKS)
+            self.assertIsNone(run['invalid'])
+            self.assertAlmostEqual(run['countdown']['draws'], 3690, delta=10)
+
     def test_run_that_missed_the_grid_is_invalid(self):
         with tempfile.TemporaryDirectory() as root:
             stuck = [126] * 3000  # stayed in a menu: no countdown, no photo mode
