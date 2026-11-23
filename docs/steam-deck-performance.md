@@ -86,7 +86,8 @@ the two specs differ). Run one warm-up pair first so the shader cache is filled.
 `python3 -I ~/diag/bench-summary.py <dir>` reads each run's `GOW3_FRAME_LOG` (`frames.log`),
 drops broken or short runs, and prints median and range per side for two spans:
 
-- countdown: `countdown_ms` +0.5-3 s, about 4150 draws per frame;
+- countdown: `countdown_ms` +0.5-3 s, about 3700 draws per frame on 0.2.76 (successive frames
+  alternate between about 3400 and 4000; about 4150 when the table below was measured);
 - photo mode: `photo_ms` +3-23 s, about 3217 draws per frame (a static grid scene, the steadier span).
 
 Metrics: FPS, draws per frame, stage A and stage B CPU time per draw (µs).
