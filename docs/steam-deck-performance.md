@@ -81,7 +81,7 @@ AppImage dirs), replays the route from gamepad connect and holds photo mode 30 s
 screenshots; add `GOW3_SCREENSHOT_EVERY=<seconds>` to a spec for some. Each run names itself in the top right corner, `<title> - test X of Y`
 (`GOW3_TEST_LABEL`; the title is `BENCH_TITLE`, default `Benchmark`, and `(A)`/`(B)` is added when
 the two specs differ). Run one warm-up pair first so the shader cache is filled. The Deck needs
-`tools/deck/{bench-run.sh,bench-summary.py,route-record.sh,stamp.py}` in `~/diag/` and the routes in
+`tools/deck/{bench-run.sh,bench-summary.py,power-log.sh,route-record.sh,stamp.py}` in `~/diag/` and the routes in
 `~/diag/routes/` (copied with scp).
 `python3 -I ~/diag/bench-summary.py <dir>` reads each run's `GOW3_FRAME_LOG` (`frames.log`),
 drops broken or short runs, and prints median and range per side for two spans:
@@ -90,6 +90,14 @@ drops broken or short runs, and prints median and range per side for two spans:
 - photo mode: `photo_ms` +3-23 s, about 3217 draws per frame (a static grid scene, the steadier span).
 
 Metrics: FPS, draws per frame, stage A and stage B CPU time per draw (µs).
+
+Each run folder also gets `power.log` from `tools/deck/power-log.sh` (`exp-run.sh` writes one too):
+a line a second with the time of day in ms, as in `frames.log`, the battery status, battery watts
+and APU watts. Battery watts are the whole system's draw only while the Deck is discharging; on
+mains they are the charge rate, and the APU figure (CPU and GPU alone) is the one to read.
+The battery reading follows a change in load about half a minute late and overshoots first, so it
+says nothing about the countdown span or a 30 s photo hold: hold a scene two minutes or more and
+read the last part. The APU figure follows within a second or two.
 
 A/A noise floor, same build on both sides, 4 + 4 runs (2026-11-04, upstream 0.2.59 plus the frame log):
 

@@ -8,7 +8,7 @@
 #   systemd-run --user --collect --unit wipeout-diag -E DISPLAY=:0 \
 #       -E XAUTHORITY=$(ls /run/user/1000/xauth_* | head -1) \
 #       bash -c "$HOME/diag/exp-run.sh GOW3_PREP_WORKERS=0 > $HOME/diag/exp.out 2>&1"
-# Output: ~/diag/runs/<stamp>/{game.log,threads.txt,env.txt}. BUILD is the extracted AppImage.
+# Output: ~/diag/runs/<stamp>/{game.log,threads.txt,power.log,env.txt}. BUILD is the extracted AppImage.
 set -u
 BUILD="${BUILD:-$HOME/Games/Wipeout Omega/deckperf/squashfs-root}"
 DATA="$HOME/.local/share/gow3"
@@ -38,7 +38,8 @@ env | grep '^GOW3_' | sort > "$RUN/env.txt"
   done
 ) > "$RUN/threads.txt" 2>&1 &
 SAMPLER=$!
-trap 'kill $SAMPLER 2>/dev/null' EXIT
+"$HOME/diag/power-log.sh" "$RUN/power.log" & POWER=$!
+trap 'kill $SAMPLER $POWER 2>/dev/null' EXIT
 echo "run: $RUN"
 cd "$BUILD" || exit 1
 PYTHONUNBUFFERED=1 ./AppRun --play 2>&1 | python3 -I -u "$HOME/diag/stamp.py" "$RUN/game.log" > /dev/null

@@ -7,6 +7,7 @@
 #   BENCH_TITLE=<text>: the game shows "<text> - test X of Y" in the top right during each run,
 #   with "(A)"/"(B)" added when the two specs differ
 #   No screenshots: for some, add GOW3_SCREENSHOT_EVERY=<seconds> to a spec
+#   Each run folder gets power.log, one line a second (power-log.sh)
 # Summarise with: python3 -I ~/diag/bench-summary.py <printed directory>
 set -u
 # Replayed input is not real input, so an idle suspend could cut a run short: re-exec under an inhibitor once.
@@ -25,7 +26,8 @@ pgrep -x gow3-probe >/dev/null && { echo "the game is running" >&2; exit 1; }
 OUT=$DIAG/bench/$(date +%Y%m%d-%H%M%S); mkdir -p "$OUT"
 cp "$ROUTE" "$ROUTE.marks" "$OUT/" || exit 1
 export DISPLAY=:0 XAUTHORITY=$(ls /run/user/1000/xauth_* | head -1)
-trap 'pkill -x gow3-probe; systemctl --user stop wipeout-bench 2>/dev/null; exit 130' INT TERM HUP
+POWER=
+trap 'kill $POWER 2>/dev/null; pkill -x gow3-probe; systemctl --user stop wipeout-bench 2>/dev/null; exit 130' INT TERM HUP
 run_one() { # <run dir> <spec> <label>
     local dir=$1 build=${2%%:*} envs=() e
     [ "$2" != "$build" ] && IFS=: read -ra envs <<<"${2#*:}"
@@ -40,6 +42,7 @@ run_one() { # <run dir> <spec> <label>
         "cd '$build' && PYTHONUNBUFFERED=1 ./AppRun --play 2>&1 | python3 -I -u '$DIAG/stamp.py' '$dir/game.log' > /dev/null"; then
         echo launchfail > "$dir/status"; sleep 10; return
     fi
+    "$DIAG/power-log.sh" "$dir/power.log" & POWER=$!
     local t=0 status=ok
     until grep -q "pad replay finished" "$dir/game.log" 2>/dev/null; do
         sleep 2; t=$((t + 2))
@@ -48,6 +51,7 @@ run_one() { # <run dir> <spec> <label>
     done
     [ $status = ok ] && sleep 30 # photo mode, measured by the summary
     echo "$status" > "$dir/status"
+    kill $POWER 2>/dev/null
     pkill -x gow3-probe
     local w=0 # bounded waits: SIGKILL and stop the unit if the game ignores SIGTERM; the unit name is reused
     while { pgrep -x gow3-probe >/dev/null || systemctl --user is-active --quiet wipeout-bench; } && [ $w -lt 30 ]; do sleep 1; w=$((w + 1)); done
