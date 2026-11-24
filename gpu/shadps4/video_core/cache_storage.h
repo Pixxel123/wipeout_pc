@@ -58,6 +58,8 @@ public:
     size_t CountBlobs(BlobType type);
     /// gow3: names (without extension) of the blobs of `type`; empty for the zip archive.
     std::vector<std::string> ListBlobs(BlobType type);
+    /// gow3: the file that holds a blob; empty for the zip archive.
+    [[nodiscard]] std::filesystem::path BlobPath(BlobType type, const std::string& name) const;
 
 private:
     std::jthread io_worker{};

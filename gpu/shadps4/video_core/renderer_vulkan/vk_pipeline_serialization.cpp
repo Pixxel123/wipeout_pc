@@ -734,8 +734,11 @@ void RegisterShaderMeta(const Shader::Info& info,
     spec.Serialize(ar);
     info.Serialize(ar);
 
-    Storage::DataBase::Instance().Save(Storage::BlobType::ShaderMeta,
-                                       fmt::format("{:#018x}", perm_hash), ar.TakeOff());
+    auto& db = Storage::DataBase::Instance();
+    const auto name = fmt::format("{:#018x}", perm_hash);
+    // gow3: before the queued write, so no read after it gets the old bytes from memory.
+    CachePreload::Saved(db.BlobPath(Storage::BlobType::ShaderMeta, name));
+    db.Save(Storage::BlobType::ShaderMeta, name, ar.TakeOff());
 }
 
 void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx) {
@@ -743,9 +746,11 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
         return;
     }
 
-    Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
-                                       std::move(spv));
+    auto& db = Storage::DataBase::Instance();
+    const auto name = fmt::format("{:#018x}_{}", pgm_hash, perm_idx);
+    // gow3: before the queued write, so no read after it gets the old bytes from memory.
+    CachePreload::Saved(db.BlobPath(Storage::BlobType::ShaderBinary, name));
+    db.Save(Storage::BlobType::ShaderBinary, name, std::move(spv));
 }
 
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
@@ -1171,17 +1176,20 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
     const bool compatible = CheckCacheProfile();
     auto& db = Storage::DataBase::Instance();
     const bool disk_on = DiskShadersWanted();
+    bool shaders_dropped = false;
     if (db.IsOpened() && db.ConcurrentReads() && !disk_on) {
         // This session numbers permutations by first use again: the store is rebuilt at the
         // next start with disk shaders on.
         ForgetDiskShaders();
     } else if (db.IsOpened() && db.ConcurrentReads()) {
         // gow3 (GOW3_PRECOMPILE_BOOT): a list that is not ready renews the store as without one.
-        BeginDiskShaders(compatible, true, progress);
+        shaders_dropped = BeginDiskShaders(compatible, true, progress);
     }
     db.FinishPreload();
     // gow3: the root must be the folder Storage::DataBase keeps its files in (user/cache/<serial>).
-    CachePreload::Start(PipelineBinaryDirectory().parent_path(), true);
+    // After a drop the list starts empty: it would only open files queued for deletion, and on
+    // Windows an open file can make that delete fail.
+    CachePreload::Start(PipelineBinaryDirectory().parent_path(), !shaders_dropped);
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
 }
@@ -1331,6 +1339,18 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
     auto program = std::make_unique<Program>();
     bool have_info = false;
     size_t inserted = 0;
+    // gow3: the bytes preloaded at start (CachePreload) if there are any, else the store's file;
+    // the checks below are the same for both.
+    enum class From { Memory, Disk };
+    const auto load = [&](Storage::BlobType type, const std::string& name,
+                          const std::filesystem::path& file, std::vector<u8>& data) {
+        if (auto bytes = CachePreload::Find(file)) {
+            data = std::move(*bytes);
+            return From::Memory;
+        }
+        db.Load(type, name, data);
+        return From::Disk;
+    };
     for (const u32 idx : found->second) {
         if (merged && idx < merged->modules.size() && merged->modules[idx].module) {
             continue; // a warm-up merged it from the same files
@@ -1342,9 +1362,11 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
             db.Remove(Storage::BlobType::ShaderMeta, meta_name);
             db.Remove(Storage::BlobType::ShaderBinary, spv_name);
         };
+        const auto meta_file = db.BlobPath(Storage::BlobType::ShaderMeta, meta_name);
+        const auto spv_file = db.BlobPath(Storage::BlobType::ShaderBinary, spv_name);
         std::vector<u8> meta, spv;
-        db.Load(Storage::BlobType::ShaderMeta, meta_name, meta);
-        db.Load(Storage::BlobType::ShaderBinary, spv_name, spv);
+        const From meta_from = load(Storage::BlobType::ShaderMeta, meta_name, meta_file, meta);
+        const From spv_from = load(Storage::BlobType::ShaderBinary, spv_name, spv_file, spv);
         disk_stats.spirv_bytes += spv.size();
         if (meta.empty() || !ValidSpirv(spv)) {
             reject();
@@ -1377,6 +1399,9 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
         disk_modules_unused.insert(module);
         ++inserted;
         ++disk_stats.permutations;
+        disk_stats.preloaded += meta_from == From::Memory && spv_from == From::Memory;
+        CachePreload::Used(meta_file);
+        CachePreload::Used(spv_file);
     }
     if (inserted) {
         program->modules.resize(std::max<size_t>(program->modules.size(), found->second.back() + 1));
@@ -1505,7 +1530,8 @@ void PipelineCache::ReportDiskShaders() {
     // Loaded modules no draw used yet stay alive with their program until exit.
     std::printf("Disk shaders: %llu programs, %llu permutations read (%.1f ms GPU thread, "
                 "%.1f MB SPIR-V), %llu rejected; %llu used, %llu compiled; %zu unused now, "
-                "%llu at most; pipeline keys %llu written, %llu already saved\n",
+                "%llu at most; pipeline keys %llu written, %llu already saved; permutations "
+                "from memory %llu, from disk %llu\n",
                 static_cast<unsigned long long>(s.programs),
                 static_cast<unsigned long long>(s.permutations), s.load_ns / 1e6,
                 s.spirv_bytes / 1048576.0, static_cast<unsigned long long>(s.rejected),
@@ -1513,7 +1539,9 @@ void PipelineCache::ReportDiskShaders() {
                 static_cast<unsigned long long>(s.compiled), disk_modules_unused.size(),
                 static_cast<unsigned long long>(s.unused_peak),
                 static_cast<unsigned long long>(s.keys_written),
-                static_cast<unsigned long long>(s.keys_skipped));
+                static_cast<unsigned long long>(s.keys_skipped),
+                static_cast<unsigned long long>(s.preloaded),
+                static_cast<unsigned long long>(s.permutations - s.preloaded));
 }
 
 // gow3: one cached shader stage read by the background warm-up, shared by every cached
