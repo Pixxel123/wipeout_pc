@@ -21,6 +21,11 @@ int main() {
     assert(!UseOnDemandPipelines(false, true, false, true));
     assert(!UseOnDemandPipelines(true, false, false, true));
     assert(!UseOnDemandPipelines(true, true, true, true));
+    // The start-up rebuild runs only when asked for, with a list, outside capture-only runs.
+    static_assert(RunsPrecompileBoot(true, true, false));
+    static_assert(!RunsPrecompileBoot(false, true, false));
+    static_assert(!RunsPrecompileBoot(true, false, false));
+    static_assert(!RunsPrecompileBoot(true, true, true));
     assert(WarmupThreadCount(1) == 1 && WarmupThreadCount(2) == 1 && WarmupThreadCount(4) == 1);
     assert(WarmupThreadCount(6) == 4 && WarmupThreadCount(8) == 6 && WarmupThreadCount(32) == 6);
 

@@ -18,6 +18,12 @@ inline bool UseOnDemandPipelines(bool binary_cache, bool supported, bool capture
     return background_warmup && binary_cache && supported && !capture_only;
 }
 
+/// gow3 (GOW3_PRECOMPILE_BOOT): whether the start-up rebuild from a precompile list runs before
+/// the warm-up when on-demand pipelines are off (pipeline binaries off, as on NVIDIA).
+constexpr bool RunsPrecompileBoot(bool boot_requested, bool list_present, bool capture_only) {
+    return boot_requested && list_present && !capture_only;
+}
+
 /// #149: set when the driver refuses a cached pipeline for lack of memory while preloading.
 /// The bulk warm-up then stops reading and building: each further build would only fight the
 /// game for what is left, and the rest compile when the game needs them. Results are VkResult

@@ -85,6 +85,15 @@ std::vector<u8> DiskShaderMarker() {
                                     Serialization::ShaderMetaVersion);
     return {marker.begin(), marker.end()};
 }
+/// gow3 (GOW3_PRECOMPILE_BOOT): DiskShaderMarker of a store rebuilt by
+/// PrecompileBootBeforeWarmUp, whose sessions number permutations by first use. That start
+/// takes it as done; StartOnDemand, which reads files by index, drops them once.
+std::vector<u8> FirstUseMarker() {
+    auto marker = DiskShaderMarker();
+    const std::string_view first_use{", first use"};
+    marker.insert(marker.end(), first_use.begin(), first_use.end());
+    return marker;
+}
 /// gow3: this session may number permutations by first use: no on-demand reads at next start.
 void ForgetDiskShaders() {
     auto& db = Storage::DataBase::Instance();
@@ -1033,7 +1042,9 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     if (!CheckCacheProfile()) {
         return;
     }
-    ForgetDiskShaders();
+    if (!first_use_marker) {
+        ForgetDiskShaders();
+    }
     PreloadMemoryStop().Reset();
 
     u32 num_pipelines{};
@@ -1158,37 +1169,7 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
         }
         const auto expected = DiskShaderMarker();
         if (marker != expected) {
-            // Sessions without the marker numbered permutations by first use and overwrote the
-            // files by name: a meta and its SPIR-V are separate writes, so an exit between them
-            // can pair one shader's meta with another's SPIR-V. Another translator may also have
-            // produced different SPIR-V. Only the numbered permutation files are dropped (once):
-            // pipeline keys and the profile stay. A kept key whose slot now holds another
-            // permutation only makes the warm-up build a pipeline no draw asks for, since draws
-            // look pipelines up by their own key; a key whose slot is gone is skipped.
-            size_t dropped = 0;
-            for (const auto type : {Storage::BlobType::ShaderMeta, Storage::BlobType::ShaderBinary}) {
-                for (const auto& name : db.ListBlobs(type)) {
-                    db.Remove(type, name);
-                    ++dropped;
-                }
-            }
-            std::printf("Pipeline startup: %zu saved shader files dropped for on-demand reads (%s), "
-                        "pipeline keys kept\n",
-                        dropped,
-                        marker.empty()                            ? "no marker"
-                        : marker == std::vector<u8>{0}            ? "disk shaders were off"
-                                                                  : "another translator");
-            // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild, so a start
-            // that ends inside it drops its files again next time.
-            const bool rebuilt = RebuildFromPrecompileList(progress);
-            db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
-            if (rebuilt) {
-                db.Flush();
-                IndexDiskShaders();
-                // The pass's selections read programs from the store (DiskShadersActive).
-                disk_shaders = true;
-                BuildPrecompilePipelines(progress);
-            }
+            RebuildDiskShaders(marker, expected, progress);
         } else {
             IndexDiskShaders();
         }
@@ -1197,6 +1178,83 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
     db.FinishPreload();
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
+}
+
+void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std::vector<u8>& saved,
+                                       const std::function<void(u32, u32)>& progress) {
+    auto& db = Storage::DataBase::Instance();
+    // Sessions without the marker numbered permutations by first use and overwrote the files by
+    // name: a meta and its SPIR-V are separate writes, so an exit between them can pair one
+    // shader's meta with another's SPIR-V. Another translator may also have produced different
+    // SPIR-V. Only the numbered permutation files are dropped (once): pipeline keys and the
+    // profile stay. A kept key whose slot now holds another permutation only makes the warm-up
+    // build a pipeline no draw asks for, since draws look pipelines up by their own key; a key
+    // whose slot is gone is skipped.
+    size_t dropped = 0;
+    for (const auto type : {Storage::BlobType::ShaderMeta, Storage::BlobType::ShaderBinary}) {
+        for (const auto& name : db.ListBlobs(type)) {
+            db.Remove(type, name);
+            ++dropped;
+        }
+    }
+    std::printf("Pipeline startup: %zu saved shader files dropped for on-demand reads (%s), "
+                "pipeline keys kept\n",
+                dropped,
+                marker.empty()                       ? "no marker"
+                : marker == std::vector<u8>{0}       ? "disk shaders were off"
+                : marker == FirstUseMarker()         ? "numbered by first use"
+                                                     : "another translator");
+    // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild, so a start that ends
+    // inside it drops its files again next time.
+    const bool rebuilt = RebuildFromPrecompileList(progress);
+    db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", std::vector<u8>(saved));
+    if (rebuilt) {
+        db.Flush();
+        IndexDiskShaders();
+        // The pass's selections read programs from the store (DiskShadersActive).
+        disk_shaders = true;
+        BuildPrecompilePipelines(progress);
+    }
+}
+
+// gow3 (GOW3_PRECOMPILE_BOOT): with pipeline binaries off (NVIDIA) the presenter takes a
+// warm-up, not StartOnDemand, so the rebuild and its pass run here first, as StartOnDemand runs
+// them. The warm-up's sessions number permutations by first use, so the store keeps
+// FirstUseMarker instead of ForgetDiskShaders' reset: a start here takes it, or StartOnDemand's
+// marker, as done, while StartOnDemand still drops the files once. Draws find the pass's
+// programs in program_cache at their saved indices; new permutations take the next index.
+bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32)>& progress) {
+    auto& db = Storage::DataBase::Instance();
+    // As in StartOnDemand: GOW3_DISK_SHADERS=0 leaves the start as it was.
+    const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
+                         !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
+    if (!db.ConcurrentReads() || !disk_on) {
+        return false;
+    }
+    const bool compatible = CheckCacheProfile();
+    if (!db.IsOpened()) {
+        return false;
+    }
+    std::vector<u8> marker;
+    if (compatible) {
+        db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
+    }
+    const auto first_use = FirstUseMarker();
+    first_use_marker = true;
+    if (marker == first_use) {
+        return false;
+    }
+    if (marker == DiskShaderMarker()) {
+        db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", std::vector<u8>(first_use));
+        return false;
+    }
+    RebuildDiskShaders(marker, first_use, progress);
+    // The warm-up's sessions number permutations by first use (NewPermutationIndex).
+    disk_shaders = false;
+    disk_permutations.clear();
+    disk_pipeline_keys.clear();
+    disk_modules_unused.clear();
+    return true;
 }
 
 bool PipelineCache::DiskShadersActive() const {
@@ -1476,7 +1534,9 @@ bool PipelineCache::StartBackgroundWarmUp() {
     if (!CheckCacheProfile()) {
         return true; // nothing cached yet
     }
-    ForgetDiskShaders();
+    if (!first_use_marker) {
+        ForgetDiskShaders();
+    }
     background = new BackgroundWarmup;
     auto& warm = *background;
     warm.started = std::chrono::steady_clock::now();
