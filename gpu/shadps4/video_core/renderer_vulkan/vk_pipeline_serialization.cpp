@@ -1146,9 +1146,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
 void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress) {
     const bool compatible = CheckCacheProfile();
     auto& db = Storage::DataBase::Instance();
-    // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
-    const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
-                         !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
+    const bool disk_on = DiskShadersWanted();
     if (db.IsOpened() && db.ConcurrentReads() && !disk_on) {
         // This session numbers permutations by first use again: the store is rebuilt at the
         // next start with disk shaders on.
@@ -1163,7 +1161,7 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
             // gow3 (GOW3_PRECOMPILE_BOOT): the list and its code are read before anything is
             // dropped; when skipped the store is renewed as without a list.
             PreparePrecompileList(progress);
-            RebuildDiskShaders(marker, expected, progress);
+            RebuildDiskShaders(marker, progress);
         } else {
             IndexDiskShaders();
         }
@@ -1174,7 +1172,7 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
                 disk_permutations.size());
 }
 
-void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std::vector<u8>& saved,
+void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
                                        const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
     // Sessions without the marker numbered permutations by first use and overwrote the files by
@@ -1203,7 +1201,7 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std:
     // prepared (PreparePrecompileList), so a start that ends inside it drops its files again
     // next time.
     const bool rebuilt = RunPrecompileList(progress);
-    db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", std::vector<u8>(saved));
+    db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
     if (rebuilt) {
         db.Flush();
         IndexDiskShaders();
@@ -1223,8 +1221,7 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std:
 bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
     // As in StartOnDemand: GOW3_DISK_SHADERS=0 leaves the start as it was.
-    const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
-                         !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
+    const bool disk_on = DiskShadersWanted();
     if (!db.ConcurrentReads() || !disk_on) {
         return false;
     }
@@ -1242,16 +1239,22 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
         // The list and its code are read before anything is dropped. Unless they are ready (the
         // game files gave too little of the code, the list cannot be read), the start goes on as
         // without a list: nothing dropped, the marker as it was, disk_shaders off, the warm-up.
-        if (PreparePrecompileList(progress) != PrecompilePrepared::Ready) {
+        if (!PreparePrecompileList(progress)) {
             return false;
         }
-        RebuildDiskShaders(marker, expected, progress);
+        RebuildDiskShaders(marker, progress);
     } else {
         IndexDiskShaders();
     }
     // As StartOnDemand: also when the rebuild could not run (its files are dropped).
     disk_shaders = true;
     return rebuild;
+}
+
+bool PipelineCache::DiskShadersWanted() const {
+    // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
+    return EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
+           !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
 }
 
 bool PipelineCache::DiskShadersActive() const {
@@ -1350,7 +1353,9 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
     }
     if (inserted) {
         program->modules.resize(std::max<size_t>(program->modules.size(), found->second.back() + 1));
-        program->info_template = std::make_unique<Shader::Info>(program->info);
+        if (!merged) {
+            program->info_template = std::make_unique<Shader::Info>(program->info);
+        }
         std::unique_lock lock{programs_mutex};
         if (merged) {
             merged->modules.resize(std::max(merged->modules.size(), program->modules.size()));

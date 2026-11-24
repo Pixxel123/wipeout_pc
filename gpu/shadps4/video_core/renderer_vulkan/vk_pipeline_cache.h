@@ -260,13 +260,11 @@ private:
     friend struct PrecompileBoot;
     /// gow3 (GOW3_PRECOMPILE_BOOT, vk_precompile_boot.cpp): the start-up rebuild in two steps.
     /// PreparePrecompileList reads the list and the code it needs from the game files, before
-    /// anything is dropped: Ready keeps them for RunPrecompileList; Skipped when the game files
-    /// gave too little of that code or the list needs code and has no index (GameCodeSuffices),
-    /// and the start goes on as without a list; None without a list, with the switch off, a list
-    /// that cannot be read or no fault guard.
-    enum class PrecompilePrepared { None, Skipped, Ready };
-    PrecompilePrepared PreparePrecompileList(
-        const std::function<void(u32 done, u32 total)>& progress);
+    /// anything is dropped: true keeps them for RunPrecompileList. False without a list, with
+    /// the switch off, a list that cannot be read or no fault guard, and (logged as skipped)
+    /// when the game files gave too little of that code or the list needs code and has no index
+    /// (GameCodeSuffices); the start then goes on as without a list.
+    bool PreparePrecompileList(const std::function<void(u32 done, u32 total)>& progress);
     /// Translates the prepared list into the store after a recompiler change dropped its
     /// shaders; false when nothing was prepared or the rebuild stopped. `progress(done, total)`
     /// follows the entries (Precompile::BootProgressOf).
@@ -409,11 +407,15 @@ private:
         u64 keys_skipped, keys_written;
     } disk_stats{}, disk_reported{};
     std::chrono::steady_clock::time_point disk_report{};
+    /// GOW3_DISK_SHADERS and the toggle bit allow disk shaders (StartOnDemand,
+    /// PrecompileBootBeforeWarmUp).
+    [[nodiscard]] bool DiskShadersWanted() const;
     [[nodiscard]] bool DiskShadersActive() const;
     void IndexDiskShaders();
     /// Drops the saved shader files `marker` does not vouch for, runs the start-up rebuild,
-    /// saves `saved` as the marker and builds the rebuild's pipelines with disk_shaders on.
-    void RebuildDiskShaders(const std::vector<u8>& marker, const std::vector<u8>& saved,
+    /// saves this build's marker (DiskShaderMarker) and builds the rebuild's pipelines with
+    /// disk_shaders on.
+    void RebuildDiskShaders(const std::vector<u8>& marker,
                             const std::function<void(u32 done, u32 total)>& progress);
     bool LoadDiskProgram(u64 hash);
     /// Index for a new permutation: a slot the store left empty, else the next one.

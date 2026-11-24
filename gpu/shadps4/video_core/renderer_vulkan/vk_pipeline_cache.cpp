@@ -1688,12 +1688,14 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // gow3: the warm-up merged only some of its saved slots: the rest are read first.
         it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     }
-    size_t perm_idx = NewPermutationIndex(*program);
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
+    size_t perm_idx;
+    u64 perm_hash;
     if (it != program->modules.end()) {
         program->last_used = std::distance(program->modules.begin(), it);
     }
     if (it == program->modules.end()) {
+        perm_idx = NewPermutationIndex(*program);
+        perm_hash = HashCombine(params.hash, perm_idx);
         if (program->pending || std::ranges::find(program->failed_permutations, spec) !=
                                     program->failed_permutations.end()) {
             return {};

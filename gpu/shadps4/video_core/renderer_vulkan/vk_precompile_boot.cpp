@@ -1215,32 +1215,31 @@ void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
     delete run;
 }
 
-PipelineCache::PrecompilePrepared PipelineCache::PreparePrecompileList(
-    const std::function<void(u32, u32)>& progress) {
+bool PipelineCache::PreparePrecompileList(const std::function<void(u32, u32)>& progress) {
     // With GOW3_PRECOMPILE_LOAD=1 the loader builds the list instead (it logs that).
     if (!BootRequested() || LoadRequested()) {
-        return PrecompilePrepared::None;
+        return false;
     }
     const std::string path = BootListPath();
     if (path.empty()) {
-        return PrecompilePrepared::None;
+        return false;
     }
 #if !defined(__linux__) && !defined(_WIN32)
     std::printf("Precompile boot: not supported on this platform\n");
-    return PrecompilePrepared::None;
+    return false;
 #else
     auto parsed = LoadListFile(path.c_str(), MaxListEntries);
     if (!parsed) {
-        return PrecompilePrepared::None;
+        return false;
     }
     const auto code = ReadListCode(*parsed, path.c_str(), progress);
     if (!GameCodeSuffices(code.wanted, code.read)) {
         std::printf("Precompile boot: skipped, the game files gave %u of %u programs (%s)\n",
                     code.read, code.wanted, code.why.c_str());
-        return PrecompilePrepared::Skipped;
+        return false;
     }
     if (!SetUpFaultGuard()) {
-        return PrecompilePrepared::None;
+        return false;
     }
     // The shipped list may sit on a read-only mount (the AppImage): its crash marker is kept in
     // the shader cache folder.
@@ -1252,7 +1251,7 @@ PipelineCache::PrecompilePrepared PipelineCache::PreparePrecompileList(
     // Kept for the pipeline pass (BuildPrecompilePipelines), which releases it.
     precompile_boot.reset(new PrecompileBootRun{*this, std::move(*parsed), crash_marker});
     precompile_boot->boot.files = code.files;
-    return PrecompilePrepared::Ready;
+    return true;
 #endif
 }
 

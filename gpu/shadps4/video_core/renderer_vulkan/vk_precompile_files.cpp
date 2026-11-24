@@ -9,6 +9,7 @@
 #include <system_error>
 #include <utility>
 #include "video_core/renderer_vulkan/vk_precompile_files.h"
+#include "video_core/renderer_vulkan/vk_precompile_list.h"
 
 // The gpu target links miniz (zlib's API under mz_ names); host tests link zlib itself.
 #if __has_include(<miniz.h>)
@@ -37,21 +38,6 @@ bool Inflate(std::span<const u8> in, std::vector<u8>& out) {
     return ok;
 }
 
-u32 Crc32(std::span<const u8> bytes) {
-#if __has_include(<miniz.h>)
-    return u32(mz_crc32(MZ_CRC32_INIT, bytes.data(), bytes.size()));
-#else
-    return u32(crc32(0, bytes.data(), uInt(bytes.size())));
-#endif
-}
-
-// Program code (vk_precompile_list.h): the start token, the OrbShdr header (8 words) at
-// (code[1] + 1) * 2 words, its length in bits 8-31 of the u32 8 bytes in, its hash 16 bytes in
-// and 24 bytes in the crc32 of the code from the start token through the header's first 16 bytes.
-constexpr std::array<u8, 4> StartToken = {0xFF, 0x03, 0xEB, 0xBE};
-constexpr std::string_view Signature = "OrbShdr";
-constexpr u64 HeaderWords = 8;
-constexpr u64 MaxCodeBytes = 1u << 20;
 /// The index file, at most.
 constexpr u64 MaxIndexBytes = 1u << 20;
 /// A name in a missing line, at most.
@@ -81,11 +67,11 @@ std::vector<u8> ProgramCode(std::span<const u8> data, u64 header) {
     u64 end = header;
     while (true) {
         // The highest token from `lowest` on that ends at or before `end` (rfind).
-        if (end < lowest + StartToken.size()) {
+        if (end < lowest + sizeof(CodeStartToken)) {
             return {};
         }
-        u64 start = end - StartToken.size();
-        while (!std::equal(StartToken.begin(), StartToken.end(), data.data() + start)) {
+        u64 start = end - sizeof(CodeStartToken);
+        while (Load<u32>(data, start) != CodeStartToken) {
             if (start == lowest) {
                 return {};
             }
@@ -93,11 +79,11 @@ std::vector<u8> ProgramCode(std::span<const u8> data, u64 header) {
         }
         end = start;
         const u64 at = (u64(Load<u32>(data, start + 4)) + 1) * 2;
-        if (at * 4 != header - start || (at + HeaderWords) * 4 > MaxCodeBytes) {
+        if (at * 4 != header - start || (at + CodeHeaderWords) * 4 > MaxCodeBytes) {
             continue;
         }
-        const u64 length = Load<u32>(data, header + 8) >> 8;
-        const u64 size = std::max(at + HeaderWords, (length + 3) / 4) * 4;
+        const u64 length = Load<u32>(data, header + CodeHeaderLengthAt) >> 8;
+        const u64 size = std::max(at + CodeHeaderWords, (length + 3) / 4) * 4;
         if (size > MaxCodeBytes || start + size > data.size()) {
             continue;
         }
@@ -105,7 +91,8 @@ std::vector<u8> ProgramCode(std::span<const u8> data, u64 header) {
             continue;
         }
         const auto code = data.subspan(start, size);
-        if (Crc32(code.first(at * 4 + 16)) != Load<u32>(code, at * 4 + 24)) {
+        // The crc32 covers the code through the header's first 16 bytes (CheckCodeBody).
+        if (Crc32(code.first(at * 4 + 16)) != Load<u32>(code, at * 4 + CodeHeaderCrcAt)) {
             continue;
         }
         return {code.begin(), code.end()};
@@ -115,11 +102,13 @@ std::vector<u8> ProgramCode(std::span<const u8> data, u64 header) {
 /// Adds the code of each program `data` holds and `found` has not to it (find_code).
 void FindCode(std::span<const u8> data, GameCode& found) {
     const std::string_view text{reinterpret_cast<const char*>(data.data()), data.size()};
-    for (size_t at = text.find(Signature); at != text.npos; at = text.find(Signature, at + 1)) {
-        if (at + HeaderWords * 4 > data.size()) {
+    const std::string_view signature{reinterpret_cast<const char*>(CodeSignature.data()),
+                                     CodeSignature.size()};
+    for (size_t at = text.find(signature); at != text.npos; at = text.find(signature, at + 1)) {
+        if (at + CodeHeaderWords * 4 > data.size()) {
             continue;
         }
-        const u64 program = Load<u64>(data, at + 16);
+        const u64 program = Load<u64>(data, at + CodeHeaderHashAt);
         if (!found.by_program.contains(program)) {
             if (auto code = ProgramCode(data, at); !code.empty()) {
                 found.by_program.emplace(program, std::move(code));

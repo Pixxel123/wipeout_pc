@@ -6,7 +6,8 @@
 // names the files that hold the list's programs, one line each: eboot.bin, or the archive's file
 // name, a TAB and the path inside the archive. The format rules are those of
 // tools/deck/precompile-list-info.py (game_files, psarc_files, find_code, program_code).
-// Standard library, zlib and the basic types only, so host tests build it alone.
+// Standard library, zlib, the basic types and vk_precompile_list.h (the program code layout and
+// its crc32) only, so host tests build it alone.
 
 #pragma once
 
