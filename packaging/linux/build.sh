@@ -16,6 +16,8 @@ install -m755 out/gow3-probe out/gow3-gpu-capabilities out/gow3-server "$share/b
 install -m755 out/gpu/libgow3gpu.so "$share/bin/gpu/"
 cp run.py "$share/"
 cp -r scripts patches "$share/"
+# The code-free shader list the first start builds from (precompile/shaders.list).
+cp -r gpu/precompile "$share/"
 mkdir -p "$share/launcher"
 # The icon of the AppImage, the launcher and the game window: packaging/linux/gow3.png when it
 # exists (a local choice), else the launcher's own.

@@ -63,6 +63,8 @@ elif [[ ${DLSS_REQUIRED:-} == 1 ]]; then
     exit 1
 fi
 cp -r scripts patches "$dest/"
+# The code-free shader list the first start builds from (precompile/shaders.list).
+cp -r gpu/precompile "$dest/"
 cp run.py LICENSE README.md packaging/windows/README-Windows.txt "$dest/"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 [[ -f $dest/scripts/discord_presence.py ]] || { echo 'scripts/discord_presence.py is missing from the package' >&2; exit 1; }
