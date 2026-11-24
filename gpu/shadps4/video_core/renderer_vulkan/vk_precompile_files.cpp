@@ -99,17 +99,24 @@ std::vector<u8> ProgramCode(std::span<const u8> data, u64 header) {
     }
 }
 
-/// Adds the code of each program `data` holds and `found` has not to it (find_code).
-void FindCode(std::span<const u8> data, GameCode& found) {
+/// Whether `found` holds every program `wanted` names; never with no filter (`wanted` empty).
+bool AllFound(const std::set<u64>& wanted, const GameCode& found) {
+    return !wanted.empty() && found.by_program.size() == wanted.size();
+}
+
+/// Adds the code of each program `data` holds, `wanted` names (any when empty) and `found` has
+/// not to it; stops once all are found (find_code).
+void FindCode(std::span<const u8> data, const std::set<u64>& wanted, GameCode& found) {
     const std::string_view text{reinterpret_cast<const char*>(data.data()), data.size()};
     const std::string_view signature{reinterpret_cast<const char*>(CodeSignature.data()),
                                      CodeSignature.size()};
-    for (size_t at = text.find(signature); at != text.npos; at = text.find(signature, at + 1)) {
+    for (size_t at = text.find(signature); at != text.npos && !AllFound(wanted, found);
+         at = text.find(signature, at + 1)) {
         if (at + CodeHeaderWords * 4 > data.size()) {
             continue;
         }
         const u64 program = Load<u64>(data, at + CodeHeaderHashAt);
-        if (!found.by_program.contains(program)) {
+        if ((wanted.empty() || wanted.contains(program)) && !found.by_program.contains(program)) {
             if (auto code = ProgramCode(data, at); !code.empty()) {
                 found.by_program.emplace(program, std::move(code));
             }
@@ -242,6 +249,9 @@ private:
 
 using Hash = std::array<u8, 16>;
 
+/// Why an indexed entry was not read until a copy of its archive says otherwise.
+constexpr std::string_view NotInArchive = "not in the archive";
+
 std::string Upper(std::string name) {
     for (char& c : name) {
         if (c >= 'a' && c <= 'z') {
@@ -252,12 +262,13 @@ std::string Upper(std::string name) {
 }
 
 /// The archive entries `names` read from one copy of an archive into `found`: for each name the
-/// first entry with its hash that can be read. Erases the names read from `left` and gives
-/// those it holds that were not read their reason. False when the archive cannot be read at all
-/// (it is named in missing).
+/// first entry with its hash that can be read, until all wanted `programs` are found. Erases the
+/// names read from `left` and gives those it holds that were not read their reason; a name not
+/// reached because all were found is erased unless a copy failed to read it. False when the
+/// archive cannot be read at all (it is named in missing).
 bool ReadArchive(const fs::path& path, const std::set<std::string>& names,
-                 std::map<std::string, std::string>& left, GameCode& found,
-                 const std::function<void()>& file_done) {
+                 const std::set<u64>& programs, std::map<std::string, std::string>& left,
+                 GameCode& found, const std::function<void()>& file_done) {
     Archive archive;
     if (const char* why = archive.Open(path)) {
         found.missing.push_back(Name(path) + ": " + why);
@@ -272,7 +283,7 @@ bool ReadArchive(const fs::path& path, const std::set<std::string>& names,
     }
     std::vector<u8> data;
     // Entry 0 is the manifest.
-    for (u32 i = 1; i < archive.Count() && !by_hash.empty(); ++i) {
+    for (u32 i = 1; i < archive.Count() && !by_hash.empty() && !AllFound(programs, found); ++i) {
         Hash hash;
         std::ranges::copy(archive.Hash(i), hash.begin());
         const auto wanted = by_hash.find(hash);
@@ -294,14 +305,19 @@ bool ReadArchive(const fs::path& path, const std::set<std::string>& names,
             continue;
         }
         ++found.files_read;
-        FindCode(data, found);
+        FindCode(data, programs, found);
         for (size_t n = 0; n < wanted->second.size(); ++n) {
             file_done();
         }
         by_hash.erase(wanted);
     }
+    const bool all_found = AllFound(programs, found);
     for (const auto& [hash, unread] : by_hash) {
-        for (size_t i = 0; i < unread.size(); ++i) {
+        for (const std::string* name : unread) {
+            if (const auto it = left.find(*name);
+                all_found && it != left.end() && it->second == NotInArchive) {
+                left.erase(it);
+            }
             file_done();
         }
     }
@@ -375,7 +391,8 @@ std::array<u8, 16> Md5(std::string_view bytes) {
 }
 
 GameCode ReadGameCode(std::span<const fs::path> dirs, const fs::path& index,
-                      const std::function<void(u32 done, u32 total)>& progress) {
+                      const std::function<void(u32 done, u32 total)>& progress,
+                      const std::set<u64>& wanted) {
     GameCode found;
     // The index (read_index): eboot.bin, and the entry names per archive file name.
     std::error_code error;
@@ -465,7 +482,15 @@ GameCode ReadGameCode(std::span<const fs::path> dirs, const fs::path& index,
     if (progress) {
         progress(0, total);
     }
+    // Once every wanted program is found no further file is read: the first folder still wins.
+    // Only the first eboot.bin that can be read: with an update folder the game runs the update's,
+    // so a later folder's is read only when the earlier ones cannot be.
+    bool eboot_read = false;
     for (const auto& path : eboots) {
+        if (eboot_read || AllFound(wanted, found)) {
+            file_done();
+            continue;
+        }
         std::vector<u8> data;
         const u64 size = fs::file_size(path, error);
         std::ifstream file{path, std::ios::binary};
@@ -475,7 +500,8 @@ GameCode ReadGameCode(std::span<const fs::path> dirs, const fs::path& index,
         }
         if (!data.empty() && u64(file.gcount()) == size) {
             ++found.files_read;
-            FindCode(data, found);
+            FindCode(data, wanted, found);
+            eboot_read = true;
         } else {
             found.missing.push_back(Name(path) + ": cannot read");
         }
@@ -486,13 +512,19 @@ GameCode ReadGameCode(std::span<const fs::path> dirs, const fs::path& index,
     std::map<std::string, std::map<std::string, std::string>> left;
     std::set<std::string> opened;
     for (const auto& source : sources) {
+        if (AllFound(wanted, found)) {
+            for (size_t i = 0; i < source.names->size(); ++i) {
+                file_done();
+            }
+            continue;
+        }
         const std::string& archive = *source.archive;
         if (!left.contains(archive)) {
             for (const auto& name : *source.names) {
-                left[archive][name] = "not in the archive";
+                left[archive][name] = NotInArchive;
             }
         }
-        if (ReadArchive(source.path, *source.names, left[archive], found, file_done)) {
+        if (ReadArchive(source.path, *source.names, wanted, left[archive], found, file_done)) {
             opened.insert(archive);
         }
     }

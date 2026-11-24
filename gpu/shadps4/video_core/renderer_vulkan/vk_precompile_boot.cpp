@@ -330,13 +330,16 @@ ListCodeRead ReadListCode(ParsedList& list, const char* list_path,
     const auto started = std::chrono::steady_clock::now();
     const u32 entries = u32(list.keys.size());
     u32 files = 0;
-    const auto game = ReadGameCode(dirs, index, [&](u32 done, u32 total) {
-        files = total;
-        if (progress) {
-            const auto [shown, all] = BootProgressOf(total, entries, done, 0, 0);
-            progress(shown, all);
-        }
-    });
+    const auto game = ReadGameCode(
+        dirs, index,
+        [&](u32 done, u32 total) {
+            files = total;
+            if (progress) {
+                const auto [shown, all] = BootProgressOf(total, entries, done, 0, 0);
+                progress(shown, all);
+            }
+        },
+        wanted);
     u32 read = 0;
     for (const u64 hash : wanted) {
         if (const auto found = game.by_program.find(hash); found != game.by_program.end()) {

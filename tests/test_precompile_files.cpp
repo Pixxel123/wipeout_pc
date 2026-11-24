@@ -1,14 +1,16 @@
 // The reader of program code from the game files (vk_precompile_files.h) on the synthetic
 // archives of tests/data/precompile_files (tests/data/make_precompile_files.py) and eboot.bin
 // files written here: the table of contents found by name hash, a stored and a zlib entry, a wide
-// block size table, an entry with two programs, an entry listed twice, the folder order, missing
-// files and cut or corrupt archives.
+// block size table, an entry with two programs, an entry listed twice, the folder order and the
+// first readable eboot.bin, missing files and cut or corrupt archives; with a filter, only the
+// wanted programs, and no file read once all of them are found.
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <set>
 #include <string>
 #include <vector>
 #include <zlib.h>
@@ -95,18 +97,22 @@ struct Read {
     u32 calls = 0, first_done = 99, first_total = 0, last_done = 0, last_total = 0;
 };
 
-Read Run(std::initializer_list<fs::path> dirs, const fs::path& index) {
+Read Run(std::initializer_list<fs::path> dirs, const fs::path& index,
+         const std::set<u64>& wanted = {}) {
     Read read;
     const std::vector<fs::path> list{dirs};
-    read.code = ReadGameCode(list, index, [&](u32 done, u32 total) {
-        if (read.calls++ == 0) {
-            read.first_done = done;
-            read.first_total = total;
-        }
-        assert(done <= total);
-        read.last_done = done;
-        read.last_total = total;
-    });
+    read.code = ReadGameCode(
+        list, index,
+        [&](u32 done, u32 total) {
+            if (read.calls++ == 0) {
+                read.first_done = done;
+                read.first_total = total;
+            }
+            assert(done <= total);
+            read.last_done = done;
+            read.last_total = total;
+        },
+        wanted);
     return read;
 }
 
@@ -162,20 +168,21 @@ void TestReadsEveryIndexedFile() {
     const auto read = Run({update, base}, Index(base, FullIndex));
     const auto& code = read.code;
     assert(code.missing.empty());
-    assert(code.files_read == 5); // two eboot.bin, a.bin, b.bin once, big.bin
-    assert(code.by_program.size() == 6);
+    assert(code.files_read == 4); // the update's eboot.bin, a.bin, b.bin once, big.bin
+    assert(code.by_program.size() == 5); // not 0x66: only in the game's eboot.bin, not read
     assert(Has(code, 0x11, Blob(0x11)));          // after a full stored block
     assert(Has(code, 0x22, Blob(0x22)));          // zlib blocks, two programs in one entry
     assert(Has(code, 0x33, Blob(0x33, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
                                        17, 18, 19})));
     assert(Has(code, 0x44, Blob(0x44)));          // a 3-byte size table, across two blocks
     assert(Has(code, 0x55, Blob(0x55, {9, 9, 9, 9}))); // the update folder first
-    assert(Has(code, 0x66, Blob(0x66)));
     assert(read.first_done == 0 && read.first_total == 5);
     assert(read.last_done == 5 && read.last_total == 5);
 
-    // The other folder order: the game's eboot.bin first.
-    assert(Has(Run({base, update}, Index(base, FullIndex)).code, 0x55, Blob(0x55, {7, 7, 7, 7})));
+    // The other folder order: the game's eboot.bin first, and only it.
+    const auto other = Run({base, update}, Index(base, FullIndex));
+    assert(Has(other.code, 0x55, Blob(0x55, {7, 7, 7, 7})) && Has(other.code, 0x66, Blob(0x66)));
+    assert(other.code.files_read == 4);
     // Windows line ends.
     const auto crlf = Run({update, base}, Index(base, "eboot.bin\r\ndata00.psarc\ta.bin\r\n"));
     assert(crlf.code.missing.empty() && Has(crlf.code, 0x11, Blob(0x11)));
@@ -191,7 +198,7 @@ void TestMissingFilesRejectOnlyTheirOwn() {
     const auto& code = read.code;
     assert(code.missing.size() == 2);
     assert(Missing(code, "nope.bin") && Missing(code, "data09.psarc"));
-    assert(code.by_program.size() == 6 && code.files_read == 5);
+    assert(code.by_program.size() == 5 && code.files_read == 4);
     assert(read.last_done == read.last_total);
 
     const auto none = Run({}, Index(base, FullIndex));
@@ -285,6 +292,67 @@ void TestCutArchives() {
     }
 }
 
+void TestWantedOnly() {
+    const fs::path base = Base("base"), update = Update();
+    // 0x33, in b.bin with 0x22, is not kept. The update's eboot.bin, big.bin, then b.bin
+    // (data00.psarc's first entry): 0x22 is found there, so a.bin is not read, and not named.
+    const auto one = Run({update, base}, Index(base, FullIndex), {0x22});
+    assert(one.code.missing.empty());
+    assert(one.code.by_program.size() == 1 && Has(one.code, 0x22, Blob(0x22)));
+    assert(one.code.files_read == 3);
+    assert(one.last_done == one.last_total && one.last_total == 5);
+    // A wanted program no file holds: every file is read, as without a filter.
+    const auto lost = Run({update, base}, Index(base, FullIndex), {0x22, 0x99});
+    assert(lost.code.missing.empty() && lost.code.files_read == 4);
+    assert(lost.code.by_program.size() == 1 && Has(lost.code, 0x22, Blob(0x22)));
+}
+
+void TestFirstReadableEboot() {
+    const fs::path base = Base("base"), update = Update(), empty = Folder("empty-eboot");
+    const fs::path index = Index(base, "eboot.bin\n");
+    // The first folder's eboot.bin, empty, cannot be read: it is named and the next is read.
+    WriteFile(empty / "eboot.bin", {});
+    const auto next = Run({empty, update}, index);
+    assert(next.code.missing.size() == 1 && Missing(next.code, "cannot read"));
+    assert(next.code.files_read == 1 && Has(next.code, 0x55, Blob(0x55, {9, 9, 9, 9})));
+    assert(next.last_done == 2 && next.last_total == 2);
+    // A program only in a later folder's eboot.bin is not found when the first can be read: the
+    // game runs the update's eboot.bin, so the game's is never read. That is the rule's cost.
+    const auto first = Run({update, base}, index, {0x55, 0x66});
+    assert(first.code.missing.empty() && first.code.files_read == 1);
+    assert(first.code.by_program.size() == 1 && Has(first.code, 0x55, Blob(0x55, {9, 9, 9, 9})));
+    assert(first.last_done == 2 && first.last_total == 2);
+}
+
+void TestSecondCopy() {
+    const fs::path update = Folder("copy-update"), base = Folder("copy-base");
+    const auto small = ReadFile(Data / "data00.psarc");
+    const fs::path index = Index(base, "data00.psarc\ta.bin\ndata00.psarc\tb.bin\n");
+    // The update's copy holds everything wanted: the game's copy, cut to 20 bytes, is not
+    // opened. Read without a filter, it is named "cut off".
+    WriteFile(update / "data00.psarc", small);
+    WriteFile(base / "data00.psarc", {small.begin(), small.begin() + 20});
+    const auto first = Run({update, base}, index, {0x11, 0x22});
+    assert(first.code.missing.empty() && first.code.files_read == 2);
+    assert(Has(first.code, 0x11, Blob(0x11)) && Has(first.code, 0x22, Blob(0x22)));
+    assert(first.code.by_program.size() == 2);
+    assert(first.last_done == 4 && first.last_total == 4);
+    assert(Missing(Run({update, base}, index).code, "data00.psarc: cut off"));
+    // b.bin's two TOC entries in the update's copy name no file: a.bin is read from it, b.bin
+    // from the game's copy, whose first entry it is, and nothing after it.
+    auto no_b = small;
+    for (const u32 entry : {1u, 2u}) {
+        no_b[32 + 30 * entry] ^= 0xFF;
+    }
+    WriteFile(update / "data00.psarc", no_b);
+    WriteFile(base / "data00.psarc", small);
+    const auto second = Run({update, base}, index, {0x11, 0x22});
+    assert(second.code.missing.empty() && second.code.files_read == 2);
+    assert(Has(second.code, 0x11, Blob(0x11)) && Has(second.code, 0x22, Blob(0x22)));
+    assert(second.code.by_program.size() == 2);
+    assert(second.last_done == 4 && second.last_total == 4);
+}
+
 } // namespace
 
 int main() {
@@ -294,6 +362,9 @@ int main() {
     TestArchiveNamesAreFileNamesOnly();
     TestCaseAndDuplicates();
     TestCutArchives();
+    TestWantedOnly();
+    TestFirstReadableEboot();
+    TestSecondCopy();
     fs::remove_all(fs::temp_directory_path() / "test_precompile_files");
     std::puts("PASS: precompile files");
     return 0;
