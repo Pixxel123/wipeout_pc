@@ -6,7 +6,7 @@ user data and stage counts), then entries: u32 body size, FNV-1a 64 of the body,
 with a u32 kind: 0 a Key (a pipeline), 1 a Code record (a program's shader words).
 
   precompile-list-info.py <list> [--strip-code <out>]
-  precompile-list-info.py <list> --add-code <out> <game dir>...
+  precompile-list-info.py <list> --add-code <out> <game dir>... [--write-index <file>] [--index <file>]
 
 Prints the version, the key entries and code records, and the bytes per kind. The kinds add up to
 the file size: header counts the file header, every key entry's frame and fixed fields (kind, hash,
@@ -18,7 +18,12 @@ it, as the recorder does, the code read out of the game dirs' eboot.bin and *.ps
 first, then the archives highest dataNN first, a later dir first; it stops once every program has
 code). Prints the programs found per file and the hashes of those without code, never the code;
 an archive it cannot read is named and skipped. Exits 1 on a list that already holds Code records.
+--write-index <file> (with --add-code) writes the files the code was found in, one sorted line
+each: eboot.bin, or <archive file name> TAB <path inside the archive>. --index <file> reads only
+those files; a program they do not hold is reported without code, never searched for elsewhere.
+The report ends with the number of files read.
 """
+import hashlib
 import re
 import struct
 import sys
@@ -151,9 +156,9 @@ def program_code(data, header):
         return code
 
 
-def find_code(data, wanted, found, name):
+def find_code(data, wanted, found, name, source):
     """Adds the code of each program in `wanted` that `data` holds to `found`: hash -> (code,
-    `name`)."""
+    `name`, `source`)."""
     at = data.find(SIGNATURE)
     while at != -1 and len(found) < len(wanted):
         if at + HEADER_WORDS * 4 <= len(data):
@@ -161,19 +166,22 @@ def find_code(data, wanted, found, name):
             if program in wanted and program not in found:
                 code = program_code(data, at)
                 if code is not None:
-                    found[program] = (code, name)
+                    found[program] = (code, name, source)
         at = data.find(SIGNATURE, at + 1)
 
 
-def psarc_files(path):
-    """Each file a PSARC (zlib, 30-byte TOC entries) holds, unpacked, one at a time. Raises
+def psarc_files(path, want=None):
+    """Each file a PSARC (zlib, 30-byte TOC entries) holds as (entry number, name, unpacked bytes),
+    one at a time; the manifest (entry 0, name None) first. A file's name is the manifest name whose
+    MD5 (of the upper-cased name when the archive's flags have bit 0, ignore case) is the entry's
+    hash, None when no name has it. With `want` (a set of names) only those files are read. Raises
     ListError naming the file when it is not such an archive or is cut off."""
     try:
         with open(path, "rb") as f:
             head = f.read(32)
             if len(head) < 32:
                 raise ListError(f"{path}: cut off")
-            magic, _, compression, toc_len, entry_size, count, block, _ = struct.unpack(
+            magic, _, compression, toc_len, entry_size, count, block, flags = struct.unpack(
                 ">4sI4sIIIII", head)
             if magic != b"PSAR" or compression != b"zlib" or entry_size != 30:
                 raise ListError(f"{path}: not a zlib PSARC")
@@ -183,14 +191,16 @@ def psarc_files(path):
             entries = []
             for i in range(count):
                 e = toc[i * entry_size:(i + 1) * entry_size]
-                entries.append((struct.unpack_from(">I", e, 16)[0],
+                entries.append((e[:16], struct.unpack_from(">I", e, 16)[0],
                                 int.from_bytes(e[20:25], "big"), int.from_bytes(e[25:30], "big")))
             # A block size table entry is as wide as a block's size needs.
             width = 2 if block <= 1 << 16 else 3 if block <= 1 << 24 else 4
             table = toc[count * entry_size:]
             sizes = [int.from_bytes(table[i:i + width], "big")
                      for i in range(0, len(table) - width + 1, width)]
-            for first, size, offset in entries:
+
+            def read(i):
+                _, first, size, offset = entries[i]
                 f.seek(offset)
                 parts, got, index = [], 0, first
                 while got < size:
@@ -204,26 +214,59 @@ def psarc_files(path):
                     parts.append(part)
                     got += len(part)
                     index += 1
-                yield b"".join(parts)[:size]
+                return b"".join(parts)[:size]
+
+            manifest = read(0) if count else b""
+            by_hash = {}
+            for raw in re.split(b"[\n\0]", manifest):
+                try:
+                    name = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if name:
+                    key = name.upper() if flags & 1 else name
+                    by_hash[hashlib.md5(key.encode("utf-8")).digest()] = name
+            for i in range(count):
+                name = None if i == 0 else by_hash.get(entries[i][0])
+                if want is None or (i and name in want):
+                    yield i, name, manifest if i == 0 else read(i)
     except (struct.error, IndexError):
         raise ListError(f"{path}: cut off") from None
 
 
-def game_files(dirs):
+def game_files(dirs, index=None):
     """eboot.bin files first, then the archives highest dataNN first; a later dir before an
-    earlier one."""
+    earlier one. With `index` (see read_index) only eboot.bin when listed and the archives it lists:
+    (path, the file names to read from it, None for all) pairs."""
     eboots, archives = [], []
     for order, d in enumerate(dirs):
-        if (Path(d) / "eboot.bin").is_file():
+        if (Path(d) / "eboot.bin").is_file() and (index is None or "eboot.bin" in index):
             eboots.append((-order, Path(d) / "eboot.bin"))
         for path in Path(d).glob("*.psarc"):
+            if index is not None and path.name not in index:
+                continue
             number = re.search(r"(\d+)\.psarc$", path.name)
             archives.append((-(int(number.group(1)) if number else -1), -order, path))
-    return [p for *_, p in sorted(eboots)] + [p for *_, p in sorted(archives)]
+    return [(p, None if index is None else index.get(p.name))
+            for *_, p in sorted(eboots) + sorted(archives)]
 
 
-def add_code(data, out, dirs):
-    """Writes `data` (a list without code) to `out` with the code the game files hold."""
+def read_index(path):
+    """The index file as {"eboot.bin": None, archive file name: set of paths inside it}."""
+    index = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line == "eboot.bin":
+            index[line] = None
+        elif line:
+            archive, _, name = line.partition("\t")
+            index.setdefault(archive, set()).add(name)
+    return index
+
+
+def add_code(data, out, dirs, index_in=None, index_out=None):
+    """Writes `data` (a list without code) to `out` with the code the game files hold. With
+    `index_in` only the files that index lists are read; `index_out` gets the index of the files
+    the code was found in."""
     t0 = time.time()
     _, entries = read_list(data)
     if any(kind == CODE for kind, _, _ in entries):
@@ -236,16 +279,26 @@ def add_code(data, out, dirs):
         keys.append((entry, stages))
         programs += stages
     wanted = set(programs)
+    index = read_index(index_in) if index_in else None
     found = {}
-    for path in game_files(dirs):
+    read = 0
+    unnamed = []
+    for path, want in game_files(dirs, index):
         if len(found) == len(wanted):
             break
         if path.name == "eboot.bin":
-            find_code(path.read_bytes(), wanted, found, str(path))
+            read += 1
+            find_code(path.read_bytes(), wanted, found, str(path), "eboot.bin")
         else:
             try:
-                for file in psarc_files(path):
-                    find_code(file, wanted, found, str(path))
+                for number, name, file in psarc_files(path, want):
+                    read += number > 0
+                    before = len(found)
+                    find_code(file, wanted, found, str(path),
+                              f"{path.name}\t{name}" if name else None)
+                    if name is None and number and len(found) > before:
+                        print(f"skipped: {path}: entry {number} has no name")
+                        unnamed.append(number)
                     if len(found) == len(wanted):
                         break
             except ListError as e:
@@ -264,7 +317,7 @@ def add_code(data, out, dirs):
     print(f"programs named: {len(wanted)}")
     print(f"programs found: {len(found)}")
     per_file = {}
-    for _, name in found.values():
+    for _, name, _ in found.values():
         per_file[name] = per_file.get(name, 0) + 1
     for name, n in per_file.items():
         print(f"found in {name}: {n}")
@@ -272,13 +325,35 @@ def add_code(data, out, dirs):
     print(f"programs without code: {len(missing)}")
     for program in missing:
         print(f"without code: 0x{program:016x}")
+    print(f"files read: {read}")
+    if index_in:
+        print(f"index: {index_in}")
+    if index_out:
+        Path(index_out).write_text("".join(f"{line}\n" for line in sorted(
+            {source for *_, source in found.values() if source})), encoding="utf-8")
+        if unnamed:
+            print(f"index incomplete: {len(unnamed)} files with code have no name")
     print(f"seconds: {time.time() - t0:.0f}")
+    return 1 if index_out and unnamed else 0
 
 
 def main(argv):
     args = list(argv)
     out = None
     dirs = None
+    index_in = index_out = None
+    for flag in ("--index", "--write-index"):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                sys.exit(__doc__)
+            if flag == "--index":
+                index_in = args[i + 1]
+            else:
+                index_out = args[i + 1]
+            del args[i:i + 2]
+    if (index_in or index_out) and "--add-code" not in args:
+        sys.exit(__doc__)
     if "--add-code" in args:
         i = args.index("--add-code")
         if i + 2 >= len(args):
@@ -297,8 +372,7 @@ def main(argv):
         with open(args[0], "rb") as f:
             data = f.read()
         if dirs:
-            add_code(data, out, dirs)
-            return 0
+            return add_code(data, out, dirs, index_in, index_out)
         version, keys, codes, sizes = summary(data)
         if out:
             _, entries = read_list(data)

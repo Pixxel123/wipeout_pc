@@ -1,6 +1,7 @@
 """tools/deck/precompile-list-info.py on small lists built in memory (the layout of
 vk_precompile_list.h: header, then entries of u32 size, FNV-1a 64, body)."""
 import contextlib
+import hashlib
 import importlib.util
 import io
 import random
@@ -57,9 +58,17 @@ def blob(program, body=(1, 2, 3, 4)):
     return start + head + struct.pack('<II', zlib.crc32(start + head[:16]), 0)
 
 
-def psarc(*files, block=64):
+def psarc(*files, block=64, names=None):
     """A PSARC holding `files`: each block zlib, or stored when that is not smaller (a full block
-    stored is 0 in the size table, whose entries are as wide as the block size needs)."""
+    stored is 0 in the size table, whose entries are as wide as the block size needs). With `names`
+    the first file is the manifest listing them, NUL separated as the game's are, and the other
+    entries follow it sorted by the MD5 of their upper-cased name, which the TOC holds (flags 1)."""
+    hashes = [bytes(16)] * len(files)
+    if names:
+        md5 = {n: hashlib.md5(n.upper().encode()).digest() for n in names}
+        order = sorted(range(len(files)), key=lambda i: md5[names[i]])
+        files = ('\0'.join(names).encode(), *(files[i] for i in order))
+        hashes = [bytes(16)] + [md5[names[i]] for i in order]
     width = 2 if block <= 1 << 16 else 3
     toc, sizes, data = [], [], b''
     for file in files:
@@ -72,9 +81,10 @@ def psarc(*files, block=64):
             sizes.append(0 if len(packed) == block else len(packed))
             data += packed
     toc_len = 32 + 30 * len(files) + width * len(sizes)
-    out = struct.pack('>4sI4sIIIII', b'PSAR', 0x10004, b'zlib', toc_len, 30, len(files), block, 0)
-    for first, size, offset in toc:
-        out += bytes(16) + struct.pack('>I', first) + size.to_bytes(5, 'big')
+    out = struct.pack('>4sI4sIIIII', b'PSAR', 0x10004, b'zlib', toc_len, 30, len(files), block,
+                      1 if names else 0)
+    for (first, size, offset), md5 in zip(toc, hashes):
+        out += md5 + struct.pack('>I', first) + size.to_bytes(5, 'big')
         out += (offset + toc_len).to_bytes(5, 'big')
     return out + b''.join(s.to_bytes(width, 'big') for s in sizes) + data
 
@@ -222,6 +232,92 @@ class ListInfoTest(unittest.TestCase):
                                          ('eboot.bin', blob(0x11)))
         self.assertEqual(status, 1, out)
         self.assertFalse(dst.exists())
+
+    def indexed(self, wanted, *programs):
+        """A game dir with data00.psarc holding a, b (as a.bin, b.bin) and a list needing `wanted`;
+        returns the list data."""
+        game = self.root / 'game'
+        game.mkdir(exist_ok=True)
+        (game / 'data00.psarc').write_bytes(psarc(blob(0x11), blob(0x22), names=['a.bin', 'b.bin']))
+        (game / 'eboot.bin').write_bytes(blob(0x33))
+        return header() + program_key(*wanted)
+
+    def full_scan(self, data, *extra):
+        dst = self.root / 'out.bin'
+        status, out = run(self.write('in.bin', data), '--add-code', dst, self.root / 'game', *extra)
+        self.assertEqual(status, 0, out)
+        return out, dst
+
+    def test_write_index_lists_each_source_once(self):
+        data = self.indexed((0x11, 0x22, 0x33))
+        index = self.root / 'index.txt'
+        out, _ = self.full_scan(data, '--write-index', index)
+        self.assertEqual(index.read_text(), 'data00.psarc\ta.bin\ndata00.psarc\tb.bin\neboot.bin\n')
+        self.assertIn('files read: 3', out)
+        self.assertNotIn('index:', out)
+
+    def test_index_reads_only_listed_entries(self):
+        data = self.indexed((0x11, 0x22))
+        index = self.write('index.txt', b'data00.psarc\ta.bin\n')
+        out, dst = self.full_scan(data, '--index', index)
+        self.assertIn('programs found: 1', out)
+        self.assertIn('programs without code: 1', out)
+        self.assertIn('without code: 0x0000000000000022', out)
+        self.assertIn('files read: 1', out)
+        self.assertIn(f'index: {index}', out)
+        _, entries = info.read_list(dst.read_bytes())
+        self.assertEqual([e[0] for e in entries], [info.CODE, info.KEY])
+
+    def test_index_output_equals_full_scan(self):
+        data = self.indexed((0x11, 0x22, 0x33))
+        index = self.root / 'index.txt'
+        _, full = self.full_scan(data, '--write-index', index)
+        full_bytes = full.read_bytes()
+        out, dst = self.full_scan(data, '--index', index)
+        self.assertEqual(dst.read_bytes(), full_bytes)
+        self.assertIn('files read: 3', out)
+
+    def test_index_missing_archive_reports_without_code(self):
+        data = self.indexed((0x11, 0x33))
+        index = self.write('index.txt', b'data09.psarc\ta.bin\neboot.bin\n')
+        out, _ = self.full_scan(data, '--index', index)
+        self.assertIn('programs found: 1', out)
+        self.assertIn('without code: 0x0000000000000011', out)
+        self.assertIn('files read: 1', out)
+
+    def test_index_names_the_entry_holding_the_program(self):
+        names = ['a.bin', 'b.bin', 'c.bin', 'd.bin']
+        by_hash = sorted(names, key=lambda n: hashlib.md5(n.upper().encode()).digest())
+        self.assertNotEqual(by_hash, names)
+        game = self.root / 'game'
+        game.mkdir()
+        (game / 'data00.psarc').write_bytes(
+            psarc(noise(50), blob(0x11), noise(60), blob(0x22), names=names))
+        index = self.root / 'index.txt'
+        out, _ = self.full_scan(header() + program_key(0x11, 0x22), '--write-index', index)
+        self.assertEqual(index.read_text(), 'data00.psarc\tb.bin\ndata00.psarc\td.bin\n')
+        out, _ = self.full_scan(header() + program_key(0x11, 0x22), '--index', index)
+        self.assertIn('files read: 2', out)
+
+    def test_write_index_reports_an_entry_without_a_name(self):
+        game = self.root / 'game'
+        game.mkdir()
+        archive = bytearray(psarc(blob(0x11), noise(50), names=['a.bin', 'b.bin']))
+        for entry in (1, 2):
+            archive[32 + 30 * entry] ^= 1  # the hashes of both files match no name
+        (game / 'data00.psarc').write_bytes(bytes(archive))
+        index = self.root / 'index.txt'
+        status, out = run(self.write('in.bin', header() + program_key(0x11)), '--add-code',
+                          self.root / 'out.bin', game, '--write-index', index)
+        self.assertEqual(status, 1, out)
+        self.assertIn('has no name', out)
+        self.assertIn('index incomplete', out)
+        self.assertIn('programs found: 1', out)
+        self.assertEqual(index.read_text(), '')
+
+    def test_index_options_need_add_code(self):
+        with self.assertRaises(SystemExit):
+            run(self.write('in.bin', header()), '--index', self.root / 'i.txt')
 
 
 if __name__ == '__main__':
