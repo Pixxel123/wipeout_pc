@@ -18,7 +18,8 @@
 //     a program's code (once per program hash, before the first key that uses it): the hash
 //            and the code words, from the start token through the OrbShdr header.
 // No translator output: the list outlives a shader store reset. The code is the game's: a
-// list stays on the player's machine.
+// list that holds code stays on the player's machine. The port ships one without
+// (ShippedListPath), whose code is read from the game files (vk_precompile_files.h).
 
 #pragma once
 
@@ -26,11 +27,14 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 #include "common/types.h"
@@ -650,10 +654,24 @@ struct ListAppend {
     return plan;
 }
 
-/// Whether GOW3_PRECOMPILE_BOOT=1 asks for the start-up rebuild from GOW3_PRECOMPILE_LIST.
+/// The list the port ships beside its files, relative to the working directory: the port's
+/// folder, where run.py starts the game (as fsr4_shaders, vk_fsr4.cpp).
+inline constexpr const char* ShippedListPath = "precompile/shaders.list";
+
+/// Whether the start-up rebuild from BootListPath may run: on unless GOW3_PRECOMPILE_BOOT=0.
 [[nodiscard]] inline bool BootRequested() {
     const char* boot = std::getenv("GOW3_PRECOMPILE_BOOT");
-    return boot && boot[0] == '1';
+    return !boot || std::string_view{boot} != "0";
+}
+
+/// The start-up rebuild's list: GOW3_PRECOMPILE_LIST when set, else the shipped list when it is
+/// there; empty for none.
+[[nodiscard]] inline std::string BootListPath() {
+    if (const char* path = std::getenv("GOW3_PRECOMPILE_LIST"); path && path[0]) {
+        return path;
+    }
+    std::error_code error;
+    return std::filesystem::is_regular_file(ShippedListPath, error) ? ShippedListPath : "";
 }
 
 /// Whether GOW3_PRECOMPILE_LOAD=1 asks for the loader, which builds GOW3_PRECOMPILE_LIST while

@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// gow3 diagnostic GOW3_PRECOMPILE_BOOT=1 with GOW3_PRECOMPILE_LIST=<file>: after a recompiler
-// change dropped the shader store's translated shaders (StartOnDemand), the programs of a list
-// recorded by an earlier launch (GOW3_PRECOMPILE_RECORD) are translated back into the store
-// before the game runs, so the first race reads them from disk as on a second visit.
+// gow3 (GOW3_PRECOMPILE_BOOT, on unless 0): after a recompiler change dropped the shader store's
+// translated shaders (StartOnDemand), the programs of a list recorded by an earlier launch
+// (GOW3_PRECOMPILE_RECORD) are translated back into the store before the game runs, so the
+// first race reads them from disk as on a second visit. The list is GOW3_PRECOMPILE_LIST=<file>,
+// else the one the port ships (precompile/shaders.list, BootListPath); without either nothing
+// runs.
 //
 // Each entry is replayed as a selection on a private PipelineSelection, through
 // RefreshGraphicsKey itself, so stage order, runtime info and the bindings carried from the
@@ -23,8 +25,8 @@
 // saves. A walker that reads a word or follows a pointer the recording did not would read the
 // shadow's gaps or a stale guest address without faulting, so each walk is first run on the
 // recorded words alone (CheckWalk). An assert in the translator ends the game instead: a marker
-// file beside the list names the entry being translated, and the next start skips the entries
-// it names (CrashMarker).
+// file beside the list (for the shipped list, in the shader cache folder) names the entry being
+// translated, and the next start skips the entries it names (CrashMarker).
 //
 // Once the store has indexed what the rebuild wrote, the pipeline of each entry it built is
 // selected and handed to the compile workers as the loader's are (Pipeline, below), and the
@@ -75,6 +77,7 @@
 #endif
 
 #include "common/hash.h"
+#include "common/path_util.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/passes/srt.h"
@@ -1191,23 +1194,32 @@ void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
 }
 
 bool PipelineCache::RebuildFromPrecompileList(const std::function<void(u32, u32)>& progress) {
-    const char* path = std::getenv("GOW3_PRECOMPILE_LIST");
     // With GOW3_PRECOMPILE_LOAD=1 the loader builds the list instead (it logs that).
-    if (!BootRequested() || LoadRequested() || !path || !path[0]) {
+    if (!BootRequested() || LoadRequested()) {
+        return false;
+    }
+    const std::string path = BootListPath();
+    if (path.empty()) {
         return false;
     }
 #if !defined(__linux__) && !defined(_WIN32)
     std::printf("Precompile boot: not supported on this platform\n");
     return false;
 #else
-    auto parsed = LoadListFile(path, MaxListEntries);
+    auto parsed = LoadListFile(path.c_str(), MaxListEntries);
     if (!parsed || !SetUpFaultGuard()) {
         return false;
     }
-    const u32 files = ReadListCode(*parsed, path, progress);
+    const u32 files = ReadListCode(*parsed, path.c_str(), progress);
+    // The shipped list may sit on a read-only mount (the AppImage): its crash marker is kept in
+    // the shader cache folder.
+    const std::string crash_marker =
+        path == ShippedListPath ? Common::FS::PathToUTF8String(
+                                      Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
+                                      "shaders.list.boot")
+                                : path + ".boot";
     // Kept for the pipeline pass (BuildPrecompilePipelines), which releases it.
-    PrecompileBootPtr run{
-        new PrecompileBootRun{*this, std::move(*parsed), std::string{path} + ".boot"}};
+    PrecompileBootPtr run{new PrecompileBootRun{*this, std::move(*parsed), crash_marker}};
     run->boot.files = files;
     if (!run->boot.Run(progress)) {
         return false;

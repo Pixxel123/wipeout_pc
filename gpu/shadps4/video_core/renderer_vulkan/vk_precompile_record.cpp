@@ -605,8 +605,8 @@ PrecompileRecordPtr MakePrecompileRecord() {
                     "rebuild, GOW3_PRECOMPILE_BOOT, replaced it), ignored\n");
     }
     if (list_path && !BootRequested() && !LoadRequested() && !ScanRequested()) {
-        std::printf("Precompile list: %s is read only by the start-up rebuild "
-                    "(GOW3_PRECOMPILE_BOOT=1), the loader (GOW3_PRECOMPILE_LOAD=1) and the scan "
+        std::printf("Precompile list: %s is read only by the start-up rebuild (off with "
+                    "GOW3_PRECOMPILE_BOOT=0), the loader (GOW3_PRECOMPILE_LOAD=1) and the scan "
                     "(GOW3_PRECOMPILE_SCAN=1), not used\n",
                     list_path);
     }

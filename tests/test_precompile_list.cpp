@@ -2,7 +2,10 @@
 // writes and GOW3_PRECOMPILE_LIST reads back in a later launch.
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <set>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
@@ -432,6 +435,37 @@ void TestRoomCountsKeptBytes() {
 
 } // namespace
 
+/// The start-up rebuild's switch and list (POSIX setenv; the switch tests run on Linux).
+void TestBootSwitchAndList() {
+#ifndef _WIN32
+    namespace fs = std::filesystem;
+    const fs::path old = fs::current_path();
+    const fs::path dir = fs::temp_directory_path() / "precompile-list-test-boot";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    fs::current_path(dir);
+    unsetenv("GOW3_PRECOMPILE_BOOT");
+    unsetenv("GOW3_PRECOMPILE_LIST");
+    assert(Vulkan::Precompile::BootRequested());
+    assert(Vulkan::Precompile::BootListPath().empty()); // no shipped list: nothing runs
+    fs::create_directories("precompile");
+    std::ofstream{"precompile/shaders.list"} << "x";
+    assert(Vulkan::Precompile::BootListPath() == "precompile/shaders.list");
+    setenv("GOW3_PRECOMPILE_LIST", "/elsewhere/my.list", 1); // overrides, unchecked
+    assert(Vulkan::Precompile::BootListPath() == "/elsewhere/my.list");
+    setenv("GOW3_PRECOMPILE_LIST", "", 1);
+    assert(Vulkan::Precompile::BootListPath() == "precompile/shaders.list");
+    setenv("GOW3_PRECOMPILE_BOOT", "0", 1);
+    assert(!Vulkan::Precompile::BootRequested());
+    setenv("GOW3_PRECOMPILE_BOOT", "1", 1);
+    assert(Vulkan::Precompile::BootRequested());
+    unsetenv("GOW3_PRECOMPILE_BOOT");
+    unsetenv("GOW3_PRECOMPILE_LIST");
+    fs::current_path(old);
+    fs::remove_all(dir);
+#endif
+}
+
 int main() {
     TestRoundTrip();
     TestHeaderRejects();
@@ -450,6 +484,7 @@ int main() {
     TestAppendAfterZeroTail();
     TestAppendReplaces();
     TestRoomCountsKeptBytes();
+    TestBootSwitchAndList();
     std::puts("precompile-list-test: ok");
     return 0;
 }

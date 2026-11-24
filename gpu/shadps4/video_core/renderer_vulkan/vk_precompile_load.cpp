@@ -1155,8 +1155,8 @@ PrecompileLoadPtr MakePrecompileLoad(PipelineCache& cache) {
         return nullptr;
     }
     if (BootRequested()) {
-        std::printf("Precompile load: GOW3_PRECOMPILE_BOOT=1 is ignored with "
-                    "GOW3_PRECOMPILE_LOAD=1, the list is built while loading\n");
+        std::printf("Precompile load: no start-up rebuild with GOW3_PRECOMPILE_LOAD=1, the list "
+                    "is built while loading\n");
     }
     const char* path = std::getenv("GOW3_PRECOMPILE_LIST");
     if (!path || !path[0]) {

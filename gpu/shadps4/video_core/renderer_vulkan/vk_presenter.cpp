@@ -352,11 +352,11 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     // gow3 (GOW3_PRECOMPILE_BOOT): with pipeline binaries off (NVIDIA) the rebuild runs before
     // the warm-up. A start that rebuilt skips the warm-up: the saved shaders were dropped for
     // the rebuild, the list's pipelines are built, and the blocking WarmUp expects none built.
-    const char* list = std::getenv("GOW3_PRECOMPILE_LIST");
+    const bool boot_requested = Precompile::BootRequested() && !Precompile::LoadRequested();
+    const std::string list = boot_requested ? Precompile::BootListPath() : std::string{};
     std::error_code list_error;
-    const bool list_present = list && list[0] && std::filesystem::exists(list, list_error);
-    if (RunsPrecompileBoot(Precompile::BootRequested() && !Precompile::LoadRequested(),
-                           list_present, capture_only)) {
+    const bool list_present = !list.empty() && std::filesystem::exists(list, list_error);
+    if (RunsPrecompileBoot(boot_requested, list_present, capture_only)) {
         Gow3Overlay::SetLoadingKind(Gow3Overlay::LoadingKind::PrepareShaders);
         const bool rebuilt =
             rasterizer->GetPipelineCache().PrecompileBootBeforeWarmUp(prepare_shaders);
