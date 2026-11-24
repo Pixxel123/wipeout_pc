@@ -1152,20 +1152,8 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
         // next start with disk shaders on.
         ForgetDiskShaders();
     } else if (db.IsOpened() && db.ConcurrentReads()) {
-        std::vector<u8> marker;
-        if (compatible) {
-            db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
-        }
-        const auto expected = DiskShaderMarker();
-        if (marker != expected) {
-            // gow3 (GOW3_PRECOMPILE_BOOT): the list and its code are read before anything is
-            // dropped; when skipped the store is renewed as without a list.
-            PreparePrecompileList(progress);
-            RebuildDiskShaders(marker, progress);
-        } else {
-            IndexDiskShaders();
-        }
-        disk_shaders = true;
+        // gow3 (GOW3_PRECOMPILE_BOOT): a list that is not ready renews the store as without one.
+        BeginDiskShaders(compatible, true, progress);
     }
     db.FinishPreload();
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
@@ -1229,6 +1217,22 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
     if (!db.IsOpened()) {
         return false;
     }
+    // A list that is not ready (the game files gave too little of the code, the list cannot be
+    // read) leaves the start as without a list: nothing dropped, the marker as it was,
+    // disk_shaders off, the warm-up.
+    return BeginDiskShaders(compatible, false, progress);
+}
+
+// gow3: what both start paths do once the store is open with concurrent reads and disk shaders
+// are wanted (each caller checks that in its own order). The marker is read only from a store
+// CheckCacheProfile found compatible. A store with this build's marker is indexed. Otherwise the
+// list and its code are read before anything is dropped (PreparePrecompileList). When they are
+// not ready and renew_store_without_build is false, nothing is touched and it returns false.
+// Else the saved shader files are dropped for the rebuild (RebuildDiskShaders), also when it
+// cannot run. disk_shaders is set on every path but that one. True when the files were dropped.
+bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_build,
+                                     const std::function<void(u32, u32)>& progress) {
+    auto& db = Storage::DataBase::Instance();
     std::vector<u8> marker;
     if (compatible) {
         db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
@@ -1236,17 +1240,14 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
     const auto expected = DiskShaderMarker();
     const bool rebuild = marker != expected;
     if (rebuild) {
-        // The list and its code are read before anything is dropped. Unless they are ready (the
-        // game files gave too little of the code, the list cannot be read), the start goes on as
-        // without a list: nothing dropped, the marker as it was, disk_shaders off, the warm-up.
-        if (!PreparePrecompileList(progress)) {
+        // The list is read first on both paths, whatever the flag.
+        if (!PreparePrecompileList(progress) && !renew_store_without_build) {
             return false;
         }
         RebuildDiskShaders(marker, progress);
     } else {
         IndexDiskShaders();
     }
-    // As StartOnDemand: also when the rebuild could not run (its files are dropped).
     disk_shaders = true;
     return rebuild;
 }

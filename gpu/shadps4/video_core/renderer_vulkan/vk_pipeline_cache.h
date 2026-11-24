@@ -412,6 +412,13 @@ private:
     [[nodiscard]] bool DiskShadersWanted() const;
     [[nodiscard]] bool DiskShadersActive() const;
     void IndexDiskShaders();
+    /// The shared part of StartOnDemand and PrecompileBootBeforeWarmUp, with the store open,
+    /// concurrent reads and disk shaders wanted: index the store, or read the list and rebuild.
+    /// `compatible`: CheckCacheProfile's result. `renew_store_without_build`: a list that is not
+    /// ready still drops the store and saves the marker (StartOnDemand); false leaves the store
+    /// and disk_shaders as they were. True when the saved shader files were dropped.
+    bool BeginDiskShaders(bool compatible, bool renew_store_without_build,
+                          const std::function<void(u32 done, u32 total)>& progress);
     /// Drops the saved shader files `marker` does not vouch for, runs the start-up rebuild,
     /// saves this build's marker (DiskShaderMarker) and builds the rebuild's pipelines with
     /// disk_shaders on.
