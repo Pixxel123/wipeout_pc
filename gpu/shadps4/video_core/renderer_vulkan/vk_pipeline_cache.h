@@ -175,7 +175,9 @@ public:
     /// gow3: the same load on low-priority threads while the game runs; the GPU thread takes
     /// the results a few at a time (PumpWarmUp). False when it cannot (zip archive store).
     bool StartBackgroundWarmUp();
-    void StartOnDemand();
+    /// `progress(done, total)`: only while a start-up rebuild runs (RebuildFromPrecompileList,
+    /// BuildPrecompilePipelines).
+    void StartOnDemand(const std::function<void(u32 done, u32 total)>& progress);
     void Sync();
     void ReportCompilerStats();
 
@@ -253,11 +255,14 @@ private:
     friend struct PrecompileBoot;
     /// gow3 diagnostic GOW3_PRECOMPILE_BOOT (vk_precompile_boot.cpp): translates a precompile
     /// list into the store after a recompiler change dropped its shaders; false when off.
-    bool RebuildFromPrecompileList();
+    /// `progress(done, total)` follows the entries (Precompile::BootProgressOf), once a rebuild
+    /// runs.
+    bool RebuildFromPrecompileList(const std::function<void(u32 done, u32 total)>& progress);
     /// gow3 (GOW3_PRECOMPILE_BOOT): after RebuildFromPrecompileList and IndexDiskShaders, builds
     /// the pipeline of every entry the rebuild built before the start goes on, unless
     /// GOW3_PRECOMPILE_BOOT_PIPELINES=0; then releases the rebuild. Nothing without one.
-    void BuildPrecompilePipelines();
+    /// `on_screen(done, total)` goes on from the rebuild's count.
+    void BuildPrecompilePipelines(const std::function<void(u32 done, u32 total)>& on_screen);
     Result BootProgram(PipelineSelection& sel, Shader::HwStage hw_stage, Shader::SwStage sw_stage,
                        const Shader::ShaderParams& params, Shader::Backend::Bindings& binding,
                        const Shader::RuntimeInfo& runtime_info);

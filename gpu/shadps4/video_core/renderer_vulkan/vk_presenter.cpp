@@ -329,7 +329,21 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
                               EmulatorSettingsImpl::Flag("GOW3_PIPELINE_CAPTURE_ONLY", false);
     if (UseOnDemandPipelines(binary_cache, instance.GetPipelineBinaryGlobalKey().keySize != 0,
                             capture_only, background_warmup)) {
-        rasterizer->GetPipelineCache().StartOnDemand();
+        // gow3 (GOW3_PRECOMPILE_BOOT): a start-up rebuild shows its count; without one nothing
+        // is presented here. The first call presents at once.
+        Gow3Overlay::SetLoadingKind(Gow3Overlay::LoadingKind::PrepareShaders);
+        std::chrono::steady_clock::time_point last{};
+        rasterizer->GetPipelineCache().StartOnDemand([&](u32 done, u32 total) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last < std::chrono::milliseconds(250)) {
+                return;
+            }
+            last = now;
+            Gow3Overlay::SetLoading(true, done, total);
+            PresentLoadingFrame();
+        });
+        Gow3Overlay::SetLoading(false, 0, 0);
+        Gow3Overlay::SetLoadingKind(Gow3Overlay::LoadingKind::ShaderCache);
         return;
     }
 

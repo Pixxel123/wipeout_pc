@@ -74,6 +74,7 @@ std::atomic<bool> menu_open{false};
 bool r3_down = false, l2_down = false;
 std::atomic<bool> loading{false};
 std::atomic<u32> loading_done{0}, loading_total{0};
+std::atomic<LoadingKind> loading_kind{LoadingKind::ShaderCache};
 std::atomic<u32> background_done{0}, background_total{0};
 // A short message in a corner (saved screenshot), shown until notice_until.
 std::mutex notice_mutex;
@@ -962,8 +963,12 @@ void LoadingScreen() {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
     const u32 done = loading_done, total = loading_total;
+    const bool shader_cache = loading_kind == LoadingKind::ShaderCache;
     ImGui::SetWindowFontScale(1.6f);
-    ImGui::TextUnformatted(total ? "Loading shader cache..." : "Preparing graphics...");
+    // "\xe2\x80\xa6": U+2026 (DejaVu Sans has it; the atlas loads glyphs as they are drawn).
+    ImGui::TextUnformatted(!shader_cache ? "Preparing shaders\xe2\x80\xa6"
+                           : total       ? "Loading shader cache..."
+                                         : "Preparing graphics...");
     ImGui::SetWindowFontScale(1.0f);
     if (total) {
         char count[64];
@@ -971,7 +976,9 @@ void LoadingScreen() {
                       u32(u64(done) * 100 / total));
         ImGui::ProgressBar(float(done) / float(total), ImVec2(-1.0f, 0.0f), count);
     }
-    ImGui::TextDisabled("The first start after an update takes longer.");
+    if (shader_cache) {
+        ImGui::TextDisabled("The first start after an update takes longer.");
+    }
     ImGui::End();
 }
 
@@ -1395,6 +1402,10 @@ void SetLoading(bool active, u32 done, u32 total) {
     loading_done = done;
     loading_total = total;
     loading = active;
+}
+
+void SetLoadingKind(LoadingKind kind) {
+    loading_kind = kind;
 }
 
 bool Visible() {

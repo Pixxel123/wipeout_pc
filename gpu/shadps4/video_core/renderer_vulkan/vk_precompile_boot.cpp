@@ -49,6 +49,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -280,7 +281,8 @@ struct PrecompileBoot {
                    const std::map<u64, std::vector<u32>>& code_, std::string marker_path)
         : cache{cache_}, list{list_}, code{code_}, marker{std::move(marker_path)} {}
 
-    bool Run();
+    /// `progress(done, total)`: each entry and the end (BootProgressOf, the rebuild's half).
+    bool Run(const std::function<void(u32 done, u32 total)>& progress);
     void Begin();
     /// Builds one entry; why it was not translated, or none.
     std::optional<Reject> Entry(u32 index, const RecordedKey& key);
@@ -358,7 +360,7 @@ private:
 };
 
 /// False when the crash marker cannot be written: then nothing is translated.
-bool PrecompileBoot::Run() {
+bool PrecompileBoot::Run(const std::function<void(u32, u32)>& progress) {
     started = std::chrono::steady_clock::now();
     if (!marker.Enter(nullptr)) {
         std::printf("Precompile boot: cannot write %s (%s), rebuild off\n", marker.Path().c_str(),
@@ -373,8 +375,15 @@ bool PrecompileBoot::Run() {
     Begin();
     const u32 count = u32(list.keys.size()); // at most MaxListEntries (LoadListFile)
     std::printf("Precompile boot: translating %u entries into the shader store\n", count);
+    const auto report = [&](u32 passed) {
+        if (progress) {
+            const auto [done, total] = BootProgressOf(count, passed, 0);
+            progress(done, total);
+        }
+    };
     auto last_progress = started;
     for (u32 index = 0; index < count; ++index) {
+        report(index);
         if (const auto now = std::chrono::steady_clock::now();
             now - last_progress >= ProgressInterval) {
             last_progress = now;
@@ -404,6 +413,7 @@ bool PrecompileBoot::Run() {
                      std::chrono::steady_clock::now() - started)
                      .count());
     Report();
+    report(count);
     return true;
 }
 
@@ -1107,7 +1117,7 @@ void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
     delete run;
 }
 
-bool PipelineCache::RebuildFromPrecompileList() {
+bool PipelineCache::RebuildFromPrecompileList(const std::function<void(u32, u32)>& progress) {
     const char* path = std::getenv("GOW3_PRECOMPILE_LIST");
     // With GOW3_PRECOMPILE_LOAD=1 the loader builds the list instead (it logs that).
     if (!BootRequested() || LoadRequested() || !path || !path[0]) {
@@ -1124,7 +1134,7 @@ bool PipelineCache::RebuildFromPrecompileList() {
     // Kept for the pipeline pass (BuildPrecompilePipelines), which releases it.
     PrecompileBootPtr run{
         new PrecompileBootRun{*this, std::move(*parsed), std::string{path} + ".boot"}};
-    if (!run->boot.Run()) {
+    if (!run->boot.Run(progress)) {
         return false;
     }
     precompile_boot = std::move(run);
@@ -1137,7 +1147,7 @@ bool PipelineCache::RebuildFromPrecompileList() {
 /// while their queue is full (Full) this waits for them, publishes and tries the entry again.
 /// No time limit: the whole pass runs before the game does. Optimised rebuilds of fast first
 /// builds are not waited for; they run later on the low lane, as any other's do.
-void PipelineCache::BuildPrecompilePipelines() {
+void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>& on_screen) {
     // Released when this returns, also with the pass off.
     const PrecompileBootPtr run = std::move(precompile_boot);
     if (!run) {
@@ -1166,7 +1176,20 @@ void PipelineCache::BuildPrecompilePipelines() {
             print();
         }
     };
+    // The loading screen's second half counts the list's entries as the rebuild's does: up to
+    // the built entry handed over, so the entries the rebuild did not build count as passed and
+    // the bar ends full.
+    const u32 count = u32(run->list.keys.size());
+    u32 passed = 0;
+    const auto report = [&] {
+        if (on_screen) {
+            const auto [shown, total] = BootProgressOf(count, count, passed);
+            on_screen(shown, total);
+        }
+    };
     const auto entries_done = [&](u32 done) {
+        passed = boot.built[done];
+        report();
         progress([&] {
             std::printf("Precompile boot: pipelines: %u of %u entries\n", done, entries);
         });
@@ -1200,12 +1223,15 @@ void PipelineCache::BuildPrecompilePipelines() {
         }
     }
     do {
+        report();
         progress([&] {
             std::printf("Precompile boot: pipelines: waiting for %zu builds\n",
                         LoadBuildsRunning());
         });
         wait_and_publish();
     } while (LoadBuildsRunning() > 0);
+    passed = count;
+    report();
     const auto now = std::chrono::steady_clock::now();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count();
     const auto total_ms =

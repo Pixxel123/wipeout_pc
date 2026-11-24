@@ -161,6 +161,15 @@ void TestThePumpBuildsNeededEntriesBeforeCheckedOnes() {
     assert(NextPumpQueue(false, true, true) == PumpQueue::Checking);
 }
 
+void TestTheStartUpBuildCountsBothHalvesInOneBar() {
+    const auto same = [](BootProgress a, BootProgress b) {
+        return a.done == b.done && a.total == b.total;
+    };
+    assert(same(BootProgressOf(3530, 0, 0), {0, 7060}));
+    assert(same(BootProgressOf(3530, 3530, 0), {3530, 7060}));
+    assert(same(BootProgressOf(3530, 3530, 3530), {7060, 7060}));
+}
+
 } // namespace
 
 int main() {
@@ -180,5 +189,6 @@ int main() {
     TestCheckedEntriesGetABoundedShareOfAHold();
     TestVariantStepsAsideWhileTheGameTranslates();
     TestThePumpBuildsNeededEntriesBeforeCheckedOnes();
+    TestTheStartUpBuildCountsBothHalvesInOneBar();
     return 0;
 }

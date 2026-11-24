@@ -1141,7 +1141,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     Storage::DataBase::Instance().FinishPreload();
 }
 
-void PipelineCache::StartOnDemand() {
+void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress) {
     const bool compatible = CheckCacheProfile();
     auto& db = Storage::DataBase::Instance();
     // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
@@ -1180,14 +1180,14 @@ void PipelineCache::StartOnDemand() {
                                                                   : "another translator");
             // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild, so a start
             // that ends inside it drops its files again next time.
-            const bool rebuilt = RebuildFromPrecompileList();
+            const bool rebuilt = RebuildFromPrecompileList(progress);
             db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
             if (rebuilt) {
                 db.Flush();
                 IndexDiskShaders();
                 // The pass's selections read programs from the store (DiskShadersActive).
                 disk_shaders = true;
-                BuildPrecompilePipelines();
+                BuildPrecompilePipelines(progress);
             }
         } else {
             IndexDiskShaders();

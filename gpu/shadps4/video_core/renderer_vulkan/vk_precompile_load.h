@@ -180,6 +180,18 @@ struct VariantCounts {
     u32 added = 0, present = 0, left = 0;
 };
 
+/// The start-up rebuild's progress on the loading screen: one count for both halves.
+struct BootProgress {
+    u32 done, total;
+};
+
+/// Of a list of `entries`: the rebuild's entries passed (`translated`) and the pipeline pass's
+/// (`pipelines_done`), each half `entries` long.
+[[nodiscard]] constexpr BootProgress BootProgressOf(u32 entries, u32 translated,
+                                                    u32 pipelines_done) {
+    return {translated + pipelines_done, 2 * entries};
+}
+
 /// Permutations a program takes: IndexDiskShaders reads indices below it.
 constexpr size_t MaxPermutations = 64;
 
