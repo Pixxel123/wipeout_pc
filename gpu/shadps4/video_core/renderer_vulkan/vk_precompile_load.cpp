@@ -1109,7 +1109,8 @@ void PrecompileLoad::TraceDraw(const PipelineSelection& selection) {
                 if (*entry.key_hash != key_hash &&
                     entry.key.size() == sizeof(GraphicsPipelineKey)) {
                     GraphicsPipelineKey entry_key;
-                    std::memcpy(&entry_key, entry.key.data(), sizeof(entry_key));
+                    std::memcpy(static_cast<void*>(&entry_key), entry.key.data(),
+                                sizeof(entry_key));
                     list_text += " (draw/entry: " +
                                  KeyDiff(selection.graphics_key, entry_key, stage_programs) + ")";
                 }
