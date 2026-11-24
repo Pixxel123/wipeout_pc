@@ -165,9 +165,14 @@ void TestTheStartUpBuildCountsBothHalvesInOneBar() {
     const auto same = [](BootProgress a, BootProgress b) {
         return a.done == b.done && a.total == b.total;
     };
-    assert(same(BootProgressOf(3530, 0, 0), {0, 7060}));
-    assert(same(BootProgressOf(3530, 3530, 0), {3530, 7060}));
-    assert(same(BootProgressOf(3530, 3530, 3530), {7060, 7060}));
+    // A list that holds its code: no files.
+    assert(same(BootProgressOf(0, 3530, 0, 0, 0), {0, 7060}));
+    assert(same(BootProgressOf(0, 3530, 0, 3530, 0), {3530, 7060}));
+    assert(same(BootProgressOf(0, 3530, 0, 3530, 3530), {7060, 7060}));
+    // Its code read from 426 game files first.
+    assert(same(BootProgressOf(426, 3530, 0, 0, 0), {0, 7486}));
+    assert(same(BootProgressOf(426, 3530, 426, 0, 0), {426, 7486}));
+    assert(same(BootProgressOf(426, 3530, 426, 3530, 3530), {7486, 7486}));
 }
 
 } // namespace

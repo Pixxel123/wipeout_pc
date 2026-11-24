@@ -30,6 +30,11 @@
 // selected and handed to the compile workers as the loader's are (Pipeline, below), and the
 // start waits for them (BuildPrecompilePipelines); GOW3_PRECOMPILE_BOOT_PIPELINES=0 skips that.
 //
+// A list without the code of some of its programs gets it from the player's game files when an
+// index of the files that hold it lies beside the list (<list>.files, vk_precompile_files.h):
+// the update folder (GOW3_PATCH_DIR), then the game's (GOW3_GAME_DIR). The code is read before
+// the first entry and released with the list after the pipeline pass.
+//
 // The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way, with
 // its own checked copies of the code the shader scan found in guest memory in place of the
 // list's, so a list without code works. Only programs the loader calls needed (neither in use
@@ -49,6 +54,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
@@ -77,6 +83,7 @@
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_precompile_files.h"
 #include "video_core/renderer_vulkan/vk_precompile_guard.h"
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
 #include "video_core/renderer_vulkan/vk_precompile_load.h"
@@ -273,6 +280,69 @@ u64 PeakMemoryMiB() {
 #endif
 }
 
+/// The code of the programs `list` names but does not hold, read from the game files into it
+/// when the index `<list_path>.files` exists (ReadGameCode); the list's own code is kept. The
+/// loading screen shows the files read as the first phase. Returns the files it counted, 0 when
+/// nothing was read.
+u32 ReadListCode(ParsedList& list, const char* list_path,
+                 const std::function<void(u32 done, u32 total)>& progress) {
+    std::set<u64> wanted;
+    for (const auto& key : list.keys) {
+        for (const auto& stage : key.stages) {
+            if (!list.code.contains(stage.hash)) {
+                wanted.insert(stage.hash);
+            }
+        }
+    }
+    const std::filesystem::path index = std::string{list_path} + ".files";
+    std::error_code error;
+    if (wanted.empty() || !std::filesystem::is_regular_file(index, error)) {
+        return 0;
+    }
+    std::vector<std::filesystem::path> dirs;
+    for (const char* name : {"GOW3_PATCH_DIR", "GOW3_GAME_DIR"}) {
+        if (const char* dir = std::getenv(name); dir && dir[0]) {
+            dirs.emplace_back(dir);
+        }
+    }
+    if (dirs.empty()) {
+        std::printf("Precompile boot: no game folder is set (GOW3_PATCH_DIR, GOW3_GAME_DIR)\n");
+    }
+    const auto started = std::chrono::steady_clock::now();
+    const u32 entries = u32(list.keys.size());
+    u32 files = 0;
+    const auto game = ReadGameCode(dirs, index, [&](u32 done, u32 total) {
+        files = total;
+        if (progress) {
+            const auto [shown, all] = BootProgressOf(total, entries, done, 0, 0);
+            progress(shown, all);
+        }
+    });
+    u32 read = 0;
+    for (const u64 hash : wanted) {
+        if (const auto found = game.by_program.find(hash); found != game.by_program.end()) {
+            std::vector<u32> words(found->second.size() / sizeof(u32));
+            std::memcpy(words.data(), found->second.data(), words.size() * sizeof(u32));
+            list.code.emplace(hash, std::move(words));
+            ++read;
+        }
+    }
+    for (size_t i = 0; i < game.missing.size() && i < MaxDetails; ++i) {
+        std::printf("Precompile boot: not read from the game files: %s\n", game.missing[i].c_str());
+    }
+    if (game.missing.size() > MaxDetails) {
+        std::printf("Precompile boot: not read from the game files: %zu more\n",
+                    game.missing.size() - MaxDetails);
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+    std::printf("Precompile boot: code read from the game files: %u programs from %u files in "
+                "%lld ms, %zu without code\n",
+                read, game.files_read, static_cast<long long>(ms), wanted.size() - read);
+    return files;
+}
+
 } // namespace
 
 struct PrecompileBoot {
@@ -295,6 +365,9 @@ struct PrecompileBoot {
     std::vector<u32> built;
     u64 run_ms = 0;
     std::chrono::steady_clock::time_point started; ///< when Run began
+    /// The game files the list's code was read from first (ReadListCode), 0 for none: the
+    /// loading screen's first phase.
+    u32 files = 0;
     bool load = false; ///< the loader's build: programs not needed are only bound
     const char* log_name = "Precompile boot";
     /// The loader's: the permutations written, program hash and index.
@@ -377,7 +450,7 @@ bool PrecompileBoot::Run(const std::function<void(u32, u32)>& progress) {
     std::printf("Precompile boot: translating %u entries into the shader store\n", count);
     const auto report = [&](u32 passed) {
         if (progress) {
-            const auto [done, total] = BootProgressOf(count, passed, 0);
+            const auto [done, total] = BootProgressOf(files, count, files, passed, 0);
             progress(done, total);
         }
     };
@@ -1131,9 +1204,11 @@ bool PipelineCache::RebuildFromPrecompileList(const std::function<void(u32, u32)
     if (!parsed || !SetUpFaultGuard()) {
         return false;
     }
+    const u32 files = ReadListCode(*parsed, path, progress);
     // Kept for the pipeline pass (BuildPrecompilePipelines), which releases it.
     PrecompileBootPtr run{
         new PrecompileBootRun{*this, std::move(*parsed), std::string{path} + ".boot"}};
+    run->boot.files = files;
     if (!run->boot.Run(progress)) {
         return false;
     }
@@ -1183,7 +1258,8 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
     u32 passed = 0;
     const auto report = [&] {
         if (on_screen) {
-            const auto [shown, total] = BootProgressOf(count, count, passed);
+            const auto [shown, total] =
+                BootProgressOf(boot.files, count, boot.files, count, passed);
             on_screen(shown, total);
         }
     };
