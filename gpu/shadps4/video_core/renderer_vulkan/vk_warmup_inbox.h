@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <utility>
@@ -22,6 +23,15 @@ inline bool UseOnDemandPipelines(bool binary_cache, bool supported, bool capture
 /// the warm-up when on-demand pipelines are off (pipeline binaries off, as on NVIDIA).
 constexpr bool RunsPrecompileBoot(bool boot_requested, bool list_present, bool capture_only) {
     return boot_requested && list_present && !capture_only;
+}
+
+/// gow3 (GOW3_PRECOMPILE_BOOT): whether the start-up rebuild runs once the list's code is read.
+/// Not when the list needed the code of `wanted` programs from the game files and fewer than 9
+/// in 10 were `read` (no game folder, an archive not found or not read): the start then goes on
+/// as without a list. A few programs not in the game files (1 of 1,283 for the shipped list)
+/// do not stop it.
+constexpr bool GameCodeSuffices(std::uint32_t wanted, std::uint32_t read) {
+    return std::uint64_t{read} * 10 >= std::uint64_t{wanted} * 9;
 }
 
 /// gow3: whether the background warm-up leaves a saved stage alone because the game is

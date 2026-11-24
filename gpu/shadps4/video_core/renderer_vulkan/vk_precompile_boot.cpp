@@ -35,7 +35,9 @@
 // A list without the code of some of its programs gets it from the player's game files when an
 // index of the files that hold it lies beside the list (<list>.files, vk_precompile_files.h):
 // the update folder (GOW3_PATCH_DIR), then the game's (GOW3_GAME_DIR). The code is read before
-// the first entry and released with the list after the pipeline pass.
+// the first entry and released with the list after the pipeline pass. Without the index, or
+// when fewer than 9 in 10 of those programs are found, the rebuild is skipped and the start
+// goes on as without a list (PreparePrecompileList).
 //
 // The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way, with
 // its own checked copies of the code the shader scan found in guest memory in place of the
@@ -91,6 +93,7 @@
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
 #include "video_core/renderer_vulkan/vk_precompile_load.h"
 #include "video_core/renderer_vulkan/vk_precompile_shadow.h"
+#include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 
 namespace Vulkan {
 
@@ -283,12 +286,21 @@ u64 PeakMemoryMiB() {
 #endif
 }
 
+/// What ReadListCode did: the files it counted (0 when nothing was read), the programs whose
+/// code the list lacks and those found in the game files (none read without an index), and why
+/// some were not found, for the log.
+struct ListCodeRead {
+    u32 files = 0;
+    u32 wanted = 0;
+    u32 read = 0;
+    std::string why;
+};
+
 /// The code of the programs `list` names but does not hold, read from the game files into it
 /// when the index `<list_path>.files` exists (ReadGameCode); the list's own code is kept. The
-/// loading screen shows the files read as the first phase. Returns the files it counted, 0 when
-/// nothing was read.
-u32 ReadListCode(ParsedList& list, const char* list_path,
-                 const std::function<void(u32 done, u32 total)>& progress) {
+/// loading screen shows the files read as the first phase.
+ListCodeRead ReadListCode(ParsedList& list, const char* list_path,
+                          const std::function<void(u32 done, u32 total)>& progress) {
     std::set<u64> wanted;
     for (const auto& key : list.keys) {
         for (const auto& stage : key.stages) {
@@ -297,10 +309,13 @@ u32 ReadListCode(ParsedList& list, const char* list_path,
             }
         }
     }
+    if (wanted.empty()) {
+        return {};
+    }
     const std::filesystem::path index = std::string{list_path} + ".files";
     std::error_code error;
-    if (wanted.empty() || !std::filesystem::is_regular_file(index, error)) {
-        return 0;
+    if (!std::filesystem::is_regular_file(index, error)) {
+        return {0, u32(wanted.size()), 0, "no index beside the list"};
     }
     std::vector<std::filesystem::path> dirs;
     for (const char* name : {"GOW3_PATCH_DIR", "GOW3_GAME_DIR"}) {
@@ -343,7 +358,13 @@ u32 ReadListCode(ParsedList& list, const char* list_path,
     std::printf("Precompile boot: code read from the game files: %u programs from %u files in "
                 "%lld ms, %zu without code\n",
                 read, game.files_read, static_cast<long long>(ms), wanted.size() - read);
-    return files;
+    std::string why = dirs.empty()               ? "no game folder is set"
+                      : !game.missing.empty()    ? game.missing.front()
+                                                 : "the indexed game files do not hold them";
+    if (game.missing.size() > 1) {
+        why += fmt::format(" and {} more", game.missing.size() - 1);
+    }
+    return {files, u32(wanted.size()), read, std::move(why)};
 }
 
 } // namespace
@@ -1193,24 +1214,33 @@ void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
     delete run;
 }
 
-bool PipelineCache::RebuildFromPrecompileList(const std::function<void(u32, u32)>& progress) {
+PipelineCache::PrecompilePrepared PipelineCache::PreparePrecompileList(
+    const std::function<void(u32, u32)>& progress) {
     // With GOW3_PRECOMPILE_LOAD=1 the loader builds the list instead (it logs that).
     if (!BootRequested() || LoadRequested()) {
-        return false;
+        return PrecompilePrepared::None;
     }
     const std::string path = BootListPath();
     if (path.empty()) {
-        return false;
+        return PrecompilePrepared::None;
     }
 #if !defined(__linux__) && !defined(_WIN32)
     std::printf("Precompile boot: not supported on this platform\n");
-    return false;
+    return PrecompilePrepared::None;
 #else
     auto parsed = LoadListFile(path.c_str(), MaxListEntries);
-    if (!parsed || !SetUpFaultGuard()) {
-        return false;
+    if (!parsed) {
+        return PrecompilePrepared::None;
     }
-    const u32 files = ReadListCode(*parsed, path.c_str(), progress);
+    const auto code = ReadListCode(*parsed, path.c_str(), progress);
+    if (!GameCodeSuffices(code.wanted, code.read)) {
+        std::printf("Precompile boot: skipped, the game files gave %u of %u programs (%s)\n",
+                    code.read, code.wanted, code.why.c_str());
+        return PrecompilePrepared::Skipped;
+    }
+    if (!SetUpFaultGuard()) {
+        return PrecompilePrepared::None;
+    }
     // The shipped list may sit on a read-only mount (the AppImage): its crash marker is kept in
     // the shader cache folder.
     const std::string crash_marker =
@@ -1219,14 +1249,17 @@ bool PipelineCache::RebuildFromPrecompileList(const std::function<void(u32, u32)
                                       "shaders.list.boot")
                                 : path + ".boot";
     // Kept for the pipeline pass (BuildPrecompilePipelines), which releases it.
-    PrecompileBootPtr run{new PrecompileBootRun{*this, std::move(*parsed), crash_marker}};
-    run->boot.files = files;
-    if (!run->boot.Run(progress)) {
-        return false;
-    }
-    precompile_boot = std::move(run);
-    return true;
+    precompile_boot.reset(new PrecompileBootRun{*this, std::move(*parsed), crash_marker});
+    precompile_boot->boot.files = code.files;
+    return PrecompilePrepared::Ready;
 #endif
+}
+
+bool PipelineCache::RunPrecompileList(const std::function<void(u32, u32)>& progress) {
+    if (precompile_boot && !precompile_boot->boot.Run(progress)) {
+        precompile_boot.reset();
+    }
+    return precompile_boot != nullptr;
 }
 
 /// Each entry the rebuild built, its pipeline selected from the store as the loader selects it

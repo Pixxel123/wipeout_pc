@@ -26,6 +26,18 @@ int main() {
     static_assert(!RunsPrecompileBoot(false, true, false));
     static_assert(!RunsPrecompileBoot(true, false, false));
     static_assert(!RunsPrecompileBoot(true, true, true));
+    // The start-up rebuild runs unless the list needed code from the game files and fewer than
+    // 9 in 10 of those programs were read (no game folder, an archive not read): then the start
+    // goes on as without a list.
+    static_assert(GameCodeSuffices(0, 0));
+    static_assert(GameCodeSuffices(1283, 1283));
+    static_assert(GameCodeSuffices(1283, 1282)); // the shipped list: one program not found
+    static_assert(GameCodeSuffices(1283, 1155));
+    static_assert(!GameCodeSuffices(1283, 1154));
+    static_assert(!GameCodeSuffices(1283, 0));
+    static_assert(!GameCodeSuffices(1, 0));
+    static_assert(GameCodeSuffices(0xffffffffu, 0xffffffffu));
+    static_assert(!GameCodeSuffices(0xffffffffu, 0xe6666665u));
     // A pending translation keeps the warm-up out of its program, except a stage already at its
     // saved index when the session numbers as the store does.
     static_assert(!WarmStageWaitsForTranslation(false, false, false));

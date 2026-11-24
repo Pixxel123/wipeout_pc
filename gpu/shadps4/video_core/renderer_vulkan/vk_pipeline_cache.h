@@ -175,8 +175,8 @@ public:
     /// gow3: the same load on low-priority threads while the game runs; the GPU thread takes
     /// the results a few at a time (PumpWarmUp). False when it cannot (zip archive store).
     bool StartBackgroundWarmUp();
-    /// `progress(done, total)`: only while a start-up rebuild runs (RebuildFromPrecompileList,
-    /// BuildPrecompilePipelines).
+    /// `progress(done, total)`: only while a start-up rebuild runs (PreparePrecompileList,
+    /// RunPrecompileList, BuildPrecompilePipelines).
     void StartOnDemand(const std::function<void(u32 done, u32 total)>& progress);
     /// gow3 (GOW3_PRECOMPILE_BOOT) without on-demand pipelines: the start-up rebuild and its
     /// pipeline pass, once per translator, before WarmUp or StartBackgroundWarmUp; the session
@@ -258,12 +258,20 @@ private:
     friend struct PrecompileRecord;
     void CapturePrecompile();
     friend struct PrecompileBoot;
-    /// gow3 diagnostic GOW3_PRECOMPILE_BOOT (vk_precompile_boot.cpp): translates a precompile
-    /// list into the store after a recompiler change dropped its shaders; false when off.
-    /// `progress(done, total)` follows the entries (Precompile::BootProgressOf), once a rebuild
-    /// runs.
-    bool RebuildFromPrecompileList(const std::function<void(u32 done, u32 total)>& progress);
-    /// gow3 (GOW3_PRECOMPILE_BOOT): after RebuildFromPrecompileList and IndexDiskShaders, builds
+    /// gow3 (GOW3_PRECOMPILE_BOOT, vk_precompile_boot.cpp): the start-up rebuild in two steps.
+    /// PreparePrecompileList reads the list and the code it needs from the game files, before
+    /// anything is dropped: Ready keeps them for RunPrecompileList; Skipped when the game files
+    /// gave too little of that code or the list needs code and has no index (GameCodeSuffices),
+    /// and the start goes on as without a list; None without a list, with the switch off, a list
+    /// that cannot be read or no fault guard.
+    enum class PrecompilePrepared { None, Skipped, Ready };
+    PrecompilePrepared PreparePrecompileList(
+        const std::function<void(u32 done, u32 total)>& progress);
+    /// Translates the prepared list into the store after a recompiler change dropped its
+    /// shaders; false when nothing was prepared or the rebuild stopped. `progress(done, total)`
+    /// follows the entries (Precompile::BootProgressOf).
+    bool RunPrecompileList(const std::function<void(u32 done, u32 total)>& progress);
+    /// gow3 (GOW3_PRECOMPILE_BOOT): after RunPrecompileList and IndexDiskShaders, builds
     /// the pipeline of every entry the rebuild built before the start goes on, unless
     /// GOW3_PRECOMPILE_BOOT_PIPELINES=0; then releases the rebuild. Nothing without one.
     /// `on_screen(done, total)` goes on from the rebuild's count.

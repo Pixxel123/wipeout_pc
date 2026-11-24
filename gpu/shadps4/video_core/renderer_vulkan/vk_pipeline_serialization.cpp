@@ -1160,6 +1160,9 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
         }
         const auto expected = DiskShaderMarker();
         if (marker != expected) {
+            // gow3 (GOW3_PRECOMPILE_BOOT): the list and its code are read before anything is
+            // dropped; when skipped the store is renewed as without a list.
+            PreparePrecompileList(progress);
             RebuildDiskShaders(marker, expected, progress);
         } else {
             IndexDiskShaders();
@@ -1194,9 +1197,10 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std:
                 marker.empty()                       ? "no marker"
                 : marker == std::vector<u8>{0}       ? "disk shaders were off"
                                                      : "another translator");
-    // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild, so a start that ends
-    // inside it drops its files again next time.
-    const bool rebuilt = RebuildFromPrecompileList(progress);
+    // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild of the list the caller
+    // prepared (PreparePrecompileList), so a start that ends inside it drops its files again
+    // next time.
+    const bool rebuilt = RunPrecompileList(progress);
     db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", std::vector<u8>(saved));
     if (rebuilt) {
         db.Flush();
@@ -1233,6 +1237,12 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
     const auto expected = DiskShaderMarker();
     const bool rebuild = marker != expected;
     if (rebuild) {
+        // The list and its code are read before anything is dropped. Unless they are ready (the
+        // game files gave too little of the code, the list cannot be read), the start goes on as
+        // without a list: nothing dropped, the marker as it was, disk_shaders off, the warm-up.
+        if (PreparePrecompileList(progress) != PrecompilePrepared::Ready) {
+            return false;
+        }
         RebuildDiskShaders(marker, expected, progress);
     } else {
         IndexDiskShaders();
