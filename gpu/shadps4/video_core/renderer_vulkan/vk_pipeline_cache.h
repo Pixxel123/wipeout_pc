@@ -297,7 +297,8 @@ private:
     /// an index of Precompile::MaxPermutations or more, has a shader patch at that index (with
     /// patching on) or its module cannot be created; an equal spec already there inserts
     /// nothing, returns true and sets `inserted_out` false. GPU command thread, or at start the
-    /// thread of StartOnDemand (the rebuild's pipeline pass, before the game runs).
+    /// thread of StartOnDemand or PrecompileBootBeforeWarmUp (the rebuild's pipeline pass,
+    /// before the game runs).
     bool InsertLoadVariant(u64 hash, std::vector<u32>&& spv, Shader::StageSpecialization&& spec,
                            bool& inserted_out);
     /// gow3 (GOW3_PRECOMPILE_LOAD): GetProgram, a program not in program_cache; while loading
@@ -312,15 +313,17 @@ private:
         bool loader);
     /// gow3 (GOW3_PRECOMPILE_LOAD): the pipeline a loader selection (`worker`, `from_store`)
     /// found, handed to the compile workers unless it is built or being built. GPU command
-    /// thread, or at start the thread of StartOnDemand (the rebuild's pipeline pass), while the
-    /// selection's shadow copy is mapped: the build's snapshot reads it.
+    /// thread, or at start the thread of StartOnDemand or PrecompileBootBeforeWarmUp (the
+    /// rebuild's pipeline pass), while the selection's shadow copy is mapped: the build's
+    /// snapshot reads it.
     /// `why`, when set, gets why it was dropped (GOW3_PRECOMPILE_LOAD_TRACE).
     Precompile::PipelineStep StartLoadPipeline(const PipelineSelection& selection,
                                                const PrepWorker& worker,
                                                const char** why = nullptr);
     /// gow3 (GOW3_PRECOMPILE_LOAD): whether every build the loader handed over is done by
     /// `until_ns` (CompilePolicy::Now), waiting for them until then. GPU command thread, or at
-    /// start the thread of StartOnDemand (the rebuild's pipeline pass).
+    /// start the thread of StartOnDemand or PrecompileBootBeforeWarmUp (the rebuild's pipeline
+    /// pass).
     bool WaitLoadBuilds(u64 until_ns);
     /// gow3 (GOW3_PRECOMPILE_LOAD): builds the loader handed over that are not published yet.
     [[nodiscard]] size_t LoadBuildsRunning() const;

@@ -611,8 +611,8 @@ PrecompileRecordPtr MakePrecompileRecord() {
                     list_path);
     }
     // The record file may be the start-up rebuild's list: it is opened here, before the rebuild
-    // reads it (StartOnDemand), and keeps the list's entries; the first capture comes after the
-    // rebuild, with the game's first draws.
+    // reads it (StartOnDemand, PrecompileBootBeforeWarmUp), and keeps the list's entries; the
+    // first capture comes after the rebuild, with the game's first draws.
     if (!record_path) {
         return nullptr;
     }

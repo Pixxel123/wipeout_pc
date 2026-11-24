@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // gow3 (GOW3_PRECOMPILE_BOOT, on unless 0): after a recompiler change dropped the shader store's
-// translated shaders (StartOnDemand), the programs of a list recorded by an earlier launch
-// (GOW3_PRECOMPILE_RECORD) are translated back into the store before the game runs, so the
-// first race reads them from disk as on a second visit. The list is GOW3_PRECOMPILE_LIST=<file>,
-// else the one the port ships (precompile/shaders.list, BootListPath); without either nothing
-// runs.
+// translated shaders (StartOnDemand, PrecompileBootBeforeWarmUp), the programs of a list
+// recorded by an earlier launch (GOW3_PRECOMPILE_RECORD) are translated back into the store
+// before the game runs, so the first race reads them from disk as on a second visit. The list
+// is GOW3_PRECOMPILE_LIST=<file>, else the one the port ships (precompile/shaders.list,
+// BootListPath); without either nothing runs.
 //
 // Each entry is replayed as a selection on a private PipelineSelection, through
 // RefreshGraphicsKey itself, so stage order, runtime info and the bindings carried from the
@@ -211,11 +211,12 @@ bool ReadRecorded(u64 address, void* out, size_t size) {
     return true;
 }
 
-/// The crash-loop guard: `<list>.boot` names, one per line, the programs of the entries a start
-/// ended in, plus those of the entry being translated. A translator assert exits the game
-/// (_Exit) and the disk marker is saved only after the rebuild, so the next start rebuilds
-/// again and skips every entry that uses one of those programs: an assert is most likely
-/// the program's, whichever entry reached it.
+/// The crash-loop guard: `<list>.boot` (the shipped list's: shaders.list.boot in the shader
+/// cache folder) names, one per line, the programs of the entries a start ended in, plus those
+/// of the entry being translated. A translator assert exits the game (_Exit) and the disk
+/// marker is saved only after the rebuild, so the next start rebuilds again and skips every
+/// entry that uses one of those programs: an assert is most likely the program's, whichever
+/// entry reached it.
 class CrashMarker {
 public:
     explicit CrashMarker(std::string path_) : path{std::move(path_)} {

@@ -1181,8 +1181,10 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std:
     // name: a meta and its SPIR-V are separate writes, so an exit between them can pair one
     // shader's meta with another's SPIR-V. Another translator may also have produced different
     // SPIR-V. Only the numbered permutation files are dropped (once): pipeline keys and the
-    // profile stay. A kept key whose slot now holds another permutation only makes the warm-up
-    // build a pipeline no draw asks for, since draws look pipelines up by their own key; a key
+    // profile stay. A kept key whose slot now holds another permutation makes the warm-up build
+    // that key with the new permutation's module; a draw of the new permutation with the same
+    // state computes that key and gets this pipeline, built with the key's saved vertex input,
+    // which is harmless with vertex input dynamic state (vk_graphics_pipeline.cpp). A key
     // whose slot is gone is skipped.
     size_t dropped = 0;
     for (const auto type : {Storage::BlobType::ShaderMeta, Storage::BlobType::ShaderBinary}) {
@@ -1668,7 +1670,7 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
         size_t(std::distance(program.modules.begin(), it)) == stage.perm_idx;
     if (WarmStageWaitsForTranslation(program.pending != nullptr, DiskShadersActive(),
                                      at_saved_index)) {
-        return false; // the game is compiling a permutation that takes the next index
+        return false; // the game is translating a permutation: nothing is inserted meanwhile
     }
     if (it != program.modules.end()) {
         if (size_t(std::distance(program.modules.begin(), it)) != stage.perm_idx) {

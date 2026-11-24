@@ -16,6 +16,8 @@ let
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "out" "out/gow3-probe" "out/gow3-gpu-capabilities" "out/gpu" "out/gpu/libgow3gpu.so"
+    # The code-free shader list the first start builds from (precompile/shaders.list).
+    "gpu" "gpu/precompile"
   ] ++ assetDirs;
   src = builtins.path {
     name = "gow3-src";
@@ -23,7 +25,7 @@ let
     filter = path: type:
       let rel = lib.removePrefix (toString root + "/") (toString path);
       in builtins.elem rel wanted
-        || lib.any (dir: lib.hasPrefix (dir + "/") rel) assetDirs;
+        || lib.any (dir: lib.hasPrefix (dir + "/") rel) (assetDirs ++ [ "gpu/precompile" ]);
   };
   python = pkgs.python3.withPackages (ps: [ ps.pygobject3 ]);
   # Mesa comes with the package. gow3_vulkan.py adds the host NVIDIA ICD and
@@ -79,6 +81,7 @@ pkgs.stdenv.mkDerivation {
     mkdir -p $d/bin $out/bin
     cp run.sh $d/
     cp -r scripts patches fsr4_shaders launcher $d/
+    cp -r gpu/precompile $d/
     # FSR 4.1.1 models only with GOW3_PACKAGE_FSR411=1 (see above); otherwise run.sh finds them in
     # the data directory (~/.local/share/gow3/fsr4_411).
     if [ -d fsr4_411 ]; then

@@ -221,6 +221,12 @@ void TestArchiveNamesAreFileNamesOnly() {
     // A long name is cut in its missing line.
     const auto long_name = Run({sub}, Index(base, std::string(500, 'x') + ".psarc\ta.bin\n"));
     assert(long_name.code.missing.size() == 1 && long_name.code.missing[0].size() < 200);
+    // A long path keeps its end, with the file name.
+    const fs::path long_path = base / std::string(200, 'd') / "my-index.txt";
+    const auto long_index = Run({sub}, long_path);
+    const std::string tail = long_path.string().substr(long_path.string().size() - 120);
+    assert(long_index.code.missing.size() == 1 &&
+           long_index.code.missing[0] == "..." + tail + ": cannot read the index");
 }
 
 void TestCaseAndDuplicates() {

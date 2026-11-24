@@ -134,9 +134,13 @@ std::string Shown(std::string_view name) {
                                         : std::string{name.substr(0, MaxShownChars)} + "...";
 }
 
+/// A path as a missing line shows it: its last MaxShownChars, which hold the file name, cut
+/// with a leading "...".
 std::string Name(const fs::path& path) {
-    const auto name = path.u8string();
-    return Shown(std::string{name.begin(), name.end()});
+    const auto u8 = path.u8string();
+    const std::string name{u8.begin(), u8.end()};
+    return name.size() <= MaxShownChars ? name
+                                        : "..." + name.substr(name.size() - MaxShownChars);
 }
 
 /// A PSARC (zlib blocks, 30-byte TOC entries) open for reading its entries (psarc_files).
