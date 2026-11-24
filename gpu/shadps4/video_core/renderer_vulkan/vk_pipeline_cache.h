@@ -179,8 +179,9 @@ public:
     /// BuildPrecompilePipelines).
     void StartOnDemand(const std::function<void(u32 done, u32 total)>& progress);
     /// gow3 (GOW3_PRECOMPILE_BOOT) without on-demand pipelines: the start-up rebuild and its
-    /// pipeline pass, once per translator, before WarmUp or StartBackgroundWarmUp. True when
-    /// the saved shader files were dropped for it; the presenter then skips the warm-up.
+    /// pipeline pass, once per translator, before WarmUp or StartBackgroundWarmUp; the session
+    /// then numbers permutations as the store does (disk_shaders). True when the saved shader
+    /// files were dropped for it; the presenter then skips the warm-up.
     bool PrecompileBootBeforeWarmUp(const std::function<void(u32 done, u32 total)>& progress);
     void Sync();
     void ReportCompilerStats();
@@ -382,12 +383,11 @@ private:
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
-    /// gow3 (Gow3Toggle::DiskShaders): with on-demand startup, a program missing from
-    /// program_cache is first read from the store at its saved permutation indices, instead of
-    /// being translated again.
+    /// gow3 (Gow3Toggle::DiskShaders): with on-demand startup, or a warm-up after
+    /// PrecompileBootBeforeWarmUp, a program missing from program_cache is first read from the
+    /// store at its saved permutation indices, instead of being translated again.
     bool disk_shaders = false;
     bool disk_store_untrusted = false; ///< the bit went off live: the marker was reset
-    bool first_use_marker = false; ///< PrecompileBootBeforeWarmUp saved it: the warm-ups keep it
     std::unordered_map<u64, std::vector<u32>> disk_permutations; ///< pgm hash -> saved indices
     std::unordered_set<std::string> disk_pipeline_keys;          ///< "g_0x..."/"c_0x..." saved
     /// Loaded modules no draw has used yet (handles only, for the "used" count).

@@ -1677,9 +1677,6 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
-    size_t perm_idx = NewPermutationIndex(*program);
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
-
     vk::ShaderModule module{};
 
     // gow3: consecutive draws of a program almost always use the same permutation.
@@ -1687,6 +1684,12 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                       program->modules[program->last_used].spec == spec
                   ? program->modules.begin() + program->last_used
                   : std::ranges::find(program->modules, spec, &Program::Module::spec);
+    if (it == program->modules.end() && DiskShadersActive() && LoadDiskProgram(params.hash)) {
+        // gow3: the warm-up merged only some of its saved slots: the rest are read first.
+        it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+    }
+    size_t perm_idx = NewPermutationIndex(*program);
+    u64 perm_hash = HashCombine(params.hash, perm_idx);
     if (it != program->modules.end()) {
         program->last_used = std::distance(program->modules.begin(), it);
     }

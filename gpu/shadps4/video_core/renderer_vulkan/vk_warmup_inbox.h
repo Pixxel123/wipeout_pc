@@ -24,6 +24,16 @@ constexpr bool RunsPrecompileBoot(bool boot_requested, bool list_present, bool c
     return boot_requested && list_present && !capture_only;
 }
 
+/// gow3: whether the background warm-up leaves a saved stage alone because the game is
+/// translating a permutation of its program (`pending`). With first-use numbering that
+/// translation takes the next index, which may be the stage's. With the store's numbering it
+/// takes an index the store does not hold, so a stage whose spec is already at its saved index
+/// is used as it is; nothing is inserted while the translation is pending.
+constexpr bool WarmStageWaitsForTranslation(bool pending, bool store_numbering,
+                                            bool at_saved_index) {
+    return pending && !(store_numbering && at_saved_index);
+}
+
 /// #149: set when the driver refuses a cached pipeline for lack of memory while preloading.
 /// The bulk warm-up then stops reading and building: each further build would only fight the
 /// game for what is left, and the rest compile when the game needs them. Results are VkResult

@@ -85,15 +85,6 @@ std::vector<u8> DiskShaderMarker() {
                                     Serialization::ShaderMetaVersion);
     return {marker.begin(), marker.end()};
 }
-/// gow3 (GOW3_PRECOMPILE_BOOT): DiskShaderMarker of a store rebuilt by
-/// PrecompileBootBeforeWarmUp, whose sessions number permutations by first use. That start
-/// takes it as done; StartOnDemand, which reads files by index, drops them once.
-std::vector<u8> FirstUseMarker() {
-    auto marker = DiskShaderMarker();
-    const std::string_view first_use{", first use"};
-    marker.insert(marker.end(), first_use.begin(), first_use.end());
-    return marker;
-}
 /// gow3: this session may number permutations by first use: no on-demand reads at next start.
 void ForgetDiskShaders() {
     auto& db = Storage::DataBase::Instance();
@@ -1042,7 +1033,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     if (!CheckCacheProfile()) {
         return;
     }
-    if (!first_use_marker) {
+    if (!disk_shaders) { // set by PrecompileBootBeforeWarmUp: this session numbers as the store
         ForgetDiskShaders();
     }
     PreloadMemoryStop().Reset();
@@ -1202,7 +1193,6 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std:
                 dropped,
                 marker.empty()                       ? "no marker"
                 : marker == std::vector<u8>{0}       ? "disk shaders were off"
-                : marker == FirstUseMarker()         ? "numbered by first use"
                                                      : "another translator");
     // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild, so a start that ends
     // inside it drops its files again next time.
@@ -1219,10 +1209,11 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker, const std:
 
 // gow3 (GOW3_PRECOMPILE_BOOT): with pipeline binaries off (NVIDIA) the presenter takes a
 // warm-up, not StartOnDemand, so the rebuild and its pass run here first, as StartOnDemand runs
-// them. The warm-up's sessions number permutations by first use, so the store keeps
-// FirstUseMarker instead of ForgetDiskShaders' reset: a start here takes it, or StartOnDemand's
-// marker, as done, while StartOnDemand still drops the files once. Draws find the pass's
-// programs in program_cache at their saved indices; new permutations take the next index.
+// them, with the same marker. The session then numbers permutations as the store does, as on
+// demand: a draw reads a program the warm-up has not merged whole at its saved indices, and one
+// whose spec is missing from a program the warm-up merged in part reads the rest first
+// (LoadDiskProgram), so a new permutation never takes a saved slot and the warm-up finds its
+// stages at their saved indices (MergeWarmStage).
 bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
     // As in StartOnDemand: GOW3_DISK_SHADERS=0 leaves the start as it was.
@@ -1239,22 +1230,16 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
     if (compatible) {
         db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
     }
-    const auto first_use = FirstUseMarker();
-    first_use_marker = true;
-    if (marker == first_use) {
-        return false;
+    const auto expected = DiskShaderMarker();
+    const bool rebuild = marker != expected;
+    if (rebuild) {
+        RebuildDiskShaders(marker, expected, progress);
+    } else {
+        IndexDiskShaders();
     }
-    if (marker == DiskShaderMarker()) {
-        db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", std::vector<u8>(first_use));
-        return false;
-    }
-    RebuildDiskShaders(marker, first_use, progress);
-    // The warm-up's sessions number permutations by first use (NewPermutationIndex).
-    disk_shaders = false;
-    disk_permutations.clear();
-    disk_pipeline_keys.clear();
-    disk_modules_unused.clear();
-    return true;
+    // As StartOnDemand: also when the rebuild could not run (its files are dropped).
+    disk_shaders = true;
+    return rebuild;
 }
 
 bool PipelineCache::DiskShadersActive() const {
@@ -1289,6 +1274,9 @@ void PipelineCache::IndexDiskShaders() {
 // separate writes, and a slot refilled with another shader must never pair an old meta with
 // the new SPIR-V. The deletes queue in the store's write order, meta first: SPIR-V is written
 // first, so an exit at any point leaves at most a SPIR-V without a meta, rejected next start.
+// A program a warm-up loaded in part (MergeWarmStage, LoadPipelineStage) is in program_cache
+// already: a draw that misses its spec reads the slots still empty here (GetProgram), before a
+// new permutation takes an index.
 bool PipelineCache::LoadDiskProgram(u64 hash) {
     const auto found = disk_permutations.find(hash);
     if (found == disk_permutations.end()) {
@@ -1296,10 +1284,15 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
     }
     const auto started = std::chrono::steady_clock::now();
     auto& db = Storage::DataBase::Instance();
+    const auto in_use = program_cache.find(hash);
+    Program* const merged = in_use != program_cache.end() ? in_use->second.get() : nullptr;
     auto program = std::make_unique<Program>();
     bool have_info = false;
     size_t inserted = 0;
     for (const u32 idx : found->second) {
+        if (merged && idx < merged->modules.size() && merged->modules[idx].module) {
+            continue; // a warm-up merged it from the same files
+        }
         const auto meta_name = fmt::format("{:#018x}", HashCombine(hash, u64{idx}));
         const auto spv_name = fmt::format("{:#018x}_{}", hash, idx);
         const auto reject = [&] {
@@ -1337,7 +1330,7 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
             program->info = std::move(info);
             have_info = true;
         }
-        spec.info = &program->info;
+        spec.info = merged ? &merged->info : &program->info;
         program->InsertPermut(module, std::move(spec), idx);
         disk_modules_unused.insert(module);
         ++inserted;
@@ -1347,7 +1340,17 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
         program->modules.resize(std::max<size_t>(program->modules.size(), found->second.back() + 1));
         program->info_template = std::make_unique<Shader::Info>(program->info);
         std::unique_lock lock{programs_mutex};
-        program_cache.emplace(hash, std::move(program));
+        if (merged) {
+            merged->modules.resize(std::max(merged->modules.size(), program->modules.size()));
+            for (size_t idx = 0; idx < program->modules.size(); ++idx) {
+                auto& loaded = program->modules[idx];
+                if (loaded.module) {
+                    merged->InsertPermut(loaded.module, std::move(loaded.spec), idx);
+                }
+            }
+        } else {
+            program_cache.emplace(hash, std::move(program));
+        }
         ++disk_stats.programs;
         disk_stats.unused_peak = std::max<u64>(disk_stats.unused_peak, disk_modules_unused.size());
     }
@@ -1534,7 +1537,7 @@ bool PipelineCache::StartBackgroundWarmUp() {
     if (!CheckCacheProfile()) {
         return true; // nothing cached yet
     }
-    if (!first_use_marker) {
+    if (!disk_shaders) { // set by PrecompileBootBeforeWarmUp: this session numbers as the store
         ForgetDiskShaders();
     }
     background = new BackgroundWarmup;
@@ -1649,10 +1652,14 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
     }
     // The game already uses this shader: its permutations are the ones that count.
     Program& program = *it_pgm->second;
-    if (program.pending) {
+    const auto it = std::ranges::find(program.modules, stage.spec, &Program::Module::spec);
+    const bool at_saved_index =
+        it != program.modules.end() &&
+        size_t(std::distance(program.modules.begin(), it)) == stage.perm_idx;
+    if (WarmStageWaitsForTranslation(program.pending != nullptr, DiskShadersActive(),
+                                     at_saved_index)) {
         return false; // the game is compiling a permutation that takes the next index
     }
-    const auto it = std::ranges::find(program.modules, stage.spec, &Program::Module::spec);
     if (it != program.modules.end()) {
         if (size_t(std::distance(program.modules.begin(), it)) != stage.perm_idx) {
             return false;

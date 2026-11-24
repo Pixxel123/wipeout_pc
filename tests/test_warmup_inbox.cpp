@@ -26,6 +26,14 @@ int main() {
     static_assert(!RunsPrecompileBoot(false, true, false));
     static_assert(!RunsPrecompileBoot(true, false, false));
     static_assert(!RunsPrecompileBoot(true, true, true));
+    // A pending translation keeps the warm-up out of its program, except a stage already at its
+    // saved index when the session numbers as the store does.
+    static_assert(!WarmStageWaitsForTranslation(false, false, false));
+    static_assert(!WarmStageWaitsForTranslation(false, true, true));
+    static_assert(WarmStageWaitsForTranslation(true, false, false));
+    static_assert(WarmStageWaitsForTranslation(true, false, true));
+    static_assert(WarmStageWaitsForTranslation(true, true, false));
+    static_assert(!WarmStageWaitsForTranslation(true, true, true));
     assert(WarmupThreadCount(1) == 1 && WarmupThreadCount(2) == 1 && WarmupThreadCount(4) == 1);
     assert(WarmupThreadCount(6) == 4 && WarmupThreadCount(8) == 6 && WarmupThreadCount(32) == 6);
 
