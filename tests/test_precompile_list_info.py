@@ -315,6 +315,80 @@ class ListInfoTest(unittest.TestCase):
         self.assertIn('programs found: 1', out)
         self.assertEqual(index.read_text(), '')
 
+    def indexed_copies(self, wanted, update_archive, base_archive, index):
+        """--add-code --index with data00.psarc in an update and a base dir; the tool reads the
+        later dir (update) first."""
+        for name, archive in (('base', base_archive), ('update', update_archive)):
+            (self.root / name).mkdir()
+            (self.root / name / 'data00.psarc').write_bytes(archive)
+        status, out = run(self.write('in.bin', header() + program_key(*wanted)), '--add-code',
+                          self.root / 'out.bin', self.root / 'base', self.root / 'update',
+                          '--index', self.write('index.txt', index))
+        self.assertEqual(status, 0, out)
+        return out
+
+    def test_index_keeps_only_wanted_programs(self):
+        out = self.indexed_copies((0x22, 0x99), psarc(blob(0x22) + blob(0x33), names=['b.bin']),
+                                  b'', b'data00.psarc\tb.bin\n')
+        self.assertIn('programs found: 1', out)
+        _, entries = info.read_list((self.root / 'out.bin').read_bytes())
+        self.assertEqual([e[0] for e in entries], [info.CODE, info.KEY])
+        self.assertEqual(struct.unpack_from('<Q', entries[0][1], 16)[0], 0x22)
+
+    def test_index_reads_a_twice_listed_entry_once(self):
+        archive = (ROOT / 'tests/data/precompile_files/data00.psarc').read_bytes()
+        out = self.indexed_copies((0x22, 0x99), archive, archive, b'data00.psarc\tb.bin\n')
+        self.assertIn('programs found: 1', out)
+        self.assertIn('files read: 2', out)  # b.bin from each copy, once each
+
+    def test_index_second_copy_not_opened_when_all_found(self):
+        good = psarc(blob(0x11), blob(0x22), names=['a.bin', 'b.bin'])
+        out = self.indexed_copies((0x11, 0x22), good, good[:20],
+                                  b'data00.psarc\ta.bin\ndata00.psarc\tb.bin\n')
+        self.assertNotIn('skipped', out)  # the cut copy, if read: "skipped: ...: cut off"
+        self.assertIn('programs found: 2', out)
+        self.assertIn('files read: 2', out)
+
+    def test_index_program_only_in_second_copy_is_found(self):
+        out = self.indexed_copies((0x11, 0x22), psarc(blob(0x11), names=['a.bin']),
+                                  psarc(blob(0x11), blob(0x22), names=['a.bin', 'b.bin']),
+                                  b'data00.psarc\ta.bin\ndata00.psarc\tb.bin\n')
+        self.assertIn('programs found: 2', out)
+        self.assertIn('programs without code: 0', out)
+        self.assertIn('files read: 2', out)  # a.bin from the update's copy, b.bin from the base's
+
+    def eboots(self, wanted, update_eboot, base_eboot, *extra):
+        """--add-code with eboot.bin in an update and a base dir; the tool reads the later dir
+        (update) first."""
+        for name, eboot in (('base', base_eboot), ('update', update_eboot)):
+            (self.root / name).mkdir()
+            (self.root / name / 'eboot.bin').write_bytes(eboot)
+        status, out = run(self.write('in.bin', header() + program_key(*wanted)), '--add-code',
+                          self.root / 'out.bin', self.root / 'base', self.root / 'update', *extra)
+        self.assertEqual(status, 0, out)
+        return out
+
+    def test_index_reads_the_first_readable_eboot_only(self):
+        # The game runs the update's eboot.bin, so the base one is not read: a program only in it
+        # is not found. That is the rule's cost.
+        out = self.eboots((0x11, 0x22), blob(0x11), blob(0x22),
+                          '--index', self.write('index.txt', b'eboot.bin\n'))
+        self.assertIn('programs found: 1', out)
+        self.assertIn('without code: 0x0000000000000022', out)
+        self.assertIn('files read: 1', out)
+
+    def test_index_eboot_falls_through_when_unreadable(self):
+        out = self.eboots((0x22,), b'', blob(0x22),
+                          '--index', self.write('index.txt', b'eboot.bin\n'))
+        self.assertIn('eboot.bin: cannot read', out)
+        self.assertIn('programs found: 1', out)
+        self.assertIn('files read: 1', out)
+
+    def test_full_scan_reads_every_eboot(self):
+        out = self.eboots((0x11, 0x22), blob(0x11), blob(0x22))
+        self.assertIn('programs found: 2', out)
+        self.assertIn('files read: 2', out)
+
     def test_index_options_need_add_code(self):
         with self.assertRaises(SystemExit):
             run(self.write('in.bin', header()), '--index', self.root / 'i.txt')

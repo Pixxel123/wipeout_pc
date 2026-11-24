@@ -20,8 +20,9 @@ code). Prints the programs found per file and the hashes of those without code, 
 an archive it cannot read is named and skipped. Exits 1 on a list that already holds Code records.
 --write-index <file> (with --add-code) writes the files the code was found in, one sorted line
 each: eboot.bin, or <archive file name> TAB <path inside the archive>. --index <file> reads only
-those files; a program they do not hold is reported without code, never searched for elsewhere.
-The report ends with the number of files read.
+those files, each once, and only the first eboot.bin that can be read (the game runs the update's;
+a later dir's is the next tried); a program they do not hold is reported without code, never
+searched for elsewhere. The report ends with the number of files read.
 """
 import hashlib
 import re
@@ -44,6 +45,7 @@ START_TOKEN = struct.pack("<I", 0xBEEB03FF)
 SIGNATURE = b"OrbShdr"
 HEADER_WORDS = 8
 MAX_CODE_BYTES = 1 << 20
+MAX_EBOOT_BYTES = 256 << 20  # an eboot.bin the engine reads whole, at most (MaxEbootBytes)
 
 
 def fnv1a(data):
@@ -174,8 +176,9 @@ def psarc_files(path, want=None):
     """Each file a PSARC (zlib, 30-byte TOC entries) holds as (entry number, name, unpacked bytes),
     one at a time; the manifest (entry 0, name None) first. A file's name is the manifest name whose
     MD5 (of the upper-cased name when the archive's flags have bit 0, ignore case) is the entry's
-    hash, None when no name has it. With `want` (a set of names) only those files are read. Raises
-    ListError naming the file when it is not such an archive or is cut off."""
+    hash, None when no name has it. With `want` (a set of names) only those files are read, each
+    once as the engine reads them (data08.psarc lists some TOC entries twice). Raises ListError
+    naming the file when it is not such an archive or is cut off."""
     try:
         with open(path, "rb") as f:
             head = f.read(32)
@@ -226,10 +229,14 @@ def psarc_files(path, want=None):
                 if name:
                     key = name.upper() if flags & 1 else name
                     by_hash[hashlib.md5(key.encode("utf-8")).digest()] = name
+            done = set()
             for i in range(count):
                 name = None if i == 0 else by_hash.get(entries[i][0])
-                if want is None or (i and name in want):
+                if want is None:
                     yield i, name, manifest if i == 0 else read(i)
+                elif i and name in want and name not in done:
+                    done.add(name)
+                    yield i, name, read(i)
     except (struct.error, IndexError):
         raise ListError(f"{path}: cut off") from None
 
@@ -283,12 +290,27 @@ def add_code(data, out, dirs, index_in=None, index_out=None):
     found = {}
     read = 0
     unnamed = []
+    eboot_read = False
     for path, want in game_files(dirs, index):
         if len(found) == len(wanted):
             break
-        if path.name == "eboot.bin":
+        if path.name == "eboot.bin" and index is None:
             read += 1
             find_code(path.read_bytes(), wanted, found, str(path), "eboot.bin")
+        elif path.name == "eboot.bin":
+            # With an index, as the engine: the first eboot.bin that can be read, and only it.
+            if eboot_read:
+                continue
+            try:
+                eboot = path.read_bytes() if path.stat().st_size <= MAX_EBOOT_BYTES else b""
+            except OSError:
+                eboot = b""
+            if not eboot:
+                print(f"skipped: {path}: cannot read")
+                continue
+            eboot_read = True
+            read += 1
+            find_code(eboot, wanted, found, str(path), "eboot.bin")
         else:
             try:
                 for number, name, file in psarc_files(path, want):
