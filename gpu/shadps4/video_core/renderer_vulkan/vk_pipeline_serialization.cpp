@@ -1275,6 +1275,11 @@ bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_b
                            progress);
     } else {
         IndexDiskShaders();
+        // gow3: a store with no recorded key (made before the key, or a start that ended before
+        // the save) records the driver's now, so a later driver update is seen.
+        if (!driver_key.empty() && !key_recorded) {
+            db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
+        }
     }
     disk_shaders = true;
     return rebuild;
