@@ -1153,7 +1153,9 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
         ForgetDiskShaders();
     } else if (db.IsOpened() && db.ConcurrentReads()) {
         // gow3 (GOW3_PRECOMPILE_BOOT): a list that is not ready renews the store as without one.
-        BeginDiskShaders(compatible, true, progress);
+        // The driver's key is the one the pipeline binaries are checked against (Decode).
+        BeginDiskShaders(compatible, true, BinaryKey(instance.GetPipelineBinaryGlobalKey()),
+                         progress);
     }
     db.FinishPreload();
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
@@ -1161,6 +1163,7 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
 }
 
 void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
+                                       const std::vector<u8>& driver_key,
                                        const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
     // Sessions without the marker numbered permutations by first use and overwrote the files by
@@ -1184,6 +1187,7 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
                 dropped,
                 marker.empty()                       ? "no marker"
                 : marker == std::vector<u8>{0}       ? "disk shaders were off"
+                : marker == DiskShaderMarker()       ? "the driver's pipeline binary key changed"
                                                      : "another translator");
     // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild of the list the caller
     // prepared (PreparePrecompileList), so a start that ends inside it drops its files again
@@ -1196,6 +1200,13 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
         // The pass's selections read programs from the store (DiskShadersActive).
         disk_shaders = true;
         BuildPrecompilePipelines(progress);
+    }
+    // gow3: the driver's key (empty unless a prepared list is rebuilt on demand) is recorded once
+    // the pipelines are built, so a start that ends before this builds again next time; also
+    // when the rebuild could not run (its crash marker not written), else every start would drop
+    // the store again. A later start with another key builds again (DiskShaderStartOf).
+    if (!driver_key.empty()) {
+        db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
     }
 }
 
@@ -1219,8 +1230,8 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
     }
     // A list that is not ready (the game files gave too little of the code, the list cannot be
     // read) leaves the start as without a list: nothing dropped, the marker as it was,
-    // disk_shaders off, the warm-up.
-    return BeginDiskShaders(compatible, false, progress);
+    // disk_shaders off, the warm-up. No driver key: no saved pipeline binaries to lose.
+    return BeginDiskShaders(compatible, false, {}, progress);
 }
 
 // gow3: what both start paths do once the store is open with concurrent reads and disk shaders
@@ -1229,22 +1240,39 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
 // list and its code are read before anything is dropped (PreparePrecompileList). When they are
 // not ready and renew_store_without_build is false, nothing is touched and it returns false.
 // Else the saved shader files are dropped for the rebuild (RebuildDiskShaders), also when it
-// cannot run. disk_shaders is set on every path but that one. True when the files were dropped.
+// cannot run. With this build's marker and a driver key, a recorded key that differs from it
+// rebuilds as well when the list is ready (DiskShaderStartOf). disk_shaders is set on every path
+// but that one. True when the files were dropped.
 bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_build,
+                                     const std::vector<u8>& driver_key,
                                      const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
-    std::vector<u8> marker;
+    std::vector<u8> marker, recorded_key;
     if (compatible) {
         db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
-    }
-    const auto expected = DiskShaderMarker();
-    const bool rebuild = marker != expected;
-    if (rebuild) {
-        // The list is read first on both paths, whatever the flag.
-        if (!PreparePrecompileList(progress) && !renew_store_without_build) {
-            return false;
+        // A store from before the key has none (a Load would log the failed open).
+        if (!driver_key.empty() &&
+            std::ranges::contains(db.ListBlobs(Storage::BlobType::ShaderProfile), "driver_key")) {
+            db.Load(Storage::BlobType::ShaderProfile, "driver_key", recorded_key);
         }
-        RebuildDiskShaders(marker, progress);
+    }
+    const bool marker_equal = marker == DiskShaderMarker();
+    const bool key_recorded = !recorded_key.empty();
+    const bool key_equal = recorded_key == driver_key;
+    // The list is read first, on both paths, whenever a ready one would be rebuilt.
+    const bool list_ready = DiskShaderStartOf(marker_equal, key_recorded, key_equal, true) ==
+                                DiskShaderStart::Rebuild &&
+                            PreparePrecompileList(progress);
+    const auto start = DiskShaderStartOf(marker_equal, key_recorded, key_equal, list_ready);
+    if (start == DiskShaderStart::RenewWithoutBuild && !renew_store_without_build) {
+        return false;
+    }
+    const bool rebuild = start != DiskShaderStart::IndexOnly;
+    if (rebuild) {
+        // The key is recorded only for a list rebuilt.
+        RebuildDiskShaders(marker,
+                           start == DiskShaderStart::Rebuild ? driver_key : std::vector<u8>{},
+                           progress);
     } else {
         IndexDiskShaders();
     }
