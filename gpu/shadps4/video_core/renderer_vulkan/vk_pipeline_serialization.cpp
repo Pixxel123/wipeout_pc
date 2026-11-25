@@ -691,8 +691,11 @@ void RegisterPipelineData(const ComputePipelineKey& key,
     key.Serialize(ar);
     sdata.Serialize(ar);
 
-    Storage::DataBase::Instance().Save(Storage::BlobType::PipelineKey,
-                                       fmt::format("c_{:#018x}", key.value), ar.TakeOff());
+    auto& db = Storage::DataBase::Instance();
+    const auto name = fmt::format("c_{:#018x}", key.value);
+    // gow3: listed for the next start's cache preload, which reads keys last (LoadOrder).
+    CachePreload::Saved(db.BlobPath(Storage::BlobType::PipelineKey, name));
+    db.Save(Storage::BlobType::PipelineKey, name, ar.TakeOff());
 }
 
 void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
@@ -710,8 +713,11 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
     key.Serialize(ar);
     sdata.Serialize(ar);
 
-    Storage::DataBase::Instance().Save(Storage::BlobType::PipelineKey,
-                                       fmt::format("g_{:#018x}", hash), ar.TakeOff());
+    auto& db = Storage::DataBase::Instance();
+    const auto name = fmt::format("g_{:#018x}", hash);
+    // gow3: listed for the next start's cache preload, which reads keys last (LoadOrder).
+    CachePreload::Saved(db.BlobPath(Storage::BlobType::PipelineKey, name));
+    db.Save(Storage::BlobType::PipelineKey, name, ar.TakeOff());
 }
 
 void RegisterShaderMeta(const Shader::Info& info,
@@ -1176,20 +1182,19 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
     const bool compatible = CheckCacheProfile();
     auto& db = Storage::DataBase::Instance();
     const bool disk_on = DiskShadersWanted();
-    bool shaders_dropped = false;
     if (db.IsOpened() && db.ConcurrentReads() && !disk_on) {
         // This session numbers permutations by first use again: the store is rebuilt at the
         // next start with disk shaders on.
         ForgetDiskShaders();
     } else if (db.IsOpened() && db.ConcurrentReads()) {
         // gow3 (GOW3_PRECOMPILE_BOOT): a list that is not ready renews the store as without one.
-        shaders_dropped = BeginDiskShaders(compatible, true, progress);
+        // The cache preload starts in there, before a rebuild.
+        BeginDiskShaders(compatible, true, true, progress);
     }
     db.FinishPreload();
-    // gow3: the root must be the folder Storage::DataBase keeps its files in (user/cache/<serial>).
-    // After a drop the list starts empty: it would only open files queued for deletion, and on
-    // Windows an open file can make that delete fail.
-    CachePreload::Start(PipelineBinaryDirectory().parent_path(), !shaders_dropped);
+    // gow3: without disk shaders the preload still serves the pipeline binaries; after
+    // BeginDiskShaders this does nothing.
+    CachePreload::Start(PipelineBinaryDirectory().parent_path(), true);
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
 }
@@ -1254,7 +1259,7 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
     // A list that is not ready (the game files gave too little of the code, the list cannot be
     // read) leaves the start as without a list: nothing dropped, the marker as it was,
     // disk_shaders off, the warm-up.
-    return BeginDiskShaders(compatible, false, progress);
+    return BeginDiskShaders(compatible, false, false, progress);
 }
 
 // gow3: what both start paths do once the store is open with concurrent reads and disk shaders
@@ -1265,6 +1270,7 @@ bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32
 // Else the saved shader files are dropped for the rebuild (RebuildDiskShaders), also when it
 // cannot run. disk_shaders is set on every path but that one. True when the files were dropped.
 bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_build,
+                                     bool start_preload,
                                      const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
     std::vector<u8> marker;
@@ -1278,6 +1284,16 @@ bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_b
         if (!PreparePrecompileList(progress) && !renew_store_without_build) {
             return false;
         }
+    }
+    if (start_preload) {
+        // gow3: before the rebuild, so the files the first-start build writes or reads are listed
+        // for the next start (CachePreload::LoadOrder). After a drop the list starts empty: it
+        // would only open files queued for deletion, and on Windows an open file can make that
+        // delete fail. The root must be the folder Storage::DataBase keeps its files in
+        // (user/cache/<serial>).
+        CachePreload::Start(PipelineBinaryDirectory().parent_path(), !rebuild);
+    }
+    if (rebuild) {
         RebuildDiskShaders(marker, progress);
     } else {
         IndexDiskShaders();

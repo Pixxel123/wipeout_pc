@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <thread>
@@ -50,8 +51,8 @@ std::optional<std::vector<u8>> ReadBytes(const std::filesystem::path& file, size
     return bytes;
 }
 
-/// Reads the listed files into the store, rewrites the list without the oldest and missing
-/// entries and prints what it did.
+/// Reads the listed files into the store, rewrites the list without the entries LoadOrder leaves
+/// out and the missing ones, and prints what it did.
 void Preload(State& state, bool read_list) {
     const auto started = std::chrono::steady_clock::now();
     const auto list = state.root / ListName;
@@ -59,8 +60,8 @@ void Preload(State& state, bool read_list) {
     if (auto bytes = read_list ? ReadBytes(list, MaxListBytes) : std::nullopt) {
         text.assign(bytes->begin(), bytes->end());
     }
-    // Newest first, so the byte cap leaves out the oldest files.
-    const auto entries = Recent(text, MaxFiles);
+    // By kind and newest first, so the caps leave out the keys first, then the oldest files.
+    const auto entries = LoadOrder(Recent(text, std::numeric_limits<size_t>::max()), MaxFiles);
     std::vector<std::string> kept;
     size_t loaded = 0, loaded_bytes = 0;
     for (const auto& entry : entries) {
@@ -71,7 +72,7 @@ void Preload(State& state, bool read_list) {
             continue; // gone: dropped from the list
         }
         kept.push_back(entry);
-        if (loaded_bytes + size > MaxBytes) {
+        if (!Fits(loaded_bytes, size)) {
             continue;
         }
         auto bytes = ReadBytes(file, MaxBytes - loaded_bytes);
@@ -85,7 +86,8 @@ void Preload(State& state, bool read_list) {
             loaded_bytes += read;
         }
     }
-    // Rewritten oldest first, so the list stays at most MaxFiles entries plus one session's.
+    // Rewritten in reverse, so the list stays at most MaxFiles entries plus one session's, and
+    // within a kind the newest stay last.
     std::string trimmed;
     for (auto entry = kept.rbegin(); entry != kept.rend(); ++entry) {
         trimmed += *entry + '\n';
