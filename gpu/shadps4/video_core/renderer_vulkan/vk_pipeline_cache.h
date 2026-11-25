@@ -418,13 +418,16 @@ private:
     /// `compatible`: CheckCacheProfile's result. `renew_store_without_build`: a list that is not
     /// ready still drops the store and saves the marker (StartOnDemand); false leaves the store
     /// and disk_shaders as they were. `start_preload`: starts the cache preload before any
-    /// rebuild (StartOnDemand). True when the saved shader files were dropped.
+    /// rebuild (StartOnDemand). `driver_key`: the driver's pipeline-binary key (StartOnDemand),
+    /// empty for no check; a store marked by this build whose recorded key differs is rebuilt
+    /// when the list is ready (DiskShaderStartOf). True when the saved shader files were dropped.
     bool BeginDiskShaders(bool compatible, bool renew_store_without_build, bool start_preload,
+                          const std::vector<u8>& driver_key,
                           const std::function<void(u32 done, u32 total)>& progress);
     /// Drops the saved shader files `marker` does not vouch for, runs the start-up rebuild,
     /// saves this build's marker (DiskShaderMarker) and builds the rebuild's pipelines with
-    /// disk_shaders on.
-    void RebuildDiskShaders(const std::vector<u8>& marker,
+    /// disk_shaders on; then records `driver_key` (ShaderProfile/driver_key) unless empty.
+    void RebuildDiskShaders(const std::vector<u8>& marker, const std::vector<u8>& driver_key,
                             const std::function<void(u32 done, u32 total)>& progress);
     bool LoadDiskProgram(u64 hash);
     /// Index for a new permutation: a slot the store left empty, else the next one.

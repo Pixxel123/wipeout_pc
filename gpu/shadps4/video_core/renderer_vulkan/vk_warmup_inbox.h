@@ -34,6 +34,28 @@ constexpr bool GameCodeSuffices(std::uint32_t wanted, std::uint32_t read) {
     return std::uint64_t{read} * 10 >= std::uint64_t{wanted} * 9;
 }
 
+/// gow3: what a start does with the saved shader store (BeginDiskShaders).
+enum class DiskShaderStart {
+    IndexOnly,         ///< the store is read as it is
+    Rebuild,           ///< the saved shaders are dropped, the list rebuilt and its pipelines built
+    RenewWithoutBuild, ///< the saved shaders are dropped and the marker saved, no list to rebuild
+};
+
+/// gow3 (GOW3_PRECOMPILE_BOOT): a store marker that differs from this build's rebuilds with a
+/// ready list (PreparePrecompileList) and is renewed without one. With an equal marker, a
+/// driver pipeline-binary key recorded by the last start-up rebuild that differs from the
+/// driver's (a driver update: no saved pipeline binary is usable) rebuilds when the list is
+/// ready; without a ready list, or without a recorded key (a store from before the key), the
+/// store is indexed as it is.
+constexpr DiskShaderStart DiskShaderStartOf(bool marker_equal, bool key_recorded,
+                                            bool key_equal, bool list_ready) {
+    if (!marker_equal) {
+        return list_ready ? DiskShaderStart::Rebuild : DiskShaderStart::RenewWithoutBuild;
+    }
+    return key_recorded && !key_equal && list_ready ? DiskShaderStart::Rebuild
+                                                    : DiskShaderStart::IndexOnly;
+}
+
 /// gow3: whether the background warm-up leaves a saved stage alone because the game is
 /// translating a permutation of its program (`pending`). With first-use numbering that
 /// translation takes the next index, which may be the stage's. With the store's numbering it
