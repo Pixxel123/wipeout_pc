@@ -570,6 +570,12 @@ class ListInfoTest(unittest.TestCase):
         version, entries = info.read_list(dst.read_bytes())
         self.assertEqual((version, [e[0] for e in entries]), (4, [info.CODE, info.KEY]))
 
+    def test_shipped_list_holds_no_instruction_words(self):
+        status, out = run('--check', ROOT / 'gpu/precompile/shaders.list')
+        self.assertEqual(status, 0, out)
+        self.assertIn('check passed', out)
+        self.assertIn('fetch words: 0 records, 0 bytes', out)
+
     def test_index_options_need_add_code(self):
         with self.assertRaises(SystemExit):
             run(self.write('in.bin', header()), '--index', self.root / 'i.txt')

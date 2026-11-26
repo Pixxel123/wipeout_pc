@@ -63,7 +63,13 @@ elif [[ ${DLSS_REQUIRED:-} == 1 ]]; then
     exit 1
 fi
 cp -r scripts patches "$dest/"
-# The code-free shader list the first start builds from (precompile/shaders.list).
+# The code-free shader list the first start builds from (precompile/shaders.list). Stop when
+# it holds instruction words.
+if ! report=$("$python" -B tools/deck/precompile-list-info.py --check gpu/precompile/shaders.list)
+then
+    echo "$report" >&2
+    exit 1
+fi
 cp -r gpu/precompile "$dest/"
 cp run.py LICENSE README.md packaging/windows/README-Windows.txt "$dest/"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
