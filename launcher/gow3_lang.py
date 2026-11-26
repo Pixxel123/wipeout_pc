@@ -791,6 +791,7 @@ EXTRA = {
         'Shaders': 'Shaders',
         'Use pipeline binary cache (A/B test)': 'Usar cache binário de pipelines (teste A/B)',
         'Reuse saved Vulkan pipelines. Disable to compare FPS with normal compilation. Takes effect on the next launch; saved caches are preserved.': 'Reutiliza pipelines Vulkan salvos. Desative para comparar o FPS com a compilação normal. Vale a partir da próxima inicialização; os caches salvos são mantidos.',
+        'Show shader progress': 'Mostrar o progresso dos shaders',
         'Load shader cache in the background': 'Carregar o cache de shaders em segundo plano',
         'The game opens at once and the saved shaders load while you play; a small note in the corner shows the progress. Switch it off to wait on the loading screen instead.': 'O jogo abre na hora e os shaders salvos carregam enquanto você joga; uma pequena nota no canto mostra o progresso. Desative para esperar na tela de carregamento.',
         'Compile new shaders in the background': 'Compilar novos shaders em segundo plano',
@@ -1152,6 +1153,7 @@ EXTRA = {
         'Use pipeline binary cache (A/B test)': 'Usar caché binaria de pipelines (prueba A/B)',
         'Reuse saved Vulkan pipelines. Disable to compare FPS with normal compilation. Takes effect on the next launch; saved caches are preserved.':
             'Reutiliza pipelines de Vulkan guardados. Desactívalo para comparar los FPS con la compilación normal. Se aplica en el próximo inicio; las cachés guardadas se conservan.',
+        'Show shader progress': 'Mostrar el progreso de los shaders',
         'Load shader cache in the background': 'Cargar la caché de shaders en segundo plano',
         'The game opens at once and the saved shaders load while you play; a small note in the corner shows the progress. Switch it off to wait on the loading screen instead.':
             'El juego abre al instante y los shaders guardados se cargan mientras juegas; una pequeña nota en la esquina muestra el progreso. Desactívalo para esperar en la pantalla de carga.',

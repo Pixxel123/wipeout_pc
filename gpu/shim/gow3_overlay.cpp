@@ -1496,7 +1496,13 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (!loading && !menu_open) {
         HealthDisplay();
     }
-    if (background_total && !loading && !menu_open) {
+    // The corner note is off unless the launcher sets GOW3_SHADER_PROGRESS=1 (read once); the
+    // info row in the menu keeps the count.
+    static const bool shader_progress = [] {
+        const char* value = std::getenv("GOW3_SHADER_PROGRESS");
+        return value && value[0] == '1';
+    }();
+    if (shader_progress && background_total && !loading && !menu_open) {
         BackgroundLoading();
     }
     if (text_entry_active) {
