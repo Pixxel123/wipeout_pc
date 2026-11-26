@@ -451,6 +451,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 }
 
 PipelineCache::~PipelineCache() {
+    if (precompile_pass) {
+        // gow3: nothing of it is saved (EndPrecompilePass): the next start builds again.
+        std::printf("Precompile boot: exit before the pipeline pass ended: the store is not "
+                    "marked\n");
+    }
     StopWarmUp();
     FinishCompilations();
 }

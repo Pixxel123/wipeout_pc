@@ -29,8 +29,18 @@
 // translated, and the next start skips the entries it names (CrashMarker).
 //
 // Once the store has indexed what the rebuild wrote, the pipeline of each entry it built is
-// selected and handed to the compile workers as the loader's are (Pipeline, below), and the
-// start waits for them (BuildPrecompilePipelines); GOW3_PRECOMPILE_BOOT_PIPELINES=0 skips that.
+// selected and handed to the compile workers as the loader's are (Pipeline, below);
+// GOW3_PRECOMPILE_BOOT_PIPELINES=0 skips that. With GOW3_PRECOMPILE_BACKGROUND=0 the start waits
+// for them behind the loading screen (BuildPrecompilePipelines). Otherwise the loading screen
+// ends with the translation and this pipeline pass runs behind the game's first screens: on the
+// GPU command thread, which alone reads the store's index, a slice of selections after each
+// submission (PumpPrecompilePass), while the compile workers build. The draw that brings a
+// frame to 500 draws since the last flip decoded (CompilePolicy::SceneFrameReached), the first
+// scene frame as no frame before it had as many, finishes what is left before it goes on, as
+// the blocking pass does (FinishPrecompilePassAtScene); the screen keeps the last frame
+// meanwhile. Only the pass's end marks the store (EndPrecompilePass): an exit before it leaves
+// the store unmarked, and the next start builds again. GOW3_PRECOMPILE_BACKGROUND_STALL=1 runs
+// no slice, so the first scene frame takes the whole pass (a test of that wait).
 //
 // A list without the code of some of its programs gets it from the player's game files when an
 // index of the files that hold it lies beside the list (<list>.files, vk_precompile_files.h):
@@ -94,6 +104,7 @@
 #include "video_core/renderer_vulkan/vk_precompile_load.h"
 #include "video_core/renderer_vulkan/vk_precompile_shadow.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
+#include "gow3_overlay.h"
 
 namespace Vulkan {
 
@@ -114,6 +125,28 @@ constexpr u64 PipelineWaitNs = 1'000'000;
 constexpr u32 MaxEntryVariants = 4;
 /// Size of the SRT walker code generator (flatten_extended_userdata_pass.cpp).
 constexpr u64 WalkerCodeSize = 32ull << 20;
+
+/// GOW3_PRECOMPILE_BACKGROUND, read once (BackgroundPassOn).
+bool BackgroundPass() {
+    static const bool on = BackgroundPassOn(std::getenv("GOW3_PRECOMPILE_BACKGROUND"));
+    return on;
+}
+
+/// GOW3_PRECOMPILE_BACKGROUND_STALL=1, read once: no slice runs.
+bool PassStalled() {
+    static const bool stalled = [] {
+        const char* value = std::getenv("GOW3_PRECOMPILE_BACKGROUND_STALL");
+        return value && std::string_view{value} == "1";
+    }();
+    return stalled;
+}
+
+/// The loading screen's count of the files and the rebuild's entries: of both halves, or of
+/// the translating half alone while the pipeline pass runs in the background.
+BootProgress ScreenProgressOf(u32 files, u32 entries, u32 files_read, u32 translated) {
+    return BackgroundPass() ? BootTranslationProgressOf(files, entries, files_read, translated)
+                            : BootProgressOf(files, entries, files_read, translated, 0);
+}
 
 /// Why an entry was not translated.
 enum class Reject {
@@ -335,7 +368,7 @@ ListCodeRead ReadListCode(ParsedList& list, const char* list_path,
         [&](u32 done, u32 total) {
             files = total;
             if (progress) {
-                const auto [shown, all] = BootProgressOf(total, entries, done, 0, 0);
+                const auto [shown, all] = ScreenProgressOf(total, entries, done, 0);
                 progress(shown, all);
             }
         },
@@ -478,7 +511,7 @@ bool PrecompileBoot::Run(const std::function<void(u32, u32)>& progress) {
     std::printf("Precompile boot: translating %u entries into the shader store\n", count);
     const auto report = [&](u32 passed) {
         if (progress) {
-            const auto [done, total] = BootProgressOf(files, count, files, passed, 0);
+            const auto [done, total] = ScreenProgressOf(files, count, files, passed);
             progress(done, total);
         }
     };
@@ -1205,13 +1238,30 @@ void LoadBuilder::ForgetFailedVariants() {
     boot->failed_variants.clear();
 }
 
-/// The rebuild with the list it refers to, which is declared first.
+/// The rebuild with the list it refers to, which is declared first, and its pipeline pass.
 struct PrecompileBootRun {
     PrecompileBootRun(PipelineCache& cache, ParsedList&& list_, std::string marker_path)
         : list{std::move(list_)}, boot{cache, list, list.code, std::move(marker_path)} {}
 
+    /// The pipeline pass over the entries the rebuild built: how far it got and its counts.
+    struct Pass {
+        u32 done = 0; ///< entries of `built` taken: handed over, built already or dropped
+        u32 had = 0, dropped = 0;
+        u64 published_before = 0, failed_before = 0;
+        /// One per fast first build published; nothing takes them while the blocking pass runs.
+        size_t rebuilds_before = 0;
+        std::chrono::steady_clock::time_point started;
+        // The background pass's (StartPrecompilePass):
+        std::vector<u8> driver_key; ///< saved at its end, as RebuildDiskShaders saves it
+        u32 tenths = 0;             ///< 10 % steps logged
+        u64 pumps = 0;              ///< PumpPrecompilePass calls that ran
+        u64 slices = 0, slice_ns = 0; ///< of those, the ones that took an entry
+        u64 pump_max_ns = 0;          ///< the longest of all
+    };
+
     ParsedList list;
     PrecompileBoot boot;
+    Pass pass;
 };
 
 void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
@@ -1265,33 +1315,67 @@ bool PipelineCache::RunPrecompileList(const std::function<void(u32, u32)>& progr
     return precompile_boot != nullptr;
 }
 
-/// Each entry the rebuild built, its pipeline selected from the store as the loader selects it
-/// (PrecompileBoot::Pipeline, the variant step included) and handed to the compile workers;
-/// while their queue is full (Full) this waits for them, publishes and tries the entry again.
-/// No time limit: the whole pass runs before the game does. Optimised rebuilds of fast first
-/// builds are not waited for; they run later on the low lane, as any other's do.
-void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>& on_screen) {
-    // Released when this returns, also with the pass off.
-    const PrecompileBootPtr run = std::move(precompile_boot);
-    if (!run) {
-        return;
-    }
-    if (const char* pipelines = std::getenv("GOW3_PRECOMPILE_BOOT_PIPELINES");
-        pipelines && std::string_view{pipelines} == "0") {
+namespace {
+
+/// GOW3_PRECOMPILE_BOOT_PIPELINES=0: no pipeline pass (logged).
+bool PassSwitchedOff() {
+    const char* pipelines = std::getenv("GOW3_PRECOMPILE_BOOT_PIPELINES");
+    if (pipelines && std::string_view{pipelines} == "0") {
         std::printf("Precompile boot: pipelines off (GOW3_PRECOMPILE_BOOT_PIPELINES=0)\n");
-        return;
+        return true;
     }
-    auto& boot = run->boot;
+    return false;
+}
+
+} // namespace
+
+void PipelineCache::BeginPipelinePass(PrecompileBootRun& run) {
     // The loader's variant step, which only a loader object switches on otherwise.
-    boot.variants_on = true;
-    const u32 entries = u32(boot.built.size());
-    const u64 published_before = load_builds_published, failed_before = load_builds_failed;
-    // One per fast first build published; nothing takes them while the pass runs.
-    const size_t rebuilds_before = waiting_rebuilds.size();
+    run.boot.variants_on = true;
+    auto& pass = run.pass;
+    pass.published_before = load_builds_published;
+    pass.failed_before = load_builds_failed;
+    pass.rebuilds_before = waiting_rebuilds.size();
+    pass.started = std::chrono::steady_clock::now();
+}
+
+/// Entry `pass.done`'s pipeline (PrecompileBoot::Pipeline, the variant step included) with no
+/// variant after the first past `until_ns`; unless Full it is counted and the next one is due.
+PipelineStep PipelineCache::PassEntry(PrecompileBootRun& run, u64 until_ns) {
+    auto& pass = run.pass;
+    const u32 index = run.boot.built[pass.done];
+    const auto& key = run.list.keys[index];
+    // Why the first MaxDetails were dropped.
+    PipelineTrace found;
+    PipelineTrace* const trace = pass.dropped < MaxDetails ? &found : nullptr;
+    const auto step = run.boot.Pipeline(key, until_ns, trace);
+    if (step == PipelineStep::Full) {
+        return step;
+    }
+    pass.had += step == PipelineStep::Have;
+    if (step == PipelineStep::Dropped && ++pass.dropped <= MaxDetails) {
+        std::printf("Precompile boot: pipelines: entry %u (recorded key %016llx) dropped%s, "
+                    "%s\n",
+                    index, static_cast<unsigned long long>(key.key_hash),
+                    found.stage ? fmt::format(" at sw stage {}", *found.stage).c_str() : "",
+                    found.dropped ? found.dropped : "no reason given");
+    }
+    ++pass.done;
+    return step;
+}
+
+/// The rest of the pass, from `pass.done`: each entry's pipeline handed to the compile workers;
+/// while their queue is full (Full) this waits for them, publishes and tries the entry again;
+/// then it waits until every build it handed over is published. No time limit. `report(passed,
+/// count)`: the list's entries passed, up to the built entry being handed over, so the entries
+/// the rebuild did not build count as passed and the count ends full.
+void PipelineCache::FinishPipelinePass(PrecompileBootRun& run,
+                                       const std::function<void(u32 passed, u32 count)>& report) {
+    auto& pass = run.pass;
+    const auto& built = run.boot.built;
+    const u32 entries = u32(built.size());
     constexpr u64 no_limit = std::numeric_limits<u64>::max();
-    u32 had = 0, dropped = 0;
-    const auto started = std::chrono::steady_clock::now();
-    auto last_progress = started;
+    auto last_progress = std::chrono::steady_clock::now();
     const auto progress = [&](const auto& print) {
         if (const auto now = std::chrono::steady_clock::now();
             now - last_progress >= PipelineProgressInterval) {
@@ -1299,21 +1383,11 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
             print();
         }
     };
-    // The loading screen's second half counts the list's entries as the rebuild's does: up to
-    // the built entry handed over, so the entries the rebuild did not build count as passed and
-    // the bar ends full.
-    const u32 count = u32(run->list.keys.size());
+    const u32 count = u32(run.list.keys.size());
     u32 passed = 0;
-    const auto report = [&] {
-        if (on_screen) {
-            const auto [shown, total] =
-                BootProgressOf(boot.files, count, boot.files, count, passed);
-            on_screen(shown, total);
-        }
-    };
     const auto entries_done = [&](u32 done) {
-        passed = boot.built[done];
-        report();
+        passed = built[done];
+        report(passed, count);
         progress([&] {
             std::printf("Precompile boot: pipelines: %u of %u entries\n", done, entries);
         });
@@ -1323,41 +1397,49 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
         WaitLoadBuilds(CompilePolicy::Now() + PipelineWaitNs);
         PublishGraphics();
     };
-    for (u32 done = 0; done < entries; ++done) {
-        entries_done(done);
-        const u32 index = boot.built[done];
-        const auto& key = run->list.keys[index];
-        // Why the first MaxDetails were dropped.
-        PipelineTrace found;
-        PipelineTrace* const trace = dropped < MaxDetails ? &found : nullptr;
-        auto step = boot.Pipeline(key, no_limit, trace);
-        while (step == PipelineStep::Full) {
-            entries_done(done);
+    while (pass.done < entries) {
+        entries_done(pass.done);
+        while (PassEntry(run, no_limit) == PipelineStep::Full) {
+            entries_done(pass.done);
             wait_and_publish();
-            found = {};
-            step = boot.Pipeline(key, no_limit, trace);
-        }
-        had += step == PipelineStep::Have;
-        if (step == PipelineStep::Dropped && ++dropped <= MaxDetails) {
-            std::printf("Precompile boot: pipelines: entry %u (recorded key %016llx) dropped%s, "
-                        "%s\n",
-                        index, static_cast<unsigned long long>(key.key_hash),
-                        found.stage ? fmt::format(" at sw stage {}", *found.stage).c_str() : "",
-                        found.dropped ? found.dropped : "no reason given");
         }
     }
     do {
-        report();
+        report(passed, count);
         progress([&] {
             std::printf("Precompile boot: pipelines: waiting for %zu builds\n",
                         LoadBuildsRunning());
         });
         wait_and_publish();
     } while (LoadBuildsRunning() > 0);
-    passed = count;
-    report();
+    report(count, count);
+}
+
+/// Each entry the rebuild built, its pipeline selected from the store as the loader selects it
+/// and handed to the compile workers, before the start goes on (FinishPipelinePass). Optimised
+/// rebuilds of fast first builds are not waited for; they run later on the low lane, as any
+/// other's do.
+void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>& on_screen) {
+    // Released when this returns, also with the pass off.
+    const PrecompileBootPtr run = std::move(precompile_boot);
+    if (!run || PassSwitchedOff()) {
+        return;
+    }
+    auto& boot = run->boot;
+    auto& pass = run->pass;
+    BeginPipelinePass(*run);
+    // The loading screen's second half counts the list's entries as the rebuild's does.
+    FinishPipelinePass(*run, [&](u32 passed, u32 count) {
+        if (on_screen) {
+            const auto [shown, total] =
+                BootProgressOf(boot.files, count, boot.files, count, passed);
+            on_screen(shown, total);
+        }
+    });
+    const u32 entries = u32(boot.built.size());
     const auto now = std::chrono::steady_clock::now();
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count();
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - pass.started).count();
     const auto total_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(now - boot.started).count();
     std::printf("Precompile boot: pipelines: %u entries, %llu built, %u built already, %u "
@@ -1365,11 +1447,145 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
                 "their optimised rebuild, in %lld ms (translation %llu ms), %lld ms since the "
                 "rebuild began\n",
                 entries,
-                static_cast<unsigned long long>(load_builds_published - published_before), had,
-                dropped, static_cast<unsigned long long>(load_builds_failed - failed_before),
-                boot.variants.added, waiting_rebuilds.size() - rebuilds_before,
+                static_cast<unsigned long long>(load_builds_published - pass.published_before),
+                pass.had, pass.dropped,
+                static_cast<unsigned long long>(load_builds_failed - pass.failed_before),
+                boot.variants.added, waiting_rebuilds.size() - pass.rebuilds_before,
                 static_cast<long long>(ms), static_cast<unsigned long long>(boot.run_ms),
                 static_cast<long long>(total_ms));
+}
+
+bool PipelineCache::StartPrecompilePass(const std::vector<u8>& driver_key) {
+    if (!BackgroundPass() || !precompile_boot || precompile_boot->boot.built.empty()) {
+        return false; // BuildPrecompilePipelines: blocking, or nothing to build
+    }
+    if (PassSwitchedOff()) {
+        precompile_boot.reset();
+        return false;
+    }
+    auto& run = *precompile_boot;
+    BeginPipelinePass(run);
+    run.pass.driver_key = driver_key;
+    precompile_pass = true;
+    std::printf("Precompile boot: translation ended at %llu ms since the start; the pipeline "
+                "pass of %zu entries runs behind the game's first screens%s\n",
+                MsSinceStart(), run.boot.built.size(),
+                PassStalled() ? " (GOW3_PRECOMPILE_BACKGROUND_STALL=1: held back until the "
+                                "first scene frame)"
+                              : "");
+    ShowPassProgress(run);
+    return true;
+}
+
+/// The corner note (Preparing shaders N%) and a log line at every 10 % of the entries taken.
+void PipelineCache::ShowPassProgress(PrecompileBootRun& run) {
+    auto& pass = run.pass;
+    const u32 entries = u32(run.boot.built.size());
+    Gow3Overlay::SetBackgroundLoading(pass.done, entries, Gow3Overlay::LoadingKind::PrepareShaders);
+    if (const u32 tenths = PassTenths(pass.done, entries); tenths > pass.tenths) {
+        pass.tenths = tenths;
+        std::printf("Precompile boot: pipelines: %u0 %% (%u of %u entries) at %llu ms since the "
+                    "start, %zu builds running\n",
+                    tenths, pass.done, entries, MsSinceStart(), LoadBuildsRunning());
+    }
+}
+
+void PipelineCache::PumpPrecompilePass() {
+    if (!precompile_pass) {
+        return;
+    }
+    if (!DiskShadersActive()) {
+        StopPrecompilePass();
+        return;
+    }
+    // Nothing of the pass runs once a scene is shown: the first frame of scene_draws draws
+    // finishes it at that draw, before its flip is requested (FinishPrecompilePassAtScene).
+    if (PassStalled()) {
+        return;
+    }
+    const u64 began = CompilePolicy::Now();
+    auto& run = *precompile_boot;
+    auto& pass = run.pass;
+    const u32 entries = u32(run.boot.built.size());
+    // No selection starts past the slice; one already running may overshoot it. Full: the
+    // workers' queue holds LoadQueueDepth tasks, again after the next submission.
+    const u64 until = began + PassSliceNs;
+    const u32 done_before = pass.done;
+    while (pass.done < entries && CompilePolicy::Now() < until &&
+           PassEntry(run, until) != PipelineStep::Full) {
+    }
+    PublishGraphics();
+    const u64 ns = CompilePolicy::Now() - began;
+    ++pass.pumps;
+    pass.pump_max_ns = std::max(pass.pump_max_ns, ns);
+    if (pass.done != done_before) {
+        ++pass.slices;
+        pass.slice_ns += ns;
+    }
+    ShowPassProgress(run);
+    if (pass.done == entries && LoadBuildsRunning() == 0) {
+        EndPrecompilePass(false);
+    }
+}
+
+void PipelineCache::FinishPrecompilePassAtScene(u64 frame_draws) {
+    if (!DiskShadersActive()) {
+        StopPrecompilePass();
+        return;
+    }
+    auto& run = *precompile_boot;
+    const u32 entries = u32(run.boot.built.size());
+    const u32 left = entries - run.pass.done;
+    const size_t running = LoadBuildsRunning();
+    std::printf("Precompile boot: first scene frame at %llu ms since the start (%llu draws): the "
+                "pass waits for %u of %u entries and %zu builds\n",
+                MsSinceStart(), static_cast<unsigned long long>(frame_draws), left, entries,
+                running);
+    const auto began = std::chrono::steady_clock::now();
+    FinishPipelinePass(run, [&](u32, u32) { ShowPassProgress(run); });
+    std::printf("Precompile boot: first-scene wait: %lld ms\n",
+                static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - began)
+                                           .count()));
+    EndPrecompilePass(true);
+}
+
+/// The pass ended: only now does the store count as built (SaveDiskShaderBuild), as after the
+/// blocking pass.
+void PipelineCache::EndPrecompilePass(bool at_scene) {
+    const PrecompileBootPtr run = std::move(precompile_boot);
+    precompile_pass = false;
+    Gow3Overlay::SetBackgroundLoading(0, 0);
+    const auto& boot = run->boot;
+    const auto& pass = run->pass;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - pass.started)
+                        .count();
+    std::printf("Precompile boot: pipelines: %zu entries, %llu built, %u built already, %u "
+                "dropped, %llu failed, %u variants added, ended %s at %llu ms since the start, "
+                "%lld ms after the translation; %llu pumps, the longest %.1f ms, %llu of them "
+                "took entries, %.1f ms on average\n",
+                boot.built.size(),
+                static_cast<unsigned long long>(load_builds_published - pass.published_before),
+                pass.had, pass.dropped,
+                static_cast<unsigned long long>(load_builds_failed - pass.failed_before),
+                boot.variants.added, at_scene ? "in the first-scene wait" : "in the background",
+                MsSinceStart(), static_cast<long long>(ms),
+                static_cast<unsigned long long>(pass.pumps), double(pass.pump_max_ns) / 1e6,
+                static_cast<unsigned long long>(pass.slices),
+                pass.slices ? double(pass.slice_ns) / double(pass.slices) / 1e6 : 0.0);
+    SaveDiskShaderBuild(pass.driver_key);
+}
+
+/// Disk shaders were switched off live: the selections can no longer read the store, and
+/// ReportDiskShaders reset its marker. The pass stops; nothing is saved.
+void PipelineCache::StopPrecompilePass() {
+    std::printf("Precompile boot: pipelines: stopped at %u of %zu entries, disk shaders were "
+                "switched off; the store is not marked\n",
+                precompile_boot->pass.done, precompile_boot->boot.built.size());
+    precompile_boot.reset();
+    precompile_pass = false;
+    Gow3Overlay::SetBackgroundLoading(0, 0);
 }
 
 } // namespace Vulkan

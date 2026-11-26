@@ -35,7 +35,8 @@ void SetLoading(bool active, u32 done, u32 total);
 enum class LoadingKind : u8 { ShaderCache, PrepareShaders };
 void SetLoadingKind(LoadingKind kind);
 /// Background cache warm-up: a small corner note while the game runs; `total` 0 hides it.
-void SetBackgroundLoading(u32 done, u32 total);
+/// `kind` PrepareShaders: the start-up rebuild's pipeline pass behind the game's first screens.
+void SetBackgroundLoading(u32 done, u32 total, LoadingKind kind = LoadingKind::ShaderCache);
 
 /// Whether anything is drawn this frame (menu open or FPS counter on).
 bool Visible();

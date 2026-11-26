@@ -329,7 +329,9 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     const bool capture_only = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARY_ISOLATED", false) &&
                               EmulatorSettingsImpl::Flag("GOW3_PIPELINE_CAPTURE_ONLY", false);
     // gow3 (GOW3_PRECOMPILE_BOOT): a start-up rebuild shows its count; without one nothing is
-    // presented here. The first call presents at once.
+    // presented here. The first call presents at once. By default the screen ends with the
+    // translation and the pipeline pass runs behind the game's first screens on both paths
+    // (GOW3_PRECOMPILE_BACKGROUND=0: it ends with the pass, StartPrecompilePass).
     std::chrono::steady_clock::time_point last_shown{};
     const auto prepare_shaders = [&](u32 done, u32 total) {
         const auto now = std::chrono::steady_clock::now();
@@ -351,7 +353,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     // gow3 (GOW3_PRECOMPILE_BOOT): with pipeline binaries off (NVIDIA) the rebuild runs before
     // the warm-up. A start that rebuilt skips the warm-up: the saved shaders were dropped for
-    // the rebuild, the list's pipelines are built, and the blocking WarmUp expects none built.
+    // the rebuild, the list's pipelines are built (by default in the background, from the GPU
+    // command thread: PumpPrecompilePass), and the blocking WarmUp expects none built.
     const bool boot_requested = Precompile::BootRequested() && !Precompile::LoadRequested();
     const std::string list = boot_requested ? Precompile::BootListPath() : std::string{};
     std::error_code list_error;

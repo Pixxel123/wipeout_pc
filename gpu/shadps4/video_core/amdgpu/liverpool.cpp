@@ -24,6 +24,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "gow3_write_log.h"
+#include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -799,7 +800,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // There is no evidence that GPU CP drives flip events by parsing
                     // special NOP packets. For convenience lets assume that it does.
                     // gow3: after the writes before it (the buffer label: WriteData, which
-                    // may still be queued on the draw recording thread).
+                    // may still be queued on the draw recording thread). The frame ends here
+                    // in draw order (CompilePolicy::FlipDecoded).
+                    Vulkan::g_compile_policy.FlipDecoded(
+                        Gow3Stats::draws.load(std::memory_order_relaxed));
                     if (rasterizer) {
                         rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),
                                                Gow3Toggle::PipelinedMemoryWrites);
