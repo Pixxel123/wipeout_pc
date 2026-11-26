@@ -35,7 +35,8 @@ searched for elsewhere. The report ends with the number of files read.
 shader's code words, removes them and adds the fetch shader description. All other bytes stay the
 same. A key without fetch shader words gets no description. The decoder knows four instructions:
 s_load_dwordx4 with an immediate offset, buffer_load_format_x to _xyzw, s_waitcnt and s_setpc_b64.
-When the tool cannot decode the words of a key, it names the key index, writes no file and exits 1.
+When the tool cannot decode a run at a vertex-stage pointer that ends in s_setpc_b64 or holds a
+load pair (rule 5 below), it names the key index, writes no file and exits 1.
 --check makes sure that a list holds no instruction words. It prints the table and the counts of
 each rule, and exits 1 with the reasons when one of these is true:
   1. The list version is below 4.
@@ -43,7 +44,11 @@ each rule, and exits 1 with the reasons when one of these is true:
   3. A key has a guest word at its fetch shader's root.
   4. A register, user-data word or guest word has the shape of s_setpc_b64, s_swappc_b64 or
      s_endpgm.
-  5. The reassembled registers, user data or guest words hold the program start token or OrbShdr.
+  5. A reassembled stream holds an s_load_dwordx4-shaped word with a buffer-load-shaped word
+     (buffer_load_format or tbuffer_load_format) in the next 12 words ("load pairs"). This is
+     the core of a fetch shader, also without its last word.
+  6. The reassembled registers, user data or guest words hold the program start token or OrbShdr.
+  7. A fetch shader description has more than 32 attributes.
 The tool reassembles registers by consecutive index, user data one stage at a time, and guest words
 by base in offset order.
 """
@@ -64,6 +69,7 @@ KINDS = ("header", "registers", "user data", "roots", "guest words", "fetch word
          "fetch descriptions", "code")
 USER_DATA_BYTES = 16 * 4
 VERTEX_STAGE = 3  # SwStage::Vertex
+MAX_ATTRIBUTES = 32  # ListMaxFetchAttributes: the engine drops a key with more as malformed
 FETCH_FIXED = struct.Struct("<IbbBB")  # size, vertex and instance offset sgprs, sgpr, attributes
 ATTRIBUTE_FIELDS = ("semantic", "dest_vgpr", "num_elements", "sgpr_base", "dword_offset",
                     "instance_data", "inst_offset", "data_format", "num_format")
@@ -225,11 +231,36 @@ def ends_in_return(values):
     return bool(values) and values[-1] >> 23 == 0x17D and (values[-1] >> 8) & 0xFF == 0x20
 
 
+LOAD_PAIR_WORDS = 12  # a fetch shader's buffer load follows its descriptor load this closely
+
+
+def load_x4_shaped(w):
+    """s_load_dwordx4, any registers and offset."""
+    return w >> 27 == 0x18 and (w >> 22) & 0x1F == 2
+
+
+def buffer_load_shaped(w):
+    """buffer_load_format_x to _xyzw or tbuffer_load_format_x to _xyzw (first word)."""
+    return (w >> 26 == 0x38 and (w >> 18) & 0x7F <= 3) or (w >> 26 == 0x3A and (w >> 16) & 7 <= 3)
+
+
+def load_pair(values):
+    """Whether an s_load_dwordx4-shaped word is followed within LOAD_PAIR_WORDS words by a
+    buffer-load-shaped word: a fetch shader's core, with or without its last word."""
+    loads = [i for i, w in enumerate(values) if load_x4_shaped(w)]
+    return any(buffer_load_shaped(w) for i in loads for w in values[i + 1:i + 1 + LOAD_PAIR_WORDS])
+
+
+def stub_shaped(values):
+    return ends_in_return(values) or load_pair(values)
+
+
 def find_stub(key):
     """(first, end, description) of the version 3 key's fetch shader words, the run of words the
     recorder took after the walker's: one base, offsets 0, 4, 8 and on, which decodes to a fetch
     shader whose vertex buffer descriptors are the 4 words per attribute that follow. None
-    without one. Raises StubError for a run that ends in s_setpc_b64 and does not decode."""
+    without one. Raises StubError for a run shaped as a fetch shader (it ends in s_setpc_b64,
+    or holds a descriptor load and a buffer load) that does not decode."""
     roots = vertex_roots(key)
     words = key.words
     found, refused = [], None
@@ -246,7 +277,7 @@ def find_stub(key):
         try:
             size, attributes = decode_fetch(values)
         except StubError as e:
-            if ends_in_return(values):
+            if stub_shaped(values):
                 refused = e
             i = j
             continue
@@ -258,7 +289,7 @@ def find_stub(key):
                                                     (a["dword_offset"] + w) * 4)
         if ok:
             found.append((i, j, attributes))
-        elif ends_in_return(values):
+        elif stub_shaped(values):
             refused = StubError("fetch shader words without their vertex buffer descriptors")
         i = j
     if refused or len(found) > 1:
@@ -421,7 +452,8 @@ def check(data):
     version, keys, codes, sizes = summary(data)
     _, entries = read_list(data)
     counts = {"code records": codes, "fetch words": sizes["fetch words"][0],
-              "instruction-shaped words": 0, "start tokens": 0, "OrbShdr": 0}
+              "instruction-shaped words": 0, "load pairs": 0, "start tokens": 0, "OrbShdr": 0,
+              "descriptions over 32 attributes": 0}
     reasons = []
     if version < VERSION:
         reasons.append(f"list version {version} is below {VERSION}: it holds fetch shader code")
@@ -441,6 +473,7 @@ def check(data):
         for stream in streams:
             raw = struct.pack(f"<{len(stream)}I", *stream)
             for name, n in (("instruction-shaped words", sum(map(instruction_shaped, stream))),
+                            ("load pairs", int(load_pair(stream))),
                             ("start tokens", raw.count(START_TOKEN)),
                             ("OrbShdr", raw.count(SIGNATURE))):
                 counts[name] += n
@@ -448,10 +481,14 @@ def check(data):
                     first_hit.setdefault(name, index)
         if version >= VERSION and stub_words(key):
             first_hit.setdefault("fetch words", index)
+        if key.fetch and len(key.fetch["attributes"]) > MAX_ATTRIBUTES:
+            counts["descriptions over 32 attributes"] += 1
+            first_hit.setdefault("descriptions over 32 attributes", index)
     if counts["fetch words"] and version >= VERSION:
         reasons.append(f"{counts['fetch words']} guest words at a fetch shader's root (first in "
                        f"entry {first_hit['fetch words']})")
-    for name in ("instruction-shaped words", "start tokens", "OrbShdr"):
+    for name in ("instruction-shaped words", "load pairs", "start tokens", "OrbShdr",
+                 "descriptions over 32 attributes"):
         if counts[name]:
             reasons.append(f"{counts[name]} {name} (first in entry {first_hit[name]})")
     return (version, keys, codes, sizes), counts, reasons

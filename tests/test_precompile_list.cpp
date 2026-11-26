@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <set>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
@@ -567,6 +568,22 @@ void TestRoomCountsKeptBytes() {
     assert(!ListHasRoom(0, MaxListEntryBytes + 1));
 }
 
+void TestShippedList() {
+    // The list the port ships, read as the engine reads it: every key loads, and each with a
+    // fetch shader holds its description. The path is the source tree's (__FILE__).
+    const auto path = std::filesystem::path{__FILE__}.parent_path().parent_path() / "gpu" /
+                      "precompile" / "shaders.list";
+    std::ifstream file{path, std::ios::binary};
+    assert(file);
+    const std::vector<u8> bytes{std::istreambuf_iterator<char>(file), {}};
+    const auto list = ParseList(bytes, MaxListEntries);
+    assert(list.status == ParsedList::Status::Ok && list.version == ListVersion);
+    assert(list.keys.size() == 3530 && list.rejected == 0 && list.code.empty());
+    const auto described = std::ranges::count_if(
+        list.keys, [](const RecordedKey& key) { return key.fetch.has_value(); });
+    assert(described == 3517);
+}
+
 } // namespace
 
 /// The start-up rebuild's switch and list (POSIX setenv; the switch tests run on Linux).
@@ -621,6 +638,7 @@ int main() {
     TestAppendAfterZeroTail();
     TestAppendReplaces();
     TestRoomCountsKeptBytes();
+    TestShippedList();
     TestBootSwitchAndList();
     std::puts("precompile-list-test: ok");
     return 0;

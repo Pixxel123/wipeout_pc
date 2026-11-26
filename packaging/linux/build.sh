@@ -16,14 +16,15 @@ install -m755 out/gow3-probe out/gow3-gpu-capabilities out/gow3-server "$share/b
 install -m755 out/gpu/libgow3gpu.so "$share/bin/gpu/"
 cp run.py "$share/"
 cp -r scripts patches "$share/"
-# The code-free shader list the first start builds from (precompile/shaders.list). Stop when
-# it holds instruction words.
+# The code-free shader list the first start builds from (precompile/shaders.list) and its index
+# of game files, by name: only the checked list ships. Stop when it holds instruction words.
 if ! report=$(python3 -B tools/deck/precompile-list-info.py --check gpu/precompile/shaders.list)
 then
     echo "$report" >&2
     exit 1
 fi
-cp -r gpu/precompile "$share/"
+mkdir -p "$share/precompile"
+cp gpu/precompile/shaders.list gpu/precompile/shaders.list.files "$share/precompile/"
 mkdir -p "$share/launcher"
 # The icon of the AppImage, the launcher and the game window: packaging/linux/gow3.png when it
 # exists (a local choice), else the launcher's own.

@@ -63,14 +63,15 @@ elif [[ ${DLSS_REQUIRED:-} == 1 ]]; then
     exit 1
 fi
 cp -r scripts patches "$dest/"
-# The code-free shader list the first start builds from (precompile/shaders.list). Stop when
-# it holds instruction words.
+# The code-free shader list the first start builds from (precompile/shaders.list) and its index
+# of game files, by name: only the checked list ships. Stop when it holds instruction words.
 if ! report=$("$python" -B tools/deck/precompile-list-info.py --check gpu/precompile/shaders.list)
 then
     echo "$report" >&2
     exit 1
 fi
-cp -r gpu/precompile "$dest/"
+mkdir -p "$dest/precompile"
+cp gpu/precompile/shaders.list gpu/precompile/shaders.list.files "$dest/precompile/"
 cp run.py LICENSE README.md packaging/windows/README-Windows.txt "$dest/"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 [[ -f $dest/scripts/discord_presence.py ]] || { echo 'scripts/discord_presence.py is missing from the package' >&2; exit 1; }

@@ -547,6 +547,38 @@ class ListInfoTest(unittest.TestCase):
             self.assertIn(f'check failed: {reason}', out)
             self.assertNotIn('check passed', out)
 
+    def test_check_finds_a_stub_by_its_shape(self):
+        no_return = grouped_stub()[:-1]
+        # (a) No description, and a fetch shader without its last word at a vertex-stage pointer.
+        status, out = self.check(header(4) + stub_key(no_return, version=4))
+        self.assertEqual(status, 1, out)
+        self.assertIn('check failed: 1 load pairs', out)
+        # (b) A description at one pointer, the same words at another vertex-stage pointer.
+        moved = [(TABLE, 8 + 4 * i, w) for i, w in enumerate(no_return)]
+        status, out = self.check(header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                                      extra_words=moved))
+        self.assertEqual(status, 1, out)
+        self.assertIn('check failed: 1 load pairs', out)
+        # (c) A description with more attributes than the engine takes.
+        many = grouped_fetch()
+        many['attributes'] = [dict(zip(info.ATTRIBUTE_FIELDS, bytes([i, 7, 3, 2, 1, 0, 9, 5, 4])))
+                              for i in range(200)]
+        status, out = self.check(header(4) + stub_key(version=4, fetch=many))
+        self.assertEqual(status, 1, out)
+        self.assertIn('check failed: 1 descriptions over 32 attributes', out)
+        # One descriptor load with the buffer load 13 words on is not a pair.
+        apart = [load_x4(8, 1, 0)] + [WAIT_LGKM] * 12 + buffer_load(4, 4, 2)
+        status, out = self.check(header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                                      extra_words=[(TABLE, 8 + 4 * i, w) for i, w
+                                                                   in enumerate(apart)]))
+        self.assertIn('check, load pairs: 0', out)
+
+    def test_convert_v4_refuses_a_stub_without_its_last_word(self):
+        status, out, dst = self.convert(header() + key() + stub_key(grouped_stub()[:-1]))
+        self.assertEqual(status, 1, out)
+        self.assertIn('key 1 (entry 1)', out)
+        self.assertFalse(dst.exists())
+
     def test_check_reads_streams_across_words(self):
         # OrbShdr split over two consecutive registers is found; two registers apart it is not.
         word = struct.unpack('<2I', b'xOrbShdr')

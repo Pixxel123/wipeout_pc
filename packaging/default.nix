@@ -16,8 +16,9 @@ let
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "out" "out/gow3-probe" "out/gow3-gpu-capabilities" "out/gpu" "out/gpu/libgow3gpu.so"
-    # The code-free shader list the first start builds from (precompile/shaders.list).
-    "gpu" "gpu/precompile"
+    # The code-free shader list the first start builds from (precompile/shaders.list), and the
+    # tool that checks it holds no instruction words.
+    "gpu" "gpu/precompile" "tools" "tools/deck" "tools/deck/precompile-list-info.py"
   ] ++ assetDirs;
   src = builtins.path {
     name = "gow3-src";
@@ -81,7 +82,15 @@ pkgs.stdenv.mkDerivation {
     mkdir -p $d/bin $out/bin
     cp run.sh $d/
     cp -r scripts patches fsr4_shaders launcher $d/
-    cp -r gpu/precompile $d/
+    # Only the checked list and its index of game files, by name. Stop when the list holds
+    # instruction words.
+    if ! report=$(${pkgs.python3}/bin/python3 -B tools/deck/precompile-list-info.py \
+        --check gpu/precompile/shaders.list); then
+      echo "$report" >&2
+      exit 1
+    fi
+    mkdir -p $d/precompile
+    cp gpu/precompile/shaders.list gpu/precompile/shaders.list.files $d/precompile/
     # FSR 4.1.1 models only with GOW3_PACKAGE_FSR411=1 (see above); otherwise run.sh finds them in
     # the data directory (~/.local/share/gow3/fsr4_411).
     if [ -d fsr4_411 ]; then
