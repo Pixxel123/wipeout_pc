@@ -76,6 +76,30 @@ private:
     const FetchShaderSnapshot* previous;
 };
 
+// gow3: the start-up rebuild of a precompile list (vk_precompile_boot.cpp) holds a fetch
+// shader's parse, not its code: while a scope is set, ParseFetchShader gives `data` for the
+// program `pgm_hash` whose fetch shader pointer is at `sgpr_base`, on this thread only.
+struct FetchShaderOverride {
+    u64 pgm_hash{};
+    u32 sgpr_base{};
+    FetchShaderData data;
+};
+
+class ScopedFetchShaderOverride {
+public:
+    /// Null: no override inside the scope.
+    explicit ScopedFetchShaderOverride(const FetchShaderOverride* override_);
+    ~ScopedFetchShaderOverride();
+    ScopedFetchShaderOverride(const ScopedFetchShaderOverride&) = delete;
+    ScopedFetchShaderOverride& operator=(const ScopedFetchShaderOverride&) = delete;
+
+private:
+    const FetchShaderOverride* previous;
+};
+
+/// Whether an override is set on this thread: there is no fetch shader code to read.
+bool FetchShaderOverridden();
+
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
 
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info);

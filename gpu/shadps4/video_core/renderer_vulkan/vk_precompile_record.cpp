@@ -7,13 +7,14 @@
 //
 // Capture: when a draw selects a graphics pipeline key that is new in this launch, copy the
 // registers, the draw-indirect parameters and per stage the program hash, user data and code,
-// plus every guest word the stage's SRT walker and fetch-shader parse read, with the pointer
-// each was read through. The walker is JIT code: it runs once more with fake pointers into
-// reserved, inaccessible memory, so each of its reads faults into the fault handler
-// (vk_precompile_guard.cpp), which reads the guest word, records it and hands back the value
-// (or the fake pointer for the next table). The fetch shader and vertex buffer descriptors are
-// recorded from the parse the draw just did. Each capture is written as it is made, after the
-// code of each program it is the first to use.
+// plus every guest word the stage's SRT walker read and the vertex buffer descriptors, with the
+// pointer each was read through, and the vertex stage's fetch shader as its parse
+// (FetchDescription), not its code. The walker is JIT code: it runs once more with fake
+// pointers into reserved, inaccessible memory, so each of its reads faults into the fault
+// handler (vk_precompile_guard.cpp), which reads the guest word, records it and hands back the
+// value (or the fake pointer for the next table). The fetch shader's parse and the vertex
+// buffer descriptors are recorded from the parse the draw just did. Each capture is written as
+// it is made, after the code of each program it is the first to use.
 //
 // Linux only (the fault handler edits the walker's registers in the signal context). While it
 // is on, the page manager's read-fault count also includes the faults of recorded walks.
@@ -40,6 +41,7 @@
 #include "shader_recompiler/info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_precompile_fetch.h"
 #include "video_core/renderer_vulkan/vk_precompile_guard.h"
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
 #include "video_core/renderer_vulkan/vk_precompile_record.h"
@@ -67,6 +69,10 @@ static_assert(offsetof(AmdGpu::Regs, barycentric_control) / sizeof(u32) ==
               ListPsInControlReg + 2);
 static_assert(ListMaxPsInputs ==
               std::tuple_size_v<decltype(Shader::HwFragmentRuntimeInfo::inputs)>);
+static_assert(ListVertexStage == u32(Shader::SwStage::Vertex));
+static_assert(ListMaxFetchAttributes == MaxVertexBufferCount);
+static_assert(ListMaxVsInputs == Shader::IR::NumParams);
+static_assert(ListMaxStepRate == Shader::Gcn::VertexAttribute::InstanceIdType::Plain);
 
 struct StageCapture {
     SwStage sw_stage;
@@ -88,6 +94,7 @@ struct KeyCapture {
     std::vector<StageCapture> stages;
     std::vector<GuestWord> words;
     std::vector<GuestPointer> pointers;
+    std::optional<FetchDescription> fetch; ///< the vertex stage's fetch shader
 };
 
 /// Notes this thread's faults; reads of the stages' walkers are served (vk_precompile_guard.h).
@@ -281,6 +288,7 @@ void PrecompileRecord::Record(const KeyCapture& c) {
     }
     key.words = c.words;
     key.pointers = c.pointers;
+    key.fetch = c.fetch;
     const u64 content = EntryDigest(key);
     const bool known = keys.contains(content);
     if (!known && list_entries >= MaxListEntries) {
@@ -436,6 +444,12 @@ const char* PrecompileRecord::RecordFetch(const Shader::Info& info, StageCapture
     if (!fetch) {
         return nullptr;
     }
+    if (stage.sw_stage != SwStage::Vertex || c.fetch) {
+        return "fetch shader outside the vertex stage";
+    }
+    if (fetch->attributes.size() > ListMaxFetchAttributes) {
+        return "too many vertex attributes";
+    }
     const auto pointer_at = [&](u32 sgpr) -> std::optional<u64> {
         if (sgpr + 1 >= stage.user_data.size()) {
             return std::nullopt;
@@ -448,11 +462,10 @@ const char* PrecompileRecord::RecordFetch(const Shader::Info& info, StageCapture
     if (!code) {
         return "fetch shader pointer out of range";
     }
+    // The root stays: the rebuild leads it to the dead page, so a read of the code there
+    // faults. The code itself is the game's; the list holds its parse.
     AddRoot(stage, info.fetch_shader_sgpr_base, *code);
-    const auto* code_words = reinterpret_cast<const u32*>(*code);
-    for (u32 i = 0; i < fetch->size / sizeof(u32); ++i) {
-        c.words.push_back({*code, i * u32(sizeof(u32)), code_words[i]});
-    }
+    c.fetch = DescribeFetch(*fetch, info.fetch_shader_sgpr_base);
     for (const auto& attrib : fetch->attributes) {
         const auto table = pointer_at(attrib.sgpr_base);
         if (!table) {
@@ -523,6 +536,11 @@ std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys) {
     case ParsedList::Status::Ok:
         std::printf("Precompile list: %s: %zu entries, %u rejected\n", path, parsed.keys.size(),
                     parsed.rejected);
+        if (parsed.version == ListVersionStubWords) {
+            std::printf("Precompile list: %s has list version 3: its keys hold fetch shader "
+                        "code (tools/deck/precompile-list-info.py --convert-v4 converts it)\n",
+                        path);
+        }
         for (const auto& reason : parsed.reasons) {
             std::printf("Precompile list: rejected %s\n", reason.c_str());
         }
@@ -531,8 +549,9 @@ std::optional<ParsedList> LoadListFile(const char* path, u32 max_keys) {
         std::printf("Precompile list: %s is not a precompile list, rejected\n", path);
         break;
     case ParsedList::Status::OtherVersion:
-        std::printf("Precompile list: %s has version %u, this build reads %u, rejected\n", path,
-                    parsed.version, ListVersion);
+        std::printf("Precompile list: %s has version %u, this build reads %u and %u, "
+                    "rejected\n",
+                    path, parsed.version, ListVersionStubWords, ListVersion);
         break;
     case ParsedList::Status::OtherLayout:
         std::printf("Precompile list: %s has another register layout, rejected\n", path);
@@ -552,8 +571,8 @@ const char* PathSetting(const char* name) {
 
 /// The list file to record into, null when it cannot be written (logged). A list of this
 /// version is kept and appended to, up to the first entry that is cut off (the game may end
-/// inside a write) or fails its checksum; anything else is written anew. `kept` says what the
-/// file holds.
+/// inside a write) or fails its checksum; a version 3 list is left as it is (null); anything
+/// else is written anew. `kept` says what the file holds.
 std::FILE* OpenRecord(const char* path, ListAppend& kept) {
     std::vector<u8> existing;
     if (!ReadFileBytes(path, MaxListFileBytes(), existing) && errno != ENOENT) {
@@ -561,6 +580,12 @@ std::FILE* OpenRecord(const char* path, ListAppend& kept) {
         return nullptr;
     }
     kept = PlanListAppend(existing);
+    if (kept.stub_words) {
+        std::printf("Precompile record: %s has list version 3 (fetch shader code), recording off "
+                    "(tools/deck/precompile-list-info.py --convert-v4 converts it)\n",
+                    path);
+        return nullptr;
+    }
     if (kept.keep) {
         std::error_code error;
         if (existing.size() > kept.bytes) {

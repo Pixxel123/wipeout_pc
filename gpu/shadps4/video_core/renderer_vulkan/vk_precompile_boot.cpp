@@ -12,7 +12,12 @@
 // RefreshGraphicsKey itself, so stage order, runtime info and the bindings carried from the
 // fragment to the vertex stage are those of a draw. Its registers, user data and table words
 // come from the list and sit in a shadow copy (vk_precompile_shadow.h) together with the
-// recorded program code. GetProgram hands each stage to BootProgram instead of program_cache:
+// recorded program code. The list holds the vertex stage's fetch shader as its parse, not its
+// code (list version 4): the parse is handed to ParseFetchShader on this thread for the time of
+// the selection (ScopedFetchShaderOverride, Select and Pipeline), and the fetch shader pointer
+// leads to the dead page, so a read of the code faults and rejects the entry. A version 3 list
+// holds the code among the entry's words, and the parser reads it from the shadow copy.
+// GetProgram hands each stage to BootProgram instead of program_cache:
 // a program not seen yet in this rebuild is translated as permutation 0; a later entry of the
 // same program that specialises differently is translated as the next permutation, numbered in
 // first-seen order. Each translation is written as the shader compiler writes it (SPIR-V, then
@@ -103,6 +108,7 @@
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_precompile_fetch.h"
 #include "video_core/renderer_vulkan/vk_precompile_files.h"
 #include "video_core/renderer_vulkan/vk_precompile_guard.h"
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
@@ -632,6 +638,9 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
     // Checked on load (ValidSgprOffset): the u16 keeps the whole offset.
     selection.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
     bool selected = false;
+    // Out here: a fault jumps out of Guarded past the destructors inside it.
+    const auto fetch = FetchOverrideOf(key);
+    const Shader::Gcn::ScopedFetchShaderOverride fetch_scope{fetch ? &*fetch : nullptr};
     Watch();
     const bool completed = Guarded([&] {
         // Caught here, inside the recovery point: the shader compiler's jobs catch them too.
@@ -704,6 +713,9 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
     // last entry build left, also when a fault jumps out.
     const auto found_stopped = stopped;
     const auto found_detail = stop_detail;
+    // Out here: a fault jumps out of Guarded past the destructors inside it.
+    const auto fetch = FetchOverrideOf(key);
+    const Shader::Gcn::ScopedFetchShaderOverride fetch_scope{fetch ? &*fetch : nullptr};
     Watch();
     Guarded([&] {
         try {
@@ -1125,7 +1137,8 @@ const RecordedStage* PrecompileBoot::StageOf(u64 hash) {
 
 /// Whether the fetch shader and its vertex buffer tables were read through user-data pointers
 /// the recording followed (false: the entry stops). Any other pair of user-data words still
-/// holds a guest address, which the committed guest pool serves without a fault.
+/// holds a guest address, which the committed guest pool serves without a fault. In a list
+/// that holds parses (version 4) the entry's parse must be the one of this fetch shader.
 bool PrecompileBoot::CheckFetch(const Shader::Info& info, const Shader::StageSpecialization& spec,
                                 u64 hash) {
     if (!info.has_fetch_shader) {
@@ -1133,6 +1146,11 @@ bool PrecompileBoot::CheckFetch(const Shader::Info& info, const Shader::StageSpe
     }
     const auto* stage = StageOf(hash);
     if (!stage) {
+        return false;
+    }
+    if (list.version != ListVersionStubWords &&
+        (!entry->fetch || entry->fetch->sgpr_base != info.fetch_shader_sgpr_base)) {
+        Stop(Reject::StrayFetch, fmt::format("program {:016x}: fetch shader not recorded", hash));
         return false;
     }
     const auto followed = [&](u32 sgpr) {

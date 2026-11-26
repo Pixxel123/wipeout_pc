@@ -14,12 +14,18 @@
 //     a key: recorded key hash, draw-indirect sgpr offsets, the nonzero register words, then per
 //            stage its program's hash, the digest of the spec the draw selected, user data and
 //            user-data pointers, then the guest words and the table pointers
-//            (vk_precompile_shadow.h);
+//            (vk_precompile_shadow.h), then the vertex stage's fetch shader as its parse
+//            (FetchDescription: a u8 flag, then when 1: size u32, vertex and instance offset
+//            sgprs s8, the fetch shader pointer's sgpr u8, attribute count u8, 9 u8 per
+//            attribute);
 //     a program's code (once per program hash, before the first key that uses it): the hash
 //            and the code words, from the start token through the OrbShdr header.
 // No translator output: the list outlives a shader store reset. The code is the game's: a
 // list that holds code stays on the player's machine. The port ships one without
 // (ShippedListPath), whose code is read from the game files (vk_precompile_files.h).
+// Version 3 had no fetch shader parse: its keys hold the fetch shader's code words among
+// their guest words. It is still read (a local recording), never written;
+// tools/deck/precompile-list-info.py --convert-v4 converts one.
 
 #pragma once
 
@@ -43,7 +49,9 @@
 namespace Vulkan::Precompile {
 
 constexpr std::array<char, 8> ListMagic = {'G', 'O', 'W', '3', 'P', 'C', 'L', '\n'};
-constexpr u32 ListVersion = 3;
+constexpr u32 ListVersion = 4;
+/// The oldest version read: its keys hold the fetch shader's code words, not its parse.
+constexpr u32 ListVersionStubWords = 3;
 
 /// The build's layout, checked in the header (the recorder static_asserts them).
 constexpr u32 ListRegsWords = 0xD000;  ///< AmdGpu::Regs::NumRegs
@@ -56,6 +64,11 @@ constexpr u32 ListMaxPsInputs = 32;        ///< HwFragmentRuntimeInfo::inputs
 /// A draw-indirect sgpr offset names a vertex-stage user-data register from this one on; the
 /// translator asserts that it is one of the 16 (UdRegFromShOffset), 0 for none.
 constexpr u32 ListVsUserDataSgpr = 0x4C;
+/// A fetch shader parse (the recorder static_asserts them).
+constexpr u32 ListVertexStage = 3;         ///< SwStage::Vertex, the stage it belongs to
+constexpr u32 ListMaxFetchAttributes = 32; ///< MaxVertexBufferCount
+constexpr u32 ListMaxVsInputs = 32;        ///< IR::NumParams: an attribute's semantic
+constexpr u32 ListMaxStepRate = 3;         ///< VertexAttribute::InstanceIdType::Plain
 
 constexpr size_t MaxListBytes = 128u << 20;
 /// Key entries a list holds: the recorder stops at it, the rebuild reads no more. A list grows
@@ -94,6 +107,33 @@ struct RecordedStage {
     bool operator==(const RecordedStage&) const = default;
 };
 
+/// Shader::Gcn::VertexAttribute, every field (vk_precompile_fetch.h converts).
+struct FetchAttribute {
+    u8 semantic;
+    u8 dest_vgpr;
+    u8 num_elements;
+    u8 sgpr_base;
+    u8 dword_offset;
+    u8 instance_data;
+    u8 inst_offset;
+    u8 data_format;
+    u8 num_format;
+    bool operator==(const FetchAttribute&) const = default;
+};
+static_assert(sizeof(FetchAttribute) == 9);
+
+/// Shader::Gcn::FetchShaderData of the vertex stage, every field, and the user-data register
+/// that holds the fetch shader's pointer: what the rebuild hands ParseFetchShader in place of
+/// the code.
+struct FetchDescription {
+    u32 size;
+    s8 vertex_offset_sgpr;
+    s8 instance_offset_sgpr;
+    u8 sgpr_base;
+    std::vector<FetchAttribute> attributes;
+    bool operator==(const FetchDescription&) const = default;
+};
+
 /// One new pipeline of the recording launch.
 struct RecordedKey {
     /// The pipeline key's hash without its stage hashes (those hold permutation numbers, which
@@ -107,6 +147,8 @@ struct RecordedKey {
     std::vector<RecordedStage> stages;
     std::vector<GuestWord> words;
     std::vector<GuestPointer> pointers;
+    /// The vertex stage's fetch shader, none without one or in a version 3 list.
+    std::optional<FetchDescription> fetch;
     bool operator==(const RecordedKey&) const = default;
 };
 
@@ -295,6 +337,42 @@ inline bool DecodeCode(Reader& in, u64& hash, std::vector<u32>& code) {
            (offset >= ListVsUserDataSgpr && offset < ListVsUserDataSgpr + ListUserDataWords);
 }
 
+/// Whether a fetch shader's vertex or instance offset sgpr is none or a user-data register
+/// that, in an indirect draw (`key_offset` set), is the one the draw writes: the translator
+/// asserts that.
+[[nodiscard]] inline bool ValidOffsetSgpr(s8 sgpr, u32 key_offset) {
+    return sgpr == -1 || (sgpr >= 0 && u32(sgpr) < ListUserDataWords &&
+                          (key_offset == 0 || u32(sgpr) == key_offset - ListVsUserDataSgpr));
+}
+
+/// Why a fetch shader parse cannot be handed to the translator safely, or null: each field an
+/// assert or an array index reads is in range.
+inline const char* CheckFetch(const RecordedKey& key, const FetchDescription& fetch) {
+    if (std::ranges::none_of(key.stages, [](const RecordedStage& stage) {
+            return stage.sw_stage == ListVertexStage;
+        })) {
+        return "fetch shader without a vertex stage";
+    }
+    if (fetch.sgpr_base >= ListUserDataWords - 1) { // a pointer: two words
+        return "fetch shader pointer out of range";
+    }
+    if (!ValidOffsetSgpr(fetch.vertex_offset_sgpr, key.vertex_sgpr_offset) ||
+        !ValidOffsetSgpr(fetch.instance_offset_sgpr, key.instance_sgpr_offset)) {
+        return "fetch shader offset sgpr out of range";
+    }
+    if (fetch.attributes.size() > ListMaxFetchAttributes) {
+        return "too many vertex attributes";
+    }
+    for (const auto& attribute : fetch.attributes) {
+        if (attribute.semantic >= ListMaxVsInputs || attribute.sgpr_base >= ListUserDataWords - 1 ||
+            attribute.num_elements < 1 || attribute.num_elements > 4 ||
+            attribute.instance_data > ListMaxStepRate || attribute.dest_vgpr > 255 - 3) {
+            return "vertex attribute out of range";
+        }
+    }
+    return nullptr;
+}
+
 /// Why a decoded key cannot be replayed safely, or null.
 inline const char* Check(const RecordedKey& key) {
     for (const auto& [index, value] : key.regs) {
@@ -340,11 +418,33 @@ inline const char* Check(const RecordedKey& key) {
             return "pointer without its words";
         }
     }
-    return nullptr;
+    return key.fetch ? CheckFetch(key, *key.fetch) : nullptr;
 }
 
-/// Decodes a key body (after its kind); false when it ends early or has bytes left over.
-inline bool Decode(Reader& in, RecordedKey& key) {
+/// Decodes a fetch shader parse (after its flag); false when it is cut short.
+inline bool DecodeFetch(Reader& in, FetchDescription& fetch) {
+    fetch.size = in.Get<u32>();
+    fetch.vertex_offset_sgpr = in.Get<s8>();
+    fetch.instance_offset_sgpr = in.Get<s8>();
+    fetch.sgpr_base = in.Get<u8>();
+    const u8 count = in.Get<u8>();
+    if (count > ListMaxFetchAttributes || !in.Fits(count, sizeof(FetchAttribute))) {
+        return false;
+    }
+    fetch.attributes.resize(count);
+    for (auto& a : fetch.attributes) {
+        for (u8* field : {&a.semantic, &a.dest_vgpr, &a.num_elements, &a.sgpr_base,
+                          &a.dword_offset, &a.instance_data, &a.inst_offset, &a.data_format,
+                          &a.num_format}) {
+            *field = in.Get<u8>();
+        }
+    }
+    return in.Ok();
+}
+
+/// Decodes a key body (after its kind) of a list of `version`; false when it ends early or has
+/// bytes left over.
+inline bool Decode(Reader& in, RecordedKey& key, u32 version) {
     key.key_hash = in.Get<u64>();
     key.vertex_sgpr_offset = in.Get<u32>();
     key.instance_sgpr_offset = in.Get<u32>();
@@ -400,13 +500,20 @@ inline bool Decode(Reader& in, RecordedKey& key) {
         pointer.offset = in.Get<u32>();
         pointer.target = in.Get<u64>();
     }
+    if (version > ListVersionStubWords) {
+        const u8 has_fetch = in.Get<u8>();
+        if (has_fetch > 1 || (has_fetch && !DecodeFetch(in, key.fetch.emplace()))) {
+            return false;
+        }
+    }
     return in.Ok() && in.AtEnd();
 }
 
 /// Keeps a key entry; why it was dropped, or null.
-inline const char* AddKey(Reader& in, std::vector<RecordedKey>& keys, u32 max_keys) {
+inline const char* AddKey(Reader& in, std::vector<RecordedKey>& keys, u32 max_keys,
+                          u32 version) {
     RecordedKey key{};
-    const char* why = !Decode(in, key) ? "malformed" : Check(key);
+    const char* why = !Decode(in, key, version) ? "malformed" : Check(key);
     if (!why && keys.size() >= max_keys) {
         why = "past the entry cap";
     }
@@ -481,6 +588,22 @@ inline const char* AddCode(Reader& in, std::map<u64, std::vector<u32>>& code) {
         Put(body, pointer.offset);
         Put(body, pointer.target);
     }
+    Put(body, u8(key.fetch.has_value()));
+    if (key.fetch) {
+        const auto& fetch = *key.fetch;
+        Put(body, fetch.size);
+        Put(body, fetch.vertex_offset_sgpr);
+        Put(body, fetch.instance_offset_sgpr);
+        Put(body, fetch.sgpr_base);
+        Put(body, u8(fetch.attributes.size())); // at most ListMaxFetchAttributes (recorder)
+        for (const auto& a : fetch.attributes) {
+            for (const u8 field : {a.semantic, a.dest_vgpr, a.num_elements, a.sgpr_base,
+                                   a.dword_offset, a.instance_data, a.inst_offset, a.data_format,
+                                   a.num_format}) {
+                Put(body, field);
+            }
+        }
+    }
     return ListDetail::Frame(body);
 }
 
@@ -523,7 +646,7 @@ struct ParsedList {
     if (!in.Ok()) {
         return list;
     }
-    if (list.version != ListVersion) {
+    if (list.version != ListVersion && list.version != ListVersionStubWords) {
         list.status = ParsedList::Status::OtherVersion;
         return list;
     }
@@ -563,7 +686,7 @@ struct ParsedList {
         if (!why && kind == ListRecord::Code) {
             why = ListDetail::AddCode(entry, list.code);
         } else if (!why && kind == ListRecord::Key) {
-            why = ListDetail::AddKey(entry, list.keys, max_keys);
+            why = ListDetail::AddKey(entry, list.keys, max_keys, list.version);
         } else if (!why) {
             why = "malformed";
         }
@@ -609,6 +732,9 @@ struct ParsedList {
 struct ListAppend {
     bool keep = false;          ///< append to the file; otherwise it is written anew
     const char* why = nullptr;  ///< why an existing file is written anew
+    /// A version 3 list (fetch shader code): left as it is, since it may be the start-up
+    /// rebuild's list too, and the recording is off.
+    bool stub_words = false;
     size_t bytes = 0;           ///< kept: the header and every entry that could be framed
     std::set<u64> keys;         ///< kept keys, by EntryDigest
     size_t entries = 0;         ///< kept key entries: what the entry cap counts
@@ -638,6 +764,10 @@ struct ListAppend {
         return plan;
     case ParsedList::Status::Ok:
         break;
+    }
+    if (list.version != ListVersion) { // entries of this version would not frame in it
+        plan.stub_words = true;
+        return plan;
     }
     plan.keep = true;
     plan.bytes = list.framed_bytes;

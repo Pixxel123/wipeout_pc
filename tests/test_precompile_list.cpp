@@ -37,7 +37,32 @@ RecordedKey SampleKey(u64 seed) {
     key.words = {{Table, 8, u32(Nested)}, {Table, 12, 0}, {Table, 64, 0xAAAA5555},
                  {Nested, 0, u32(seed)}};
     key.pointers = {{Table, 8, Nested}};
+    // The vertex stage's fetch shader parse (version 4); its root stays recorded.
+    vertex.roots = {{4, 0x4000'0000}};
+    key.stages[1] = vertex;
+    key.fetch = FetchDescription{
+        36, -1, -1, 4, {{0, 4, 4, 2, 0, 0, 0, 0, 0}, {1, 8, 2, 2, u8(4 + seed % 8), 0, 0, 0, 0}}};
     return key;
+}
+
+/// `keys` as a version 3 list: no fetch shader parse (the flag byte is left out).
+std::vector<u8> FileV3(std::vector<RecordedKey> keys) {
+    auto file = EncodeListHeader();
+    const u32 version = ListVersionStubWords;
+    std::memcpy(file.data() + ListMagic.size(), &version, sizeof(version));
+    for (auto& key : keys) {
+        key.fetch.reset();
+        auto entry = EncodeListEntry(key);
+        assert(entry.back() == 0);
+        entry.pop_back();
+        const std::span<const u8> body{entry.data() + 12, entry.size() - 12};
+        const u32 size = u32(body.size());
+        const u64 checksum = Fnv1a(body);
+        std::memcpy(entry.data(), &size, sizeof(size));
+        std::memcpy(entry.data() + 4, &checksum, sizeof(checksum));
+        file.insert(file.end(), entry.begin(), entry.end());
+    }
+    return file;
 }
 
 std::vector<u8> File(const std::vector<RecordedKey>& keys) {
@@ -271,12 +296,121 @@ void TestCodeBody() {
 }
 
 void TestOldVersion() {
-    // A version 1 list (no code) is another version: the boot needs the code.
-    auto file = File({SampleKey(1)});
-    const u32 version = 1;
-    std::memcpy(file.data() + ListMagic.size(), &version, sizeof(version));
-    const auto list = ParseList(file, 100);
-    assert(list.status == ParsedList::Status::OtherVersion && list.version == 1);
+    // Version 1 (no code) and 2 lists are other versions: the boot needs the code.
+    for (const u32 version : {1u, 2u}) {
+        auto file = File({SampleKey(1)});
+        std::memcpy(file.data() + ListMagic.size(), &version, sizeof(version));
+        const auto list = ParseList(file, 100);
+        assert(list.status == ParsedList::Status::OtherVersion && list.version == version);
+    }
+}
+
+void TestVersion3() {
+    // A version 3 list (a local recording: the fetch shader's code among the words) still
+    // reads, without a parse.
+    auto keys = std::vector<RecordedKey>{SampleKey(1), SampleKey(2)};
+    keys[1].words.push_back({0x4000'0000, 0, 0x1234});
+    const auto list = ParseList(FileV3(keys), 100);
+    assert(list.status == ParsedList::Status::Ok && list.version == ListVersionStubWords);
+    assert(list.rejected == 0 && list.keys.size() == 2);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        auto without = keys[i];
+        without.fetch.reset();
+        assert(list.keys[i] == without);
+    }
+    // A version 4 entry under a version 3 header has a byte left over, and the other way round
+    // one is missing.
+    auto mixed = FileV3({});
+    Append(mixed, EncodeListEntry(SampleKey(1)));
+    assert(ParseList(mixed, 100).reasons == std::vector<std::string>{"entry 0: malformed"});
+    auto short_v4 = FileV3({SampleKey(1)});
+    const u32 version = ListVersion;
+    std::memcpy(short_v4.data() + ListMagic.size(), &version, sizeof(version));
+    assert(ParseList(short_v4, 100).reasons == std::vector<std::string>{"entry 0: malformed"});
+    // A recording does not append version 4 entries to it, nor write it anew: it may be the
+    // start-up rebuild's list too.
+    const auto plan = PlanListAppend(FileV3({SampleKey(1)}));
+    assert(!plan.keep && plan.stub_words && !plan.why && plan.keys.empty());
+    assert(!PlanListAppend(File({SampleKey(1)})).stub_words);
+}
+
+void TestFetchRoundTrip() {
+    // Without a parse (no fetch shader), with one, and with every field away from its default.
+    auto none = SampleKey(1);
+    none.fetch.reset();
+    auto full = SampleKey(2);
+    full.vertex_sgpr_offset = ListVsUserDataSgpr + 6;
+    full.instance_sgpr_offset = ListVsUserDataSgpr + 7;
+    full.fetch = FetchDescription{0xFFFF'FFF0, 6, 7, ListUserDataWords - 2, {}};
+    for (u32 i = 0; i < ListMaxFetchAttributes; ++i) {
+        full.fetch->attributes.push_back({u8(i), u8(252 - i), u8(1 + i % 4), 14, 0xFF, 3, 0xFF,
+                                          0xF, 0x7});
+    }
+    const std::vector<RecordedKey> keys = {none, SampleKey(3), full};
+    const auto list = ParseList(File(keys), 100);
+    assert(list.status == ParsedList::Status::Ok && list.rejected == 0 && list.keys == keys);
+    // 1 flag byte without a parse; with one, 8 bytes and 9 per attribute.
+    assert(EncodeListEntry(SampleKey(1)).size() - EncodeListEntry(none).size() == 8 + 2 * 9);
+}
+
+void TestFetchRejects() {
+    const auto rejected = [](RecordedKey key, const char* why) {
+        const auto parsed = ParseList(File({SampleKey(1), key}), 100);
+        assert(parsed.keys.size() == 1 && parsed.rejected == 1);
+        assert(parsed.reasons[0] == std::string{"entry 1: "} + why);
+    };
+    auto key = SampleKey(3);
+    key.stages[1].sw_stage = 4; // geometry
+    rejected(key, "fetch shader without a vertex stage");
+    key = SampleKey(3);
+    key.fetch->sgpr_base = ListUserDataWords - 1;
+    rejected(key, "fetch shader pointer out of range");
+    key = SampleKey(3);
+    key.vertex_sgpr_offset = 0;
+    key.fetch->vertex_offset_sgpr = 3; // a direct draw's: any register
+    const auto direct = ParseList(File({key}), 100);
+    assert(direct.rejected == 0);
+    for (const s8 sgpr : {s8(16), s8(-2), s8(0x7F)}) {
+        key.fetch->vertex_offset_sgpr = sgpr;
+        rejected(key, "fetch shader offset sgpr out of range");
+    }
+    key = SampleKey(3);
+    key.instance_sgpr_offset = ListVsUserDataSgpr + 5;
+    key.fetch->instance_offset_sgpr = 4; // not the register the indirect draw writes
+    rejected(key, "fetch shader offset sgpr out of range");
+    key.fetch->instance_offset_sgpr = 5;
+    assert(ParseList(File({key}), 100).rejected == 0);
+    const auto attribute = [&](auto&& change) {
+        key = SampleKey(3);
+        change(key.fetch->attributes[1]);
+        rejected(key, "vertex attribute out of range");
+    };
+    attribute([](FetchAttribute& a) { a.semantic = ListMaxVsInputs; });
+    attribute([](FetchAttribute& a) { a.sgpr_base = ListUserDataWords - 1; });
+    attribute([](FetchAttribute& a) { a.num_elements = 0; });
+    attribute([](FetchAttribute& a) { a.num_elements = 5; });
+    attribute([](FetchAttribute& a) { a.instance_data = ListMaxStepRate + 1; });
+    attribute([](FetchAttribute& a) { a.dest_vgpr = 253; });
+
+    // More attributes than a pipeline has vertex buffers, a flag other than 0 or 1, or a
+    // parse cut short: malformed.
+    key = SampleKey(3);
+    key.fetch->attributes.resize(ListMaxFetchAttributes + 1, key.fetch->attributes[0]);
+    rejected(key, "malformed");
+    const auto patched = [&](size_t from_end, u8 value) {
+        auto entry = EncodeListEntry(SampleKey(3));
+        entry[entry.size() - from_end] = value;
+        const std::span<const u8> body{entry.data() + 12, entry.size() - 12};
+        const u64 checksum = Fnv1a(body);
+        std::memcpy(entry.data() + 4, &checksum, sizeof(checksum));
+        auto file = EncodeListHeader();
+        Append(file, entry);
+        return ParseList(file, 100);
+    };
+    // The flag is 8 + 2 * 9 bytes from the end, the attribute count 2 * 9 + 1.
+    assert(patched(8 + 2 * 9 + 1, 2).reasons[0] == "entry 0: malformed");
+    assert(patched(2 * 9 + 1, 3).reasons[0] == "entry 0: malformed");
+    assert(patched(2 * 9 + 1, 1).reasons[0] == "entry 0: malformed"); // a byte left over
 }
 
 void TestStagesDigest() {
@@ -409,7 +543,7 @@ void TestAppendAfterZeroTail() {
 
 void TestAppendReplaces() {
     auto other_version = File({SampleKey(1)});
-    const u32 version = ListVersion - 1;
+    const u32 version = ListVersion + 1;
     std::memcpy(other_version.data() + ListMagic.size(), &version, sizeof(version));
     const auto by_version = PlanListAppend(other_version);
     assert(!by_version.keep && by_version.why && by_version.keys.empty());
@@ -476,6 +610,9 @@ int main() {
     TestCodeRejects();
     TestCodeBody();
     TestOldVersion();
+    TestVersion3();
+    TestFetchRoundTrip();
+    TestFetchRejects();
     TestStagesDigest();
     TestEntryDigest();
     TestAppendKeeps();

@@ -1238,7 +1238,8 @@ void Translator::EmitFetch(const GcnInst& inst) {
     fetch_data = ParseFetchShader(info);
     ASSERT(fetch_data.has_value());
 
-    if (EmulatorSettings.IsDumpShaders()) {
+    // gow3: a precompile list's rebuild has the parse only, no code to dump.
+    if (EmulatorSettings.IsDumpShaders() && !FetchShaderOverridden()) {
         using namespace Common::FS;
         const auto dump_dir = GetUserPath(PathType::ShaderDir) / "dumps";
         if (!std::filesystem::exists(dump_dir)) {
