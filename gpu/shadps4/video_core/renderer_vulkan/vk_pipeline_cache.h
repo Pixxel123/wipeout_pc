@@ -424,9 +424,9 @@ private:
     bool BeginDiskShaders(bool compatible, bool renew_store_without_build, bool start_preload,
                           const std::vector<u8>& driver_key,
                           const std::function<void(u32 done, u32 total)>& progress);
-    /// Drops the saved shader files `marker` does not vouch for, runs the start-up rebuild,
-    /// saves this build's marker (DiskShaderMarker) and builds the rebuild's pipelines with
-    /// disk_shaders on; then records `driver_key` (ShaderProfile/driver_key) unless empty.
+    /// Drops the saved shader files `marker` does not vouch for, runs the start-up rebuild and
+    /// builds the rebuild's pipelines with disk_shaders on; then records `driver_key`
+    /// (ShaderProfile/driver_key) unless empty, and this build's marker (DiskShaderMarker).
     void RebuildDiskShaders(const std::vector<u8>& marker, const std::vector<u8>& driver_key,
                             const std::function<void(u32 done, u32 total)>& progress);
     bool LoadDiskProgram(u64 hash);

@@ -1228,11 +1228,9 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
                 : marker == std::vector<u8>{0}       ? "disk shaders were off"
                 : marker == DiskShaderMarker()       ? "the driver's pipeline binary key changed"
                                                      : "another translator");
-    // gow3 (GOW3_PRECOMPILE_BOOT): the marker is saved after the rebuild of the list the caller
-    // prepared (PreparePrecompileList), so a start that ends inside it drops its files again
-    // next time.
+    // gow3 (GOW3_PRECOMPILE_BOOT): the rebuild of the list the caller prepared
+    // (PreparePrecompileList), then its pipeline pass.
     const bool rebuilt = RunPrecompileList(progress);
-    db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
     if (rebuilt) {
         db.Flush();
         IndexDiskShaders();
@@ -1240,13 +1238,16 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
         disk_shaders = true;
         BuildPrecompilePipelines(progress);
     }
-    // gow3: the driver's key (empty unless a prepared list is rebuilt on demand) is recorded once
-    // the pipelines are built, so a start that ends before this builds again next time; also
-    // when the rebuild could not run (its crash marker not written), else every start would drop
-    // the store again. A later start with another key builds again (DiskShaderStartOf).
+    // gow3: the build counts as done only once its pipeline pass has ended: the driver's key
+    // (empty unless a prepared list is rebuilt on demand), then the marker, are saved after it,
+    // so a start that ends in the rebuild or the pass drops the files and builds again next
+    // time. Also when there was no list or the rebuild could not run (its crash marker not
+    // written), else every start would drop the store again. A later start with another key
+    // builds again (DiskShaderStartOf).
     if (!driver_key.empty()) {
         db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
     }
+    db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
 }
 
 // gow3 (GOW3_PRECOMPILE_BOOT): with pipeline binaries off (NVIDIA) the presenter takes a
@@ -1324,8 +1325,8 @@ bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_b
                            progress);
     } else {
         IndexDiskShaders();
-        // gow3: a store with no recorded key (made before the key, or a start that ended before
-        // the save) records the driver's now, so a later driver update is seen.
+        // gow3: a store with no recorded key (made before the key, renewed without a ready list
+        // or by the warm-up path) records the driver's now, so a later driver update is seen.
         if (!driver_key.empty() && !key_recorded) {
             db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
         }
