@@ -27,25 +27,78 @@ def header(version=3):
     return b'GOW3PCL\n' + struct.pack('<4I', version, 0xD000, 16, 6)
 
 
-def key(regs=2, stages=1, roots=1, words=2, pointers=1):
+def key(regs=2, stages=1, roots=1, words=2, pointers=1, version=3):
     body = struct.pack('<IQIII', 0, 7, 0, 0, regs) + bytes(8 * regs) + struct.pack('<I', stages)
     for _ in range(stages):
         body += struct.pack('<IIQQ', 0, 0, 1, 2) + bytes(64) + struct.pack('<I', roots)
         body += bytes(12 * roots)
     body += struct.pack('<I', words) + bytes(16 * words) + struct.pack('<I', pointers)
-    return frame(body + bytes(20 * pointers))
+    return frame(body + bytes(20 * pointers) + (b'\0' if version == 4 else b''))
 
 
 def code(words=4):
     return frame(struct.pack('<IQI', 1, 9, words) + bytes(4 * words))
 
 
-def program_key(*programs):
+def program_key(*programs, version=3):
     """A key entry whose stages run `programs`."""
     body = struct.pack('<IQIII', 0, 7, 0, 0, 0) + struct.pack('<I', len(programs))
     for program in programs:
         body += struct.pack('<IIQQ', 0, 0, program, 2) + bytes(64) + struct.pack('<I', 0)
-    return frame(body + struct.pack('<II', 0, 0))
+    return frame(body + struct.pack('<II', 0, 0) + (b'\0' if version == 4 else b''))
+
+
+# Invented fetch shaders in the shapes the engine's parser documents (fetch_shader.cpp).
+def load_x4(sdst, sbase_pair, offset, imm=1):
+    return 0xC0000000 | (2 << 22) | (sdst << 15) | (sbase_pair << 9) | (imm << 8) | offset
+
+
+WAIT_LGKM, WAIT_ALL, RETURN = 0xBF8C007F, 0xBF8C0000, 0xBE802000
+
+
+def buffer_load(count, vdata, srsrc, vaddr=0):
+    return [0xE0000000 | ((count - 1) << 18) | (1 << 13), vaddr | (vdata << 8) | (srsrc << 16)]
+
+
+def typed_load(count, vdata, srsrc):
+    return [0xE8000000 | (13 << 19) | ((count - 1) << 16) | (1 << 13), (vdata << 8) | (srsrc << 16)]
+
+
+def grouped_stub():
+    """Two attributes: V#s at dword 0 and 8 of the table at s[2:3]."""
+    return ([load_x4(8, 1, 0), load_x4(12, 1, 8), WAIT_LGKM] + buffer_load(4, 4, 2) +
+            buffer_load(2, 8, 3) + [WAIT_ALL, RETURN])
+
+
+TABLE, FETCH, BUFFERS = 0x2000_0000, 0x3000_0000, 0x4000_0000
+GROUPED_ATTRIBUTES = [(0, 4, 4, 2, 0, 0, 0, 0, 0), (1, 8, 2, 2, 8, 0, 0, 0, 0)]
+
+
+def stub_key(stub=None, version=3, extra_words=(), regs=(), user_data=bytes(64), fetch=None,
+             vsharps=(0, 8)):
+    """A vertex + fragment key whose vertex stage has a walker table (user data 0), the fetch
+    shader at user data 4 and a vertex buffer table at user data 2. Version 3 holds `stub`'s
+    words after the walker's, version 4 the description `fetch` instead."""
+    body = struct.pack('<IQIII', 0, 7, 0, 0, len(regs)) + b''.join(
+        struct.pack('<II', *r) for r in regs) + struct.pack('<I', 2)
+    body += struct.pack('<IIQQ', 0, 0, 0x11, 2) + bytes(64) + struct.pack('<I', 0)
+    roots = [(0, TABLE), (4, FETCH), (2, BUFFERS)]
+    body += struct.pack('<IIQQ', 3, 1, 0x22, 3) + user_data + struct.pack('<I', len(roots))
+    body += b''.join(struct.pack('<IQ', *r) for r in roots)
+    words = [(TABLE, 0, 5), (TABLE, 4, 6), *extra_words]
+    words += [(FETCH, 4 * i, w) for i, w in enumerate(stub or [])]
+    words += [(BUFFERS, (d + w) * 4, 0x100 + w) for d in vsharps for w in range(4)]
+    body += struct.pack('<I', len(words)) + b''.join(struct.pack('<QII', *w) for w in words)
+    body += struct.pack('<I', 0)
+    if version == 4:
+        body += info.encode_fetch(fetch)
+    return frame(body)
+
+
+def grouped_fetch():
+    return {'size': 4 * len(grouped_stub()), 'vertex_offset_sgpr': -1,
+            'instance_offset_sgpr': -1, 'sgpr': 4,
+            'attributes': [dict(zip(info.ATTRIBUTE_FIELDS, a)) for a in GROUPED_ATTRIBUTES]}
 
 
 def blob(program, body=(1, 2, 3, 4)):
@@ -117,10 +170,12 @@ class ListInfoTest(unittest.TestCase):
         data = header() + keys[0] + code() + keys[1] + code(8)
         status, out = run(self.write('a.bin', data))
         self.assertEqual(status, 0, out)
-        for line in ('version: 3', 'key entries: 2', 'code records: 2', 'bytes, registers: 16',
-                     'bytes, user data: 128', 'bytes, roots: 12', 'bytes, guest words: 32',
-                     'bytes, pointers: 20', f'bytes, code: {len(code()) + len(code(8))}',
-                     f'bytes, total: {len(data)}'):
+        for line in ('version: 3', 'key entries: 2', 'code records: 2',
+                     'registers: 2 records, 16 bytes', 'user data: 2 records, 128 bytes',
+                     'roots: 1 records, 12 bytes', 'guest words: 2 records, 32 bytes',
+                     'pointers: 1 records, 20 bytes', 'fetch words: 0 records, 0 bytes',
+                     f'code: 2 records, {len(code()) + len(code(8))} bytes',
+                     f'total: {len(data)} bytes'):
             self.assertIn(line, out)
 
     def test_strip_code_keeps_the_keys_byte_for_byte(self):
@@ -133,7 +188,7 @@ class ListInfoTest(unittest.TestCase):
         status, out = run(dst)
         self.assertEqual(status, 0, out)
         self.assertIn('code records: 0', out)
-        self.assertIn('bytes, code: 0', out)
+        self.assertIn('code: 0 records, 0 bytes', out)
         self.assertIn('key entries: 2', out)
 
     def test_a_corrupted_checksum_exits_1(self):
@@ -388,6 +443,132 @@ class ListInfoTest(unittest.TestCase):
         out = self.eboots((0x11, 0x22), blob(0x11), blob(0x22))
         self.assertIn('programs found: 2', out)
         self.assertIn('files read: 2', out)
+
+    def test_summary_v4_counts_fetch_descriptions(self):
+        data = header(4) + stub_key(version=4, fetch=grouped_fetch()) + key(version=4)
+        status, out = run(self.write('a.bin', data))
+        self.assertEqual(status, 0, out)
+        for line in ('version: 4', 'key entries: 2', 'fetch words: 0 records, 0 bytes',
+                     f'fetch descriptions: 1 records, {2 + 8 + 2 * 9} bytes',
+                     'guest words: 12 records, 192 bytes', f'total: {len(data)} bytes'):
+            self.assertIn(line, out)
+
+    def test_summary_v3_counts_fetch_words(self):
+        data = header() + stub_key(grouped_stub())
+        status, out = run(self.write('a.bin', data))
+        self.assertEqual(status, 0, out)
+        self.assertIn(f'fetch words: {len(grouped_stub())} records, {16 * len(grouped_stub())} '
+                      'bytes', out)
+        self.assertIn(f'total: {len(data)} bytes', out)
+
+    def convert(self, data):
+        dst = self.root / 'v4.bin'
+        status, out = run('--convert-v4', self.write('v3.bin', data), dst)
+        return status, out, dst
+
+    def test_convert_v4_replaces_the_words_with_the_description(self):
+        plain = key()
+        status, out, dst = self.convert(header() + code() + stub_key(grouped_stub()) + plain)
+        self.assertEqual(status, 0, out)
+        self.assertIn('fetch descriptions written: 1', out)
+        self.assertIn('keys without a fetch shader: 1', out)
+        self.assertIn(f'fetch words removed: {len(grouped_stub())}', out)
+        result = dst.read_bytes()
+        version, entries = info.read_list(result)
+        self.assertEqual(version, 4)
+        self.assertEqual(result[:info.HEADER.size], header(4))
+        self.assertEqual(entries[0][1], code())  # copied as it is
+        self.assertEqual(entries[1][1], stub_key(version=4, fetch=grouped_fetch()))
+        self.assertEqual(entries[2][1], frame(plain[12:] + b'\0'))
+        converted = info.parse_key(entries[1][1][12:], 4)
+        self.assertEqual(converted.fetch, grouped_fetch())
+
+    def test_convert_v4_refuses_what_it_cannot_decode(self):
+        refused = (
+            [load_x4(8, 1, 0, imm=0), WAIT_LGKM] + buffer_load(4, 4, 2) + [RETURN],  # sgpr offset
+            [load_x4(8, 1, 0), WAIT_LGKM] + typed_load(4, 4, 2) + [RETURN],  # typed load
+            [load_x4(8, 1, 0), WAIT_LGKM] + buffer_load(4, 4, 3) + [RETURN],  # no V# load
+            [0x7E000280, RETURN],  # a vector instruction
+        )
+        for stub in refused:
+            data = header() + key() + stub_key(stub, vsharps=(0,))
+            status, out, dst = self.convert(data)
+            self.assertEqual(status, 1, out)
+            self.assertIn('key 1 (entry 1)', out)
+            self.assertIn('no file written', out)
+            self.assertFalse(dst.exists())
+        # Already version 4.
+        status, out, dst = self.convert(header(4) + key(version=4))
+        self.assertEqual(status, 1, out)
+        self.assertFalse(dst.exists())
+
+    def test_convert_v4_needs_the_vertex_buffer_descriptors(self):
+        status, out, dst = self.convert(header() + stub_key(grouped_stub(), vsharps=(0,)))
+        self.assertEqual(status, 1, out)
+        self.assertIn('without their vertex buffer descriptors', out)
+
+    def check(self, data):
+        return run('--check', self.write('c.bin', data))
+
+    def test_check_passes_a_clean_list(self):
+        status, out, dst = self.convert(header() + stub_key(grouped_stub()) + key())
+        self.assertEqual(status, 0, out)
+        status, out = run('--check', dst)
+        self.assertEqual(status, 0, out)
+        for line in ('check passed', 'check, code records: 0', 'check, fetch words: 0',
+                     'check, instruction-shaped words: 0', 'check, start tokens: 0',
+                     'check, OrbShdr: 0', 'fetch descriptions: 1 records'):
+            self.assertIn(line, out)
+
+    def test_check_fails_each_rule(self):
+        clean = stub_key(version=4, fetch=grouped_fetch())
+        orb = bytearray(64)
+        orb[20:27] = b'OrbShdr'
+        cases = (
+            (header() + stub_key(grouped_stub()), 'list version 3 is below 4'),
+            (header(4) + code() + clean, '1 Code records'),
+            (header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                  extra_words=[(FETCH, 0, 0)]),
+             '1 guest words at a fetch shader\'s root'),
+            (header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                  extra_words=[(TABLE, 8, 0xBE822004)]),
+             '1 instruction-shaped words'),
+            (header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                  extra_words=[(TABLE, 8, 0xBF810000)]),
+             '1 instruction-shaped words'),
+            (header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                  regs=[(0x2C00, 1), (0x2C01, 0xBEEB03FF)]), '1 start tokens'),
+            (header(4) + stub_key(version=4, fetch=grouped_fetch(), user_data=bytes(orb)),
+             '1 OrbShdr'),
+        )
+        for data, reason in cases:
+            status, out = self.check(data)
+            self.assertEqual(status, 1, out)
+            self.assertIn(f'check failed: {reason}', out)
+            self.assertNotIn('check passed', out)
+
+    def test_check_reads_streams_across_words(self):
+        # OrbShdr split over two consecutive registers is found; two registers apart it is not.
+        word = struct.unpack('<2I', b'xOrbShdr')
+        status, out = self.check(header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                                      regs=[(0x10, word[0]), (0x11, word[1])]))
+        self.assertIn('check failed: 1 OrbShdr', out)
+        status, out = self.check(header(4) + stub_key(version=4, fetch=grouped_fetch(),
+                                                      regs=[(0x10, word[0]), (0x12, word[1])]))
+        self.assertEqual(status, 0, out)
+
+    def test_strip_and_add_code_work_on_v4(self):
+        k1 = stub_key(version=4, fetch=grouped_fetch())
+        src, dst = self.write('a.bin', header(4) + code() + k1), self.root / 'b.bin'
+        status, out = run(src, '--strip-code', dst)
+        self.assertEqual(status, 0, out)
+        self.assertEqual(dst.read_bytes(), header(4) + k1)
+        status, out, dst = self.add_code(header(4) + program_key(0x11, version=4),
+                                         ('eboot.bin', blob(0x11)))
+        self.assertEqual(status, 0, out)
+        self.assertIn('programs found: 1', out)
+        version, entries = info.read_list(dst.read_bytes())
+        self.assertEqual((version, [e[0] for e in entries]), (4, [info.CODE, info.KEY]))
 
     def test_index_options_need_add_code(self):
         with self.assertRaises(SystemExit):
