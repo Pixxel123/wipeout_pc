@@ -224,7 +224,7 @@ public:
     [[nodiscard]] bool PrecompilePassPending() const noexcept {
         return precompile_pass;
     }
-    /// A slice of that pass (Precompile::PassSliceNs) while no scene is shown, then its end
+    /// A slice of that pass (Precompile::PassSliceNsFor) while no scene is shown, then its end
     /// once every entry is handed over and built. GPU command thread, between submissions.
     void PumpPrecompilePass();
     /// A draw made its frame the first scene frame (CompilePolicy::SceneFrameReached), at
