@@ -59,6 +59,12 @@ int main() {
     static_assert(DiskShaderStartOf(true, false, true, true) == IndexOnly);
     static_assert(DiskShaderStartOf(true, true, false, true) == Rebuild); // the driver changed
     static_assert(DiskShaderStartOf(true, true, true, true) == IndexOnly);
+    // A rebuild start runs the pipeline pass unless two passes in a row did not finish (count
+    // absent: 0).
+    static_assert(!SkipsPipelinePass(0));
+    static_assert(!SkipsPipelinePass(1)); // one quit in the pass still builds again
+    static_assert(SkipsPipelinePass(2));
+    static_assert(SkipsPipelinePass(3));
     // A pending translation keeps the warm-up out of its program, except a stage already at its
     // saved index when the session numbers as the store does.
     static_assert(!WarmStageWaitsForTranslation(false, false, false));

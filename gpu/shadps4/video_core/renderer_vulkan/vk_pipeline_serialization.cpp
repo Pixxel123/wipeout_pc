@@ -1202,7 +1202,7 @@ void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress)
 }
 
 void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
-                                       const std::vector<u8>& driver_key,
+                                       const std::vector<u8>& driver_key, u32 unfinished_passes,
                                        const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
     // Sessions without the marker numbered permutations by first use and overwrote the files by
@@ -1232,6 +1232,19 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
     // (PreparePrecompileList), then its pipeline pass.
     const bool rebuilt = RunPrecompileList(progress);
     if (rebuilt) {
+        // gow3: the count of pipeline passes in a row that did not end is raised before this
+        // one and removed with the marker (SaveDiskShaderBuild), so a crash in the pass does
+        // not repeat at every start. An orderly exit in the middle of the pass leaves it raised
+        // too (a quit cannot be told from a crash), so two quits in a row also skip it once and
+        // the rest is built by draws. Skipped: the run is released, so neither pass runs.
+        if (SkipsPipelinePass(unfinished_passes)) {
+            std::printf("Precompile boot: the pipeline pass did not finish twice in a row; this "
+                        "start skips it\n");
+            precompile_boot.reset();
+        } else {
+            db.Save(Storage::BlobType::ShaderProfile, "pass_attempts",
+                    std::vector<u8>{u8(unfinished_passes + 1)});
+        }
         db.Flush();
         IndexDiskShaders();
         // The pass's selections read programs from the store (DiskShadersActive).
@@ -1257,6 +1270,8 @@ void PipelineCache::SaveDiskShaderBuild(const std::vector<u8>& driver_key) {
     if (!driver_key.empty()) {
         db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
     }
+    // The pass ended (also after a live switch-off): the crash-loop count goes.
+    db.Remove(Storage::BlobType::ShaderProfile, "pass_attempts");
     // Only a background pass can end after a draw: ReportDiskShaders has reset the marker
     // when disk shaders were switched off live, and this session numbers permutations by
     // first use since.
@@ -1304,7 +1319,7 @@ bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_b
                                      bool start_preload, const std::vector<u8>& driver_key,
                                      const std::function<void(u32, u32)>& progress) {
     auto& db = Storage::DataBase::Instance();
-    std::vector<u8> marker, recorded_key;
+    std::vector<u8> marker, recorded_key, pass_attempts;
     if (compatible) {
         db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
         // A store from before the key has none (a Load would log the failed open).
@@ -1313,6 +1328,11 @@ bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_b
             std::filesystem::exists(db.BlobPath(Storage::BlobType::ShaderProfile, "driver_key"),
                                     error)) {
             db.Load(Storage::BlobType::ShaderProfile, "driver_key", recorded_key);
+        }
+        // Absent unless a pipeline pass started and did not end (RebuildDiskShaders).
+        if (std::filesystem::exists(
+                db.BlobPath(Storage::BlobType::ShaderProfile, "pass_attempts"), error)) {
+            db.Load(Storage::BlobType::ShaderProfile, "pass_attempts", pass_attempts);
         }
     }
     const bool marker_equal = marker == DiskShaderMarker();
@@ -1339,13 +1359,18 @@ bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_b
         // The key is recorded only for a list rebuilt.
         RebuildDiskShaders(marker,
                            start == DiskShaderStart::Rebuild ? driver_key : std::vector<u8>{},
-                           progress);
+                           pass_attempts.empty() ? 0u : u32{pass_attempts[0]}, progress);
     } else {
         IndexDiskShaders();
         // gow3: a store with no recorded key (made before the key, renewed without a ready list
         // or by the warm-up path) records the driver's now, so a later driver update is seen.
         if (!driver_key.empty() && !key_recorded) {
             db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
+        }
+        // A count left with a marked store (a kill before its Remove, a driver key back to the
+        // recorded one) must not count toward a later rebuild's skip.
+        if (!pass_attempts.empty()) {
+            db.Remove(Storage::BlobType::ShaderProfile, "pass_attempts");
         }
     }
     disk_shaders = true;

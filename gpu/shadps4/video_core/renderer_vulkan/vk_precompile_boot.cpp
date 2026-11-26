@@ -39,8 +39,10 @@
 // scene frame as no frame before it had as many, finishes what is left before it goes on, as
 // the blocking pass does (FinishPrecompilePassAtScene); the screen keeps the last frame
 // meanwhile. Only the pass's end marks the store (EndPrecompilePass): an exit before it leaves
-// the store unmarked, and the next start builds again. GOW3_PRECOMPILE_BACKGROUND_STALL=1 runs
-// no slice, so the first scene frame takes the whole pass (a test of that wait).
+// the store unmarked, and the next start builds again, unless two passes in a row did not end:
+// that start translates and skips the pass (SkipsPipelinePass).
+// GOW3_PRECOMPILE_BACKGROUND_STALL=1 runs no slice, so the first scene frame takes the whole
+// pass (a test of that wait).
 //
 // A list without the code of some of its programs gets it from the player's game files when an
 // index of the files that hold it lies beside the list (<list>.files, vk_precompile_files.h):
@@ -95,6 +97,7 @@
 #include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/recompiler.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -1586,6 +1589,8 @@ void PipelineCache::StopPrecompilePass() {
     precompile_boot.reset();
     precompile_pass = false;
     Gow3Overlay::SetBackgroundLoading(0, 0);
+    // An orderly stop, not a crash: the next start's rebuild does not count it.
+    Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderProfile, "pass_attempts");
 }
 
 } // namespace Vulkan

@@ -288,9 +288,10 @@ private:
     /// `on_screen(done, total)` goes on from the rebuild's count.
     void BuildPrecompilePipelines(const std::function<void(u32 done, u32 total)>& on_screen);
     /// gow3 (GOW3_PRECOMPILE_BACKGROUND): in place of BuildPrecompilePipelines, unless the
-    /// switch is 0, GOW3_PRECOMPILE_BOOT_PIPELINES=0 (the rebuild is released) or the rebuild
-    /// built nothing: false then. True: the pass runs in the background (PumpPrecompilePass)
-    /// and saves `driver_key` and the marker when it ends (SaveDiskShaderBuild).
+    /// switch is 0, GOW3_PRECOMPILE_BOOT_PIPELINES=0 (the rebuild is released), the crash-loop
+    /// guard released the rebuild (SkipsPipelinePass) or the rebuild built nothing: false then.
+    /// True: the pass runs in the background (PumpPrecompilePass) and saves `driver_key` and the
+    /// marker when it ends (SaveDiskShaderBuild).
     bool StartPrecompilePass(const std::vector<u8>& driver_key);
     void BeginPipelinePass(PrecompileBootRun& run);
     Precompile::PipelineStep PassEntry(PrecompileBootRun& run, u64 until_ns);
@@ -453,10 +454,14 @@ private:
     /// builds the rebuild's pipelines with disk_shaders on; then records `driver_key`
     /// (ShaderProfile/driver_key) unless empty, and this build's marker (DiskShaderMarker).
     /// A pass in the background (StartPrecompilePass) records them when it ends.
+    /// `unfinished_passes`: ShaderProfile/pass_attempts (0 when absent); at 2 or more the pass
+    /// is skipped (SkipsPipelinePass), otherwise the count is raised before it.
     void RebuildDiskShaders(const std::vector<u8>& marker, const std::vector<u8>& driver_key,
+                            u32 unfinished_passes,
                             const std::function<void(u32 done, u32 total)>& progress);
-    /// The first-start build is done: records `driver_key` unless empty, then this build's
-    /// marker, unless disk shaders were switched off live (disk_store_untrusted).
+    /// The first-start build is done: records `driver_key` unless empty, removes the pass count,
+    /// then saves this build's marker, unless disk shaders were switched off live
+    /// (disk_store_untrusted).
     void SaveDiskShaderBuild(const std::vector<u8>& driver_key);
     bool LoadDiskProgram(u64 hash);
     /// Index for a new permutation: a slot the store left empty, else the next one.
