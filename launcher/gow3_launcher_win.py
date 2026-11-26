@@ -549,6 +549,7 @@ APP_DEFAULTS = {'ui_language': 'en', 'ui_scale': 'auto', 'game_dir': os.environ.
                 'music_dir': '', 'player_name': '', 'profile': '', 'online_enabled': False, 'online_role': 'host', 'online_code': '', 'online_port': '7788', 'mods_dir': '', 'mods_enabled': True, 'patches_dir': '', 'language': '1',
                 'hdr': False, 'draw_pipe': '', 'readbacks': '', 'no_msaa': '', 'stream_memory': 'cached', 'texture_limit': '',
                 'gpu_id': '', 'partial_height_views': True, 'background_warmup': True, 'parallel_warmup': True, 'pipeline_binary_cache': True,
+                'shader_progress': False,
                 'perf_diag': False, 'frame_capture_key': False, 'upscaler_key': False, 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'close_on_play': False, 'discord_rpc': False,
                 'update_popup': True, 'launcher_gamepad': True, 'menu_fps_cap': True, 'photo_flare': True, 'adaptive_reflections': True, 'game_patches': {}, 'controls': {}, 'pad_style': 'playstation', 'gamepad_number': '1', 'pad_scheme': '',
@@ -1416,6 +1417,7 @@ def game_environment(s):
         env['GOW3_GPU_ID'] = gpu_id
     env['GOW3_BACKGROUND_WARMUP'] = '1' if s.get('background_warmup', True) else '0'
     env['GOW3_PARALLEL_WARMUP'] = '1' if s.get('parallel_warmup', True) else '0'
+    env['GOW3_SHADER_PROGRESS'] = '1' if s.get('shader_progress', False) else '0'
     env['GOW3_PIPELINE_BINARIES'] = '1' if s.get('pipeline_binary_cache', True) else '0'
     env['GOW3_PERF_DIAG'] = '1' if s.get('perf_diag', False) else '0'
     env['GOW3_PARTIAL_HEIGHT_VIEWS'] = '1' if s.get('partial_height_views', True) else '0'
@@ -2241,6 +2243,7 @@ class Launcher:
                      'or effect may appear a moment later. Switch it off if something stays missing.'))
         self.check(f, 'parallel_warmup', 'app', _('Fast shader cache loading (parallel)'),
                    _('Loading screen only: builds the cached pipelines on several CPU threads.'))
+        self.check(f, 'shader_progress', 'app', _('Show shader progress'))
         self.section(f, _('GPU data'))
         gpus = list_gpus()
         cards = [('', ('Automatic',))] + [(row[0], (row[1],)) for row in gpus]

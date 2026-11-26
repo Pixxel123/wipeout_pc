@@ -264,6 +264,8 @@ class ControlMapTest(unittest.TestCase):
         self.assertEqual(env['GOW3_PARALLEL_WARMUP'], '1')
         self.assertEqual(env['GOW3_BACKGROUND_WARMUP'], '1')
         self.assertEqual(env['GOW3_PERF_DIAG'], '0')
+        self.assertEqual(env['GOW3_SHADER_PROGRESS'], '0')
+        self.assertEqual(launcher.game_environment({**settings, 'shader_progress': True})['GOW3_SHADER_PROGRESS'], '1')
         self.assertEqual(env['GOW3_PARTIAL_HEIGHT_VIEWS'], '1')
         self.assertEqual(launcher.game_environment({**settings, 'partial_height_views': False})['GOW3_PARTIAL_HEIGHT_VIEWS'], '0')
         self.assertNotIn('GOW3_FRAME_CAPTURE_KEY', {k for k in env if k not in __import__('os').environ})
