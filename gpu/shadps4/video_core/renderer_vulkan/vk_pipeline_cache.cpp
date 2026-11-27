@@ -427,9 +427,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             Common::SetCurrentThreadName(("gow3:ShaderCompile" + std::to_string(index)).c_str());
             Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
         });
-        // gow3: fast first builds need a second worker for their optimised rebuilds, so a
-        // rebuild never holds up a first build, and the pipeline binary cache, which stores
-        // the rebuild (CreateCachedGraphicsPipeline). GOW3_FAST_FIRST_BUILD=0 turns them off.
+        // gow3: fast first builds need a second worker for their optimised rebuilds, so that
+        // once a scene shows a rebuild never holds up a first build, and the pipeline binary
+        // cache, which stores the rebuild (CreateCachedGraphicsPipeline).
+        // GOW3_FAST_FIRST_BUILD=0 turns them off.
         const char* fast_env = std::getenv("GOW3_FAST_FIRST_BUILD");
         fast_first_builds = count >= 2 && (!fast_env || fast_env[0] != '0') &&
                             instance.GetPipelineBinaryGlobalKey().keySize != 0 &&
@@ -439,6 +440,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         const char* grace_env = std::getenv("GOW3_LOAD_GRACE");
         g_compile_policy.load_grace = fast_first_builds && (!grace_env || grace_env[0] != '0');
         rebuild_limit = std::max(1u, count / 2);
+        rebuild_limit_loading = count;
         LOG_INFO(Render_Vulkan,
                  "gow3: async graphics compilation ready ({} capture, {} compile workers, fast "
                  "first builds {})",
@@ -730,8 +732,13 @@ void PipelineCache::PublishGraphics(bool wait) {
 void PipelineCache::StartRebuilds(size_t running) {
     // gow3: only once the cold burst is over: no first build or shader waiting, and no real
     // compile for a second (the background window closed; a burst comes in waves over several
-    // frames, with an empty queue between them). At most half the workers rebuild at a time,
-    // so a first build that comes later finds a free one.
+    // frames, with an empty queue between them). While no scene has shown since the start or
+    // the last load, every worker may rebuild, so the rebuilds are done before a race; the
+    // cost is that a first build that arrives then may wait for one rebuild to end. After
+    // that at most half the workers rebuild at a time, so a first build finds a free one.
+    const size_t limit = g_compile_policy.loading.load(std::memory_order_relaxed)
+                             ? rebuild_limit_loading
+                             : rebuild_limit;
     const auto busy = [this] {
         for (const auto& [_, build] : pending_graphics) {
             if (!build->job.Failed()) {
@@ -741,7 +748,7 @@ void PipelineCache::StartRebuilds(size_t running) {
         return !pending_programs.empty() || compiler->Depth() != 0 ||
                g_compile_policy.Background(CompilePolicy::Now());
     };
-    if (running >= rebuild_limit || busy()) {
+    if (running >= limit || busy()) {
         return;
     }
     for (auto& build : rebuilds) {
@@ -763,7 +770,7 @@ void PipelineCache::StartRebuilds(size_t running) {
             break;
         }
         ++g_gow3_rebuilds_queued;
-        if (++running >= rebuild_limit) {
+        if (++running >= limit) {
             break;
         }
     }
