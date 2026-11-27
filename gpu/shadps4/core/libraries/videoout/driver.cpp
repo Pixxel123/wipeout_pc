@@ -27,8 +27,6 @@ extern "C" void runtime_set_target_fps(double fps); // src/runtime_extra.c
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
-#include "video_core/renderer_vulkan/vk_precompile_load.h"
-#include "video_core/renderer_vulkan/vk_precompile_scan.h"
 #include "common/debug.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
@@ -320,14 +318,9 @@ void VideoOutDriver::Flip(const Request& req) {
                                                 : 0);
     // gow3: after the game loads a race or the menus, new pipelines may wait longer until a
     // few seconds into the scene (vk_compile_policy.h); the log line marks its first frame.
-    const u64 flip_ns = Vulkan::CompilePolicy::Now();
-    const u64 flip_draws = Gow3Stats::draws.load(std::memory_order_relaxed);
-    const bool first_scene =
-        Vulkan::g_compile_policy.Flipped(flip_ns, flip_draws, runtime_music_loads());
-    Vulkan::Precompile::ScanFlipped(flip_ns, first_scene); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
-    // gow3 diagnostic, GOW3_PRECOMPILE_LOAD_TRACE: a line for a frame with skipped draws.
-    Vulkan::Precompile::LoadTraceFlipped(flip_ns, flip_draws);
-    if (first_scene) {
+    if (Vulkan::g_compile_policy.Flipped(Vulkan::CompilePolicy::Now(),
+                                         Gow3Stats::draws.load(std::memory_order_relaxed),
+                                         runtime_music_loads())) {
         std::printf("Pipelines: first scene after a load; new pipelines may wait longer for "
                     "%llu s more (GOW3_LOAD_GRACE=0: no)\n",
                     static_cast<unsigned long long>(Vulkan::CompilePolicy::after_load_ns /

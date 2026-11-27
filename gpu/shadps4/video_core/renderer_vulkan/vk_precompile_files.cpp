@@ -91,7 +91,7 @@ std::vector<u8> ProgramCode(std::span<const u8> data, u64 header) {
             continue;
         }
         const auto code = data.subspan(start, size);
-        // The crc32 covers the code through the header's first 16 bytes (CheckCodeBody).
+        // The crc32 covers the code from the start token through the header's first 16 bytes.
         if (Crc32(code.first(at * 4 + 16)) != Load<u32>(code, at * 4 + CodeHeaderCrcAt)) {
             continue;
         }

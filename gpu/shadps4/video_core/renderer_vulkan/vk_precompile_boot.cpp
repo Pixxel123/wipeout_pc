@@ -34,7 +34,7 @@
 // translated, and the next start skips the entries it names (CrashMarker).
 //
 // Once the store has indexed what the rebuild wrote, the pipeline of each entry it built is
-// selected and handed to the compile workers as the loader's are (Pipeline, below), and the
+// selected and handed to the compile workers (Pipeline, below), and the
 // start waits for them (BuildPrecompilePipelines); GOW3_PRECOMPILE_BOOT_PIPELINES=0 skips that.
 //
 // A list without the code of some of its programs gets it from the player's game files when an
@@ -43,17 +43,6 @@
 // the first entry and released with the list after the pipeline pass. Without the index, or
 // when fewer than 9 in 10 of those programs are found, the rebuild is skipped and the start
 // goes on as without a list (PreparePrecompileList).
-//
-// The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way, with
-// its own checked copies of the code the shader scan found in guest memory in place of the
-// list's, so a list without code works. Only programs the loader calls needed (neither in use
-// nor saved) are translated and written; a stage of another program is only bound, with the
-// Info the game's own draws bind it with (Bind). Once its permutations are in the store's index,
-// a built entry's pipeline is selected again from a new shadow copy, as a draw-preparation
-// worker looks it up (Pipeline), and handed to the compile workers. A variant that selection
-// misses in a program in use or saved is translated from the same copy with the same checks,
-// added to the program at the index the game would give it and saved (AddVariant), and the
-// pipeline selected again.
 
 #include <algorithm>
 #include <bit>
@@ -113,10 +102,10 @@ constexpr u32 MaxDetails = 8;        ///< detail lines per reason
 constexpr auto ProgressInterval = std::chrono::seconds(1);
 constexpr auto PipelineProgressInterval = std::chrono::seconds(5);
 /// The pipeline pass waits for the compile workers this long at a time, then looks at their
-/// queue again (as the loader's HoldPoll): wait_for takes no unbounded time.
+/// queue again: wait_for takes no unbounded time.
 constexpr u64 PipelineWaitNs = 1'000'000;
-/// Variants one loader selection adds at most: a stage can miss once the one before it has its
-/// variant, and the motion pass selects every stage again.
+/// Variants one pipeline selection of the pass adds at most: a stage can miss once the one
+/// before it has its variant, and the motion pass selects every stage again.
 constexpr u32 MaxEntryVariants = 4;
 /// Size of the SRT walker code generator (flatten_extended_userdata_pass.cpp).
 constexpr u64 WalkerCodeSize = 32ull << 20;
@@ -133,18 +122,17 @@ enum class Reject {
     StrayFetch,        ///< the fetch shader is read through a pointer the recording did not
     Exception,         ///< the translation threw
     TooManyPermutations,
-    NoInfo,            ///< a program the loader only binds is in use but not translated yet
     Count,
 };
 
 constexpr std::array<const char*, size_t(Reject::Count)> RejectNames = {
     "not vertex + fragment", "no code", "no room", "faulted", "not selected", "spec changed",
     "walk outside the recording", "fetch outside the recording", "exception",
-    "too many permutations", "program in use without its info",
+    "too many permutations",
 };
 
-/// The trace's reason for a missing variant the loader did not add, a static text: the
-/// translation's reject.
+/// The pass's reason for a missing variant it did not add, a static text: the translation's
+/// reject.
 const char* VariantLeft(Reject why) {
     static const auto texts = [] {
         std::array<std::string, size_t(Reject::Count)> texts;
@@ -380,10 +368,8 @@ ListCodeRead ReadListCode(ParsedList& list, const char* list_path,
 } // namespace
 
 struct PrecompileBoot {
-    /// `code_`: program hash -> code words, the list's or the loader's.
-    PrecompileBoot(PipelineCache& cache_, const ParsedList& list_,
-                   const std::map<u64, std::vector<u32>>& code_, std::string marker_path)
-        : cache{cache_}, list{list_}, code{code_}, marker{std::move(marker_path)} {}
+    PrecompileBoot(PipelineCache& cache_, const ParsedList& list_, std::string marker_path)
+        : cache{cache_}, list{list_}, code{list_.code}, marker{std::move(marker_path)} {}
 
     /// `progress(done, total)`: each entry and the end (BootProgressOf, the rebuild's half).
     bool Run(const std::function<void(u32 done, u32 total)>& progress);
@@ -402,23 +388,15 @@ struct PrecompileBoot {
     /// The game files the list's code was read from first (ReadListCode), 0 for none: the
     /// loading screen's first phase.
     u32 files = 0;
-    bool load = false; ///< the loader's build: programs not needed are only bound
-    const char* log_name = "Precompile boot";
-    /// The loader's: the permutations written, program hash and index.
-    std::vector<std::pair<u64, u32>> written;
-    /// The loader's: a selection's missing variant is added (GOW3_PRECOMPILE_LOAD_VARIANTS).
-    bool variants_on = false;
-    VariantCounts variants; ///< the loader's selections' variants, added and left to the game
-    /// The loader's: per program hash, the specs of variants AddVariant could not add in this
-    /// loading state, which are not translated again in it.
+    VariantCounts variants; ///< the variants the pipeline pass's selections added
+    /// The pipeline pass's: per program hash, the specs of variants AddVariant could not add,
+    /// which are not translated again.
     std::unordered_map<u64, std::vector<Shader::StageSpecialization>> failed_variants;
 
 private:
     void SetEntry(const RecordedKey& key);
     const char* AddVariant(const PrepWorker& worker, bool& present);
     std::optional<Reject> Select(const RecordedKey& key, Shadow& shadow);
-    PipelineCache::Result Bind(const Shader::ShaderParams& params,
-                               Shader::Backend::Bindings& binding);
     bool MapShadow(const RecordedKey& key, Shadow& shadow);
     std::unique_ptr<AmdGpu::Regs> Registers(const RecordedKey& key, const Shadow& shadow) const;
     const RecordedStage* StageOf(u64 hash);
@@ -446,7 +424,6 @@ private:
     const ParsedList& list;
     const std::map<u64, std::vector<u32>>& code;
     std::unordered_map<u64, TranslatedProgram> programs; ///< node-based: specs point at their Info
-    std::unordered_map<u64, Shader::Info> bound; ///< the loader's programs only bound (Bind)
     Shader::Pools pools; ///< the rebuild's own: a fault jumps out of a translation
     ShadowArena arena;
     ThreadState::Range walker_code{}; ///< where the SRT walkers of this rebuild are generated
@@ -561,9 +538,6 @@ std::optional<Reject> PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
     for (auto& [hash, program] : programs) {
         program.info.user_data = {};
     }
-    for (auto& [hash, info] : bound) {
-        info.user_data = {};
-    }
     entry = nullptr;
     if (!why) {
         ++translated;
@@ -626,21 +600,20 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
     return selected ? std::nullopt : std::optional{Reject::NotSelected};
 }
 
-/// The loader's, for an entry built and indexed: its pipeline, selected from a new shadow copy
-/// lookup-only as a draw-preparation worker does, except that a program not in use is read from
-/// the store first (PipelineSelection::from_store). A missing program, a program in use whose
-/// translation is pending, or a read outside the recorded words drops it. A missing variant
-/// (permutation) of a program in use or saved is added (AddVariant), unless the game is
-/// translating one of that program or GOW3_PRECOMPILE_LOAD_VARIANTS=0, and the pipeline
-/// selected again; one not added, or one the program has an equal spec of already, drops it.
-/// One this loading state failed to add, or the game's own translation failed, is not
-/// translated again (failed_variants, the program's failed_permutations). The pipeline
-/// is handed to the compile workers inside the same recovery point, before the copy goes: the
-/// build's snapshot reads it. A variant after the first one of a call is added only before
-/// `until_ns` (CompilePolicy::Now), so one call does not run several translations; past it the
-/// call returns Full and the entry is selected again later, the variants added staying. One
-/// translation may still run past `until_ns`, and past the pump's 4 ms. `trace`
-/// (GOW3_PRECOMPILE_LOAD_TRACE), when set, gets the key selected and why it was dropped.
+/// The pipeline pass's, for an entry built and indexed: its pipeline, selected from a new
+/// shadow copy lookup-only as a draw-preparation worker does, except that a program not in use
+/// is read from the store first (PipelineSelection::from_store). A missing program, a program
+/// in use whose translation is pending, or a read outside the recorded words drops it. A
+/// missing variant (permutation) of a program in use or saved is added (AddVariant), unless the
+/// game is translating one of that program, and the pipeline selected again; one not added, or
+/// one the program has an equal spec of already, drops it. One the pass failed to add before,
+/// or one the game's own translation failed, is not translated again (failed_variants, the
+/// program's failed_permutations). The pipeline is handed to the compile workers inside the
+/// same recovery point, before the copy goes: the build's snapshot reads it. A variant after
+/// the first one of a call is added only before `until_ns` (CompilePolicy::Now), so one call
+/// does not run several translations; past it the call returns Full and the entry is selected
+/// again later, the variants added staying. One translation may still run past `until_ns`.
+/// `trace`, when set, gets why it was dropped.
 PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                                       PipelineTrace* trace) {
     if (cache.compiler->Depth() >= LoadQueueDepth) {
@@ -688,12 +661,6 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                         why = "read outside the recorded words";
                         break;
                     }
-                    if (trace) {
-                        trace->key_hash =
-                            std::hash<GraphicsPipelineKey>{}(selection.graphics_key);
-                        const auto* bytes = reinterpret_cast<const u8*>(&selection.graphics_key);
-                        trace->key.assign(bytes, bytes + sizeof(GraphicsPipelineKey));
-                    }
                     step = cache.StartLoadPipeline(selection, worker, &why);
                     break;
                 }
@@ -706,7 +673,6 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                 if (added == MaxEntryVariants) {
                     static const std::string most_added = fmt::format(
                         "variant left to the game: {} added already", MaxEntryVariants);
-                    ++variants.left;
                     why = most_added.c_str();
                     break;
                 }
@@ -715,14 +681,11 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                 const u64 hash = spec.info->pgm_hash;
                 const auto& program = *cache.program_cache.at(hash);
                 const auto found = program.pending ? LoadVariant::Pending : LoadVariant::Missing;
-                ++variants.left; // also what a fault jumping out of AddVariant leaves
-                if (!AddsVariant(variants_on, found)) {
-                    why = variants_on
-                              ? "variant left to the game: the game's translation pending"
-                              : "variant left to the game: GOW3_PRECOMPILE_LOAD_VARIANTS=0";
+                if (!AddsVariant(found)) {
+                    why = "variant left to the game: the game's translation pending";
                     break;
                 }
-                // Not translated again: one this loading state failed to add, or one the game's
+                // Not translated again: one the pass failed to add before, or one the game's
                 // own translation failed (GetProgram's test).
                 const auto failed_here = failed_variants.find(hash);
                 if ((failed_here != failed_variants.end() &&
@@ -733,7 +696,6 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                     break;
                 }
                 if (added > 0 && CompilePolicy::Now() >= until_ns) {
-                    --variants.left; // not left: selected again later
                     step = PipelineStep::Full;
                     break;
                 }
@@ -753,12 +715,10 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                     why = left;
                     break;
                 }
-                --variants.left;
                 if (present) {
                     // The program has an equal spec, yet the selection missed it: selecting
                     // again would miss it again. The spec stays recorded, so the next entry
                     // that misses it does not translate it once more to find the same.
-                    ++variants.present;
                     why = "variant left to the game: an equal spec already there";
                     break;
                 }
@@ -849,9 +809,6 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
     if (stopped) {
         return {};
     }
-    if (load && !cache.ProgramNeeded(params.hash)) {
-        return Bind(params, binding);
-    }
     auto [it, is_new] = programs.try_emplace(params.hash);
     auto& program = it->second;
     std::optional<size_t> perm;
@@ -889,33 +846,6 @@ PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params
                            HashCombine(params.hash, u64(*perm)));
 }
 
-/// The loader's stage of a program in use or saved: only its bindings, which the next stage's
-/// spec depends on, from the Info GetProgram binds the program with (InUseInfo). Nothing is
-/// translated or written. Its walker is not run: the flattened user data is the user data and
-/// zeros past it, read after the stages only by the motion check (sharps of no buffer).
-PipelineCache::Result PrecompileBoot::Bind(const Shader::ShaderParams& params,
-                                           Shader::Backend::Bindings& binding) {
-    auto found = bound.find(params.hash);
-    if (found == bound.end()) {
-        Shader::Info info{};
-        if (!cache.InUseInfo(params.hash, info)) {
-            Stop(Reject::NoInfo, fmt::format("program {:016x}", params.hash));
-            return {};
-        }
-        found = bound.emplace(params.hash, std::move(info)).first;
-    }
-    auto& info = found->second;
-    info.pgm_base = params.Base();
-    info.user_data = params.user_data;
-    info.flattened_ud_buf.assign(info.srt_info.flattened_bufsize_dw, 0);
-    std::copy_n(info.user_data.begin(),
-                std::min(info.user_data.size(), info.flattened_ud_buf.size()),
-                info.flattened_ud_buf.begin());
-    info.AddBindings(binding);
-    return PipelineCache::Result{&info, vk::ShaderModule{}, std::nullopt,
-                                 HashCombine(params.hash, u64{0})};
-}
-
 /// Translates a new permutation as the shader compiler does (QueueShader), checks it and
 /// writes it; its index, or none when the entry stops. `lookup` is the spec a later
 /// permutation was looked up with, null for the program's first translation.
@@ -943,9 +873,6 @@ std::optional<size_t> PrecompileBoot::Translate(TranslatedProgram& program,
     RegisterShaderBinary(std::move(*spv), params.hash, perm);
     RegisterShaderMeta(program.info, spec.fetch_shader_data, spec,
                        HashCombine(params.hash, u64(perm)), perm);
-    if (load) {
-        written.emplace_back(params.hash, u32(perm));
-    }
     program.specs.push_back(std::move(spec));
     ++permutations;
     return perm;
@@ -988,13 +915,13 @@ std::optional<std::vector<u32>> PrecompileBoot::TranslateChecked(
     return spv;
 }
 
-/// The loader's, inside Pipeline's recovery point while its shadow copy is mapped: the variant
-/// `worker`'s selection missed in a program in use or saved, translated from what that lookup
-/// read (the copy's code and its user data, led into the copy as Registers leads them), checked
-/// as an entry's translation is, then inserted into the program and saved at the index the game
-/// would give it (InsertLoadVariant). Null when added or already there (`present`); else why
-/// it was left (VariantLeft), when a check failed or the program did not take it; the entry
-/// does not stop. Nothing of the rebuild's own is touched: programs, written, permutations.
+/// The pipeline pass's, inside Pipeline's recovery point while its shadow copy is mapped: the
+/// variant `worker`'s selection missed in a program in use or saved, translated from what that
+/// lookup read (the copy's code and its user data, led into the copy as Registers leads them),
+/// checked as an entry's translation is, then inserted into the program and saved at the index
+/// the game would give it (InsertLoadVariant). Null when added or already there (`present`);
+/// else why it was left (VariantLeft), when a check failed or the program did not take it; the
+/// entry does not stop. Nothing of the rebuild's own is touched: programs, permutations.
 const char* PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) {
     const auto& lookup = *worker.missing_spec;
     const auto& looked_up = *lookup.info; // the worker's copy of the program's Info
@@ -1150,7 +1077,7 @@ bool PrecompileBoot::Failed() const {
 /// Up to MaxDetails lines per reason.
 void PrecompileBoot::Detail(Reject why, const std::string& text) {
     if (rejects[size_t(why)] <= MaxDetails) {
-        std::printf("%s: %s\n", log_name, text.c_str());
+        std::printf("Precompile boot: %s\n", text.c_str());
     }
 }
 
@@ -1185,48 +1112,10 @@ PipelineCache::Result PipelineCache::BootProgram(PipelineSelection& sel, HwStage
     return sel.boot->Program(params, hw_stage, sw_stage, binding, runtime_info);
 }
 
-LoadBuilder::LoadBuilder(PipelineCache& cache, const ParsedList& list,
-                         const std::map<u64, std::vector<u32>>& code, bool variants)
-    : boot{std::make_unique<PrecompileBoot>(cache, list, code, std::string{})} {
-    // No crash marker (an empty path names none): nothing is skipped.
-    boot->load = true;
-    boot->log_name = "Precompile load";
-    boot->variants_on = variants;
-    boot->Begin();
-}
-
-LoadBuilder::~LoadBuilder() = default;
-
-const char* LoadBuilder::Build(u32 index, const RecordedKey& key, bool& no_info) {
-    const auto why = boot->Entry(index, key);
-    no_info = why == Reject::NoInfo;
-    return why ? RejectNames[size_t(*why)] : nullptr;
-}
-
-std::vector<std::pair<u64, u32>> LoadBuilder::TakeWritten() {
-    return std::exchange(boot->written, {});
-}
-
-PipelineStep LoadBuilder::Pipeline(const RecordedKey& key, u64 until_ns, PipelineTrace* trace) {
-    return boot->Pipeline(key, until_ns, trace);
-}
-
-const VariantCounts& LoadBuilder::Variants() const {
-    return boot->variants;
-}
-
-void LoadBuilder::ResetVariants() {
-    boot->variants = {};
-}
-
-void LoadBuilder::ForgetFailedVariants() {
-    boot->failed_variants.clear();
-}
-
 /// The rebuild with the list it refers to, which is declared first.
 struct PrecompileBootRun {
     PrecompileBootRun(PipelineCache& cache, ParsedList&& list_, std::string marker_path)
-        : list{std::move(list_)}, boot{cache, list, list.code, std::move(marker_path)} {}
+        : list{std::move(list_)}, boot{cache, list, std::move(marker_path)} {}
 
     ParsedList list;
     PrecompileBoot boot;
@@ -1237,8 +1126,7 @@ void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
 }
 
 bool PipelineCache::PreparePrecompileList(const std::function<void(u32, u32)>& progress) {
-    // With GOW3_PRECOMPILE_LOAD=1 the loader builds the list instead (it logs that).
-    if (!BootRequested() || LoadRequested()) {
+    if (!BootRequested()) {
         return false;
     }
     const std::string path = BootListPath();
@@ -1283,7 +1171,7 @@ bool PipelineCache::RunPrecompileList(const std::function<void(u32, u32)>& progr
     return precompile_boot != nullptr;
 }
 
-/// Each entry the rebuild built, its pipeline selected from the store as the loader selects it
+/// Each entry the rebuild built, its pipeline selected from the store
 /// (PrecompileBoot::Pipeline, the variant step included) and handed to the compile workers;
 /// while their queue is full (Full) this waits for them, publishes and tries the entry again.
 /// No time limit: the whole pass runs before the game does. Optimised rebuilds of fast first
@@ -1300,8 +1188,6 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
         return;
     }
     auto& boot = run->boot;
-    // The loader's variant step, which only a loader object switches on otherwise.
-    boot.variants_on = true;
     const u32 entries = u32(boot.built.size());
     const u64 published_before = load_builds_published, failed_before = load_builds_failed;
     // One per fast first build published; nothing takes them while the pass runs.

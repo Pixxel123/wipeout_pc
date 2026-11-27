@@ -291,9 +291,9 @@ void TestCodeBody() {
     const size_t header = CodeHeaderAt(code) * 4;
     const u32 crc = Crc32({static_cast<const u8*>(bytes), header + 16});
     std::memcpy(bytes + header + CodeHeaderCrcAt, &crc, sizeof(crc));
-    assert(!CheckCode(Hash, code) && !CheckCodeBody(code));
+    assert(!CheckCode(Hash, code));
     code[2] ^= 0x100; // one body byte
-    assert(!CheckCode(Hash, code) && CheckCodeBody(code));
+    assert(!CheckCode(Hash, code));
 }
 
 void TestOldVersion() {

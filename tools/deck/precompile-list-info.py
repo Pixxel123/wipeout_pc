@@ -497,7 +497,8 @@ def check(data):
 def program_code(data, header):
     """The code of the program whose OrbShdr header is at `header` in `data`, cut as
     ReadProgramCode does, or None: the nearest start token below whose second word puts the
-    header there and whose code passes CheckCode and CheckCodeBody (the hash is the header's)."""
+    header there and whose code passes CheckCode and its header's crc32 (the hash is the
+    header's)."""
     start = header
     while True:
         start = data.rfind(START_TOKEN, max(0, header - MAX_CODE_BYTES), start)

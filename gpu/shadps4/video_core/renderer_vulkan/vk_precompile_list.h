@@ -206,20 +206,6 @@ constexpr u32 CodeHeaderCrcAt = 24; ///< bytes into the header: the u32 crc32 of
     return ~crc;
 }
 
-/// Why the body of `code` (CheckCode passed) is not what its header's crc32 says, or null: the
-/// crc32 covers the code from the start token through the header's first 16 bytes. The start
-/// token and the header alone may survive in memory the game has partly overwritten.
-inline const char* CheckCodeBody(std::span<const u32> code) {
-    const u64 header = CodeHeaderAt(code) * 4;
-    if (header + CodeHeaderWords * 4 > code.size_bytes()) {
-        return "code header out of range";
-    }
-    const auto* bytes = reinterpret_cast<const u8*>(code.data());
-    u32 crc;
-    std::memcpy(&crc, bytes + header + CodeHeaderCrcAt, sizeof(crc));
-    return Crc32({bytes, size_t(header) + 16}) == crc ? nullptr : "code body differs from its crc";
-}
-
 /// A program's code from its start token through its OrbShdr header, or through the length
 /// the header gives when that is longer, read through `read(address, out, size)` (false when
 /// it cannot); empty when a read fails or it would be longer than MaxCodeBytes. CheckCode
@@ -713,7 +699,7 @@ struct ParsedList {
 /// What a recording keeps one entry of: the stages and the rest of the pipeline key the draw
 /// selected (RecordedKey::key_hash). Entries alike in their stages can still be different
 /// pipelines (another blend mode, another render target's samples or depth format), and the
-/// loader builds each entry's pipeline, so each is kept.
+/// pipeline pass builds each entry's pipeline, so each is kept.
 [[nodiscard]] inline u64 EntryDigest(const RecordedKey& key) {
     std::vector<u8> bytes;
     ListDetail::Put(bytes, StagesDigest(key.stages));
@@ -802,13 +788,6 @@ inline constexpr const char* ShippedListPath = "precompile/shaders.list";
     }
     std::error_code error;
     return std::filesystem::is_regular_file(ShippedListPath, error) ? ShippedListPath : "";
-}
-
-/// Whether GOW3_PRECOMPILE_LOAD=1 asks for the loader, which builds GOW3_PRECOMPILE_LIST while
-/// loading (vk_precompile_load.cpp); it replaces the start-up rebuild.
-[[nodiscard]] inline bool LoadRequested() {
-    const char* load = std::getenv("GOW3_PRECOMPILE_LOAD");
-    return load && load[0] == '1';
 }
 
 /// Reads the list at `path` (vk_precompile_record.cpp); none when it cannot be used (logged).

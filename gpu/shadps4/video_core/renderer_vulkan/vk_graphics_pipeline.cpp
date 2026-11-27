@@ -459,10 +459,10 @@ GraphicsPipeline::GraphicsPipeline(
                     debug_str, vk::to_string(pipeline_result));
         return;
     }
-    // gow3 (GOW3_PRECOMPILE_LOAD): a pipeline the loader selected is no draw the game issued; one
+    // gow3 (GOW3_PRECOMPILE_BOOT): a pipeline the pass selected is no draw the game issued; one
     // the driver refuses is dropped (Handle() null, PublishGraphics) instead of ending the game.
     if (pipeline_result != vk::Result::eSuccess && t_loader_build) {
-        LOG_WARNING(Render_Vulkan, "Precompile load: graphics pipeline {} not built ({})",
+        LOG_WARNING(Render_Vulkan, "Precompile boot: graphics pipeline {} not built ({})",
                     debug_str, vk::to_string(pipeline_result));
         return;
     }
@@ -502,7 +502,7 @@ GraphicsPipeline::GraphicsPipeline(
             return;
         }
         if (square_result != vk::Result::eSuccess && t_loader_build) {
-            LOG_WARNING(Render_Vulkan, "Precompile load: squaring pass of {} not built ({})",
+            LOG_WARNING(Render_Vulkan, "Precompile boot: squaring pass of {} not built ({})",
                         debug_str, vk::to_string(square_result));
             pipeline.reset();
             return;

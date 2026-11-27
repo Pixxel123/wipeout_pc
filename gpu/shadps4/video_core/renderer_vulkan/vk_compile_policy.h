@@ -71,9 +71,10 @@ struct CompilePolicy {
 
 inline CompilePolicy g_compile_policy;
 
-/// gow3 (GOW3_PRECOMPILE_LOAD): set on a compile worker while it builds a pipeline the loader
-/// handed over. Its compile leaves the policy alone (CreateCachedGraphicsPipeline): the loader
-/// builds what the race will draw, which is no sign of a draw's pipelines coming now.
+/// gow3 (GOW3_PRECOMPILE_BOOT): set on a compile worker while it builds a pipeline the start-up
+/// pipeline pass handed over. Its compile leaves the policy alone (CreateCachedGraphicsPipeline):
+/// the pass builds the list's pipelines before the game runs, which is no sign of a draw's
+/// pipelines coming now.
 inline thread_local bool t_loader_build = false;
 
 } // namespace Vulkan

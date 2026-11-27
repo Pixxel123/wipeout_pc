@@ -1413,62 +1413,6 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
     return inserted != 0;
 }
 
-// gow3 (GOW3_PRECOMPILE_LOAD): a program in use binds with its translated Info (the template,
-// GetProgram's AddBindings); a saved one with that of its first permutation LoadShaderMeta
-// accepts, as LoadDiskProgram takes it.
-bool PipelineCache::InUseInfo(u64 hash, Shader::Info& info) {
-    if (const auto found = program_cache.find(hash); found != program_cache.end()) {
-        if (!found->second->info_template) {
-            return false; // its first translation is pending
-        }
-        info = *found->second->info_template;
-        return true;
-    }
-    const auto saved = disk_permutations.find(hash);
-    if (saved == disk_permutations.end()) {
-        return false;
-    }
-    auto& db = Storage::DataBase::Instance();
-    for (const u32 idx : saved->second) {
-        std::vector<u8> meta;
-        db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", HashCombine(hash, u64{idx})),
-                meta);
-        if (meta.empty()) {
-            continue;
-        }
-        Serialization::Archive meta_ar{std::move(meta)};
-        Shader::Info candidate{};
-        Shader::StageSpecialization spec{};
-        std::optional<Shader::Gcn::FetchShaderData> fetch;
-        size_t perm_idx{};
-        if (LoadShaderMeta(meta_ar, candidate, fetch, spec, perm_idx) && perm_idx == idx &&
-            candidate.pgm_hash == hash) {
-            info = std::move(candidate);
-            return true;
-        }
-    }
-    return false;
-}
-
-// gow3 (GOW3_PRECOMPILE_LOAD): the loader's saved permutations, added to the index as
-// IndexDiskShaders adds the whole store's (sorted: LoadDiskProgram sizes the program by the
-// last), once they are on disk. A program in use by now keeps the numbering it has: none of it
-// is read from the store again.
-void PipelineCache::AddSavedPermutations(std::vector<std::pair<u64, u32>>& saved) {
-    std::erase_if(saved, [this](const std::pair<u64, u32>& permutation) {
-        const auto [hash, idx] = permutation;
-        if (program_cache.contains(hash)) {
-            return true;
-        }
-        auto& indices = disk_permutations[hash];
-        const auto at = std::ranges::lower_bound(indices, idx);
-        if (at == indices.end() || *at != idx) {
-            indices.insert(at, idx);
-        }
-        return false;
-    });
-}
-
 size_t PipelineCache::NewPermutationIndex(const Program& program) const {
     if (DiskShadersActive()) {
         const auto hole =
@@ -1730,7 +1674,7 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
     return true;
 }
 
-// gow3 (GOW3_PRECOMPILE_LOAD): a module from SPIR-V without CompileSPV's assert; null when the
+// gow3 (GOW3_PRECOMPILE_BOOT): a module from SPIR-V without CompileSPV's assert; null when the
 // driver refuses it.
 vk::ShaderModule PipelineCache::TryCreateShaderModule(std::span<const u32> spv) {
     const vk::ShaderModuleCreateInfo module_info{
@@ -1741,7 +1685,7 @@ vk::ShaderModule PipelineCache::TryCreateShaderModule(std::span<const u32> spv) 
     return module_result == vk::Result::eSuccess ? module : vk::ShaderModule{};
 }
 
-// gow3 (GOW3_PRECOMPILE_LOAD): as a merge into a program the game already uses, at the index the
+// gow3 (GOW3_PRECOMPILE_BOOT): as a merge into a program the game already uses, at the index the
 // game's own translation would take, so the store's names and pipeline keys stay those the game
 // would write; the SPIR-V before the meta, as the shader compiler writes them.
 bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
