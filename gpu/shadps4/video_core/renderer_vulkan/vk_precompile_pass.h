@@ -71,6 +71,13 @@ struct BootProgress {
 
 /// The background pass's slice per submission: no entry's selection starts after it.
 constexpr u64 PassSliceNs = 4'000'000;
+/// The same from a race's loading screen until the pass ends: a longer frame is not seen there.
+constexpr u64 RaceLoadSliceNs = 12'000'000;
+
+/// The slice of a submission: RaceLoadSliceNs once a race's loading screen began (`race_load`).
+[[nodiscard]] constexpr u64 PassSliceNsFor(bool race_load) {
+    return race_load ? RaceLoadSliceNs : PassSliceNs;
+}
 
 /// Whole tenths of the pipeline pass taken: `done` of `entries` (none: all of it).
 [[nodiscard]] constexpr u32 PassTenths(u32 done, u32 entries) {

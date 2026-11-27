@@ -58,6 +58,13 @@ void TestThePassIsLoggedInTenths() {
     static_assert(PassSliceNs == 4'000'000);
 }
 
+void TestARaceLoadingScreenTakesLongerSlices() {
+    // Logos and menus: 4 ms. From a race's loading screen until the pass ends: 12 ms.
+    assert(PassSliceNsFor(false) == 4'000'000);
+    assert(PassSliceNsFor(true) == 12'000'000);
+    static_assert(PassSliceNsFor(false) == PassSliceNs);
+}
+
 void TestTheFirstSceneFrameIsSeenAtItsFiveHundredthDraw() {
     using Vulkan::CompilePolicy;
     CompilePolicy policy;
@@ -84,6 +91,7 @@ int main() {
     TestTheBackgroundPassLeavesTheScreenTheTranslatingHalf();
     TestOnlyZeroSwitchesTheBackgroundPassOff();
     TestThePassIsLoggedInTenths();
+    TestARaceLoadingScreenTakesLongerSlices();
     TestTheFirstSceneFrameIsSeenAtItsFiveHundredthDraw();
     return 0;
 }

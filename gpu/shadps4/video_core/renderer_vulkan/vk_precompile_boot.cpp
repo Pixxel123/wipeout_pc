@@ -39,13 +39,15 @@
 // for them behind the loading screen (BuildPrecompilePipelines). Otherwise the loading screen
 // ends with the translation and this pipeline pass runs behind the game's first screens: on the
 // GPU command thread, which alone reads the store's index, a slice of selections after each
-// submission (PumpPrecompilePass), while the compile workers build. The draw that brings a
-// frame to 500 draws since the last flip decoded (CompilePolicy::SceneFrameReached), the first
-// scene frame as no frame before it had as many, finishes what is left before it goes on, as
-// the blocking pass does (FinishPrecompilePassAtScene); the screen keeps the last frame
-// meanwhile. Only the pass's end marks the store (EndPrecompilePass): an exit before it leaves
-// the store unmarked, and the next start builds again, unless two passes in a row did not end:
-// that start translates and skips the pass (SkipsPipelinePass).
+// submission (PumpPrecompilePass), while the compile workers build; the slices are longer once
+// a race's loading screen began (PassSliceNsFor), where a longer frame is not seen. The draw
+// that brings a frame to 500 draws since the last flip decoded
+// (CompilePolicy::SceneFrameReached), the first scene frame as no frame before it had as many,
+// finishes what is left before it goes on, as the blocking pass does
+// (FinishPrecompilePassAtScene); the screen keeps the last frame meanwhile. Only the pass's end
+// marks the store (EndPrecompilePass): an exit before it leaves the store unmarked, and the next
+// start builds again, unless two passes in a row did not end: that start translates and skips
+// the pass (SkipsPipelinePass).
 // GOW3_PRECOMPILE_BACKGROUND_STALL=1 runs no slice, so the first scene frame takes the whole
 // pass (a test of that wait).
 //
@@ -103,6 +105,8 @@
 #include "video_core/renderer_vulkan/vk_precompile_shadow.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 #include "gow3_overlay.h"
+
+extern "C" int runtime_music_in_race(void); // src/runtime_music.c
 
 namespace Vulkan {
 
@@ -1167,6 +1171,10 @@ struct PrecompileBootRun {
         u64 pumps = 0;              ///< PumpPrecompilePass calls that ran
         u64 slices = 0, slice_ns = 0; ///< of those, the ones that took an entry
         u64 pump_max_ns = 0;          ///< the longest of all
+        /// A race's loading screen began (runtime_music_in_race returned 1): longer slices.
+        bool race_load = false;
+        u64 race_load_pumps = 0;  ///< pumps that ran since then
+        u32 race_load_taken = 0;  ///< entries those pumps took
     };
 
     ParsedList list;
@@ -1413,9 +1421,12 @@ void PipelineCache::PumpPrecompilePass() {
     auto& run = *precompile_boot;
     auto& pass = run.pass;
     const u32 entries = u32(run.boot.built.size());
+    // The pass exists only before the first scene frame, so a race load seen is its loading
+    // screen, which keeps the longer slice until the pass ends.
+    pass.race_load = pass.race_load || runtime_music_in_race() != 0;
     // No selection starts past the slice; one already running may overshoot it. Full: the
     // workers' queue holds PassQueueDepth tasks, again after the next submission.
-    const u64 until = began + PassSliceNs;
+    const u64 until = began + PassSliceNsFor(pass.race_load);
     const u32 done_before = pass.done;
     while (pass.done < entries && CompilePolicy::Now() < until &&
            PassEntry(run, until) != PipelineStep::Full) {
@@ -1427,6 +1438,10 @@ void PipelineCache::PumpPrecompilePass() {
     if (pass.done != done_before) {
         ++pass.slices;
         pass.slice_ns += ns;
+    }
+    if (pass.race_load) {
+        ++pass.race_load_pumps;
+        pass.race_load_taken += pass.done - done_before;
     }
     ShowPassProgress(run);
     if (pass.done == entries && PassBuildsRunning() == 0) {
@@ -1470,7 +1485,8 @@ void PipelineCache::EndPrecompilePass(bool at_scene) {
     std::printf("Precompile boot: pipelines: %zu entries, %llu built, %u built already, %u "
                 "dropped, %llu failed, %u variants added, ended %s at %llu ms since the start, "
                 "%lld ms after the translation; %llu pumps, the longest %.1f ms, %llu of them "
-                "took entries, %.1f ms on average\n",
+                "took entries, %.1f ms on average; %llu pumps in a race's loading screen took "
+                "%u entries\n",
                 boot.built.size(),
                 static_cast<unsigned long long>(pass_builds_published - pass.published_before),
                 pass.had, pass.dropped,
@@ -1479,7 +1495,8 @@ void PipelineCache::EndPrecompilePass(bool at_scene) {
                 MsSinceStart(), static_cast<long long>(ms),
                 static_cast<unsigned long long>(pass.pumps), double(pass.pump_max_ns) / 1e6,
                 static_cast<unsigned long long>(pass.slices),
-                pass.slices ? double(pass.slice_ns) / double(pass.slices) / 1e6 : 0.0);
+                pass.slices ? double(pass.slice_ns) / double(pass.slices) / 1e6 : 0.0,
+                static_cast<unsigned long long>(pass.race_load_pumps), pass.race_load_taken);
     SaveDiskShaderBuild(pass.driver_key);
 }
 
