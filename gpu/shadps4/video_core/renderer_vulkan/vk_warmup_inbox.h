@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <utility>
@@ -16,6 +17,53 @@ namespace Vulkan {
 inline bool UseOnDemandPipelines(bool binary_cache, bool supported, bool capture_only,
                                  bool background_warmup) {
     return background_warmup && binary_cache && supported && !capture_only;
+}
+
+/// gow3 (GOW3_PRECOMPILE_BOOT): whether the start-up rebuild from a precompile list runs before
+/// the warm-up when on-demand pipelines are off (pipeline binaries off, as on NVIDIA).
+constexpr bool RunsPrecompileBoot(bool boot_requested, bool list_present, bool capture_only) {
+    return boot_requested && list_present && !capture_only;
+}
+
+/// gow3 (GOW3_PRECOMPILE_BOOT): whether the start-up rebuild runs once the list's code is read.
+/// Not when the list needed the code of `wanted` programs from the game files and fewer than 9
+/// in 10 were `read` (no game folder, an archive not found or not read): the start then goes on
+/// as without a list. A few programs not in the game files (1 of 1,283 for the shipped list)
+/// do not stop it.
+constexpr bool GameCodeSuffices(std::uint32_t wanted, std::uint32_t read) {
+    return std::uint64_t{read} * 10 >= std::uint64_t{wanted} * 9;
+}
+
+/// gow3: what a start does with the saved shader store (BeginDiskShaders).
+enum class DiskShaderStart {
+    IndexOnly,         ///< the store is read as it is
+    Rebuild,           ///< the saved shaders are dropped, the list rebuilt and its pipelines built
+    RenewWithoutBuild, ///< the saved shaders are dropped and the marker saved, no list to rebuild
+};
+
+/// gow3 (GOW3_PRECOMPILE_BOOT): a store marker that differs from this build's rebuilds with a
+/// ready list (PreparePrecompileList) and is renewed without one. With an equal marker, a
+/// driver pipeline-binary key recorded by the last start-up rebuild that differs from the
+/// driver's (a driver update: no saved pipeline binary is usable) rebuilds when the list is
+/// ready; without a ready list, or without a recorded key (a store from before the key), the
+/// store is indexed as it is.
+constexpr DiskShaderStart DiskShaderStartOf(bool marker_equal, bool key_recorded,
+                                            bool key_equal, bool list_ready) {
+    if (!marker_equal) {
+        return list_ready ? DiskShaderStart::Rebuild : DiskShaderStart::RenewWithoutBuild;
+    }
+    return key_recorded && !key_equal && list_ready ? DiskShaderStart::Rebuild
+                                                    : DiskShaderStart::IndexOnly;
+}
+
+/// gow3: whether the background warm-up leaves a saved stage alone because the game is
+/// translating a permutation of its program (`pending`). With first-use numbering that
+/// translation takes the next index, which may be the stage's. With the store's numbering it
+/// takes an index the store does not hold, so a stage whose spec is already at its saved index
+/// is used as it is; nothing is inserted while the translation is pending.
+constexpr bool WarmStageWaitsForTranslation(bool pending, bool store_numbering,
+                                            bool at_saved_index) {
+    return pending && !(store_numbering && at_saved_index);
 }
 
 /// #149: set when the driver refuses a cached pipeline for lack of memory while preloading.

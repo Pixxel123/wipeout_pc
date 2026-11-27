@@ -359,7 +359,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                                                               : create(nullptr, used_info, false);
     };
     const auto compiled = [&] {
-        if (counted) {
+        if (counted && !t_loader_build) {
             g_compile_policy.Compiled(CompilePolicy::Now());
         }
     };
@@ -1033,7 +1033,9 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     if (!CheckCacheProfile()) {
         return;
     }
-    ForgetDiskShaders();
+    if (!disk_shaders) { // set by PrecompileBootBeforeWarmUp: this session numbers as the store
+        ForgetDiskShaders();
+    }
     PreloadMemoryStop().Reset();
 
     u32 num_pipelines{};
@@ -1141,52 +1143,153 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     Storage::DataBase::Instance().FinishPreload();
 }
 
-void PipelineCache::StartOnDemand() {
+void PipelineCache::StartOnDemand(const std::function<void(u32, u32)>& progress) {
     const bool compatible = CheckCacheProfile();
     auto& db = Storage::DataBase::Instance();
-    // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
-    const bool disk_on = EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
-                         !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
+    const bool disk_on = DiskShadersWanted();
     if (db.IsOpened() && db.ConcurrentReads() && !disk_on) {
         // This session numbers permutations by first use again: the store is rebuilt at the
         // next start with disk shaders on.
         ForgetDiskShaders();
     } else if (db.IsOpened() && db.ConcurrentReads()) {
-        std::vector<u8> marker;
-        if (compatible) {
-            db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
-        }
-        const auto expected = DiskShaderMarker();
-        if (marker != expected) {
-            // Sessions without the marker numbered permutations by first use and overwrote the
-            // files by name: a meta and its SPIR-V are separate writes, so an exit between them
-            // can pair one shader's meta with another's SPIR-V. Another translator may also have
-            // produced different SPIR-V. Only the numbered permutation files are dropped (once):
-            // pipeline keys and the profile stay. A kept key whose slot now holds another
-            // permutation only makes the warm-up build a pipeline no draw asks for, since draws
-            // look pipelines up by their own key; a key whose slot is gone is skipped.
-            size_t dropped = 0;
-            for (const auto type : {Storage::BlobType::ShaderMeta, Storage::BlobType::ShaderBinary}) {
-                for (const auto& name : db.ListBlobs(type)) {
-                    db.Remove(type, name);
-                    ++dropped;
-                }
-            }
-            db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
-            std::printf("Pipeline startup: %zu saved shader files dropped for on-demand reads (%s), "
-                        "pipeline keys kept\n",
-                        dropped,
-                        marker.empty()                            ? "no marker"
-                        : marker == std::vector<u8>{0}            ? "disk shaders were off"
-                                                                  : "another translator");
-        } else {
-            IndexDiskShaders();
-        }
-        disk_shaders = true;
+        // gow3 (GOW3_PRECOMPILE_BOOT): a list that is not ready renews the store as without one.
+        // The driver's key is the one the pipeline binaries are checked against (Decode).
+        BeginDiskShaders(compatible, true, BinaryKey(instance.GetPipelineBinaryGlobalKey()),
+                         progress);
     }
     db.FinishPreload();
     std::printf("Pipeline startup: on demand, no bulk warm-up (%zu saved programs)\n",
                 disk_permutations.size());
+}
+
+void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
+                                       const std::vector<u8>& driver_key,
+                                       const std::function<void(u32, u32)>& progress) {
+    auto& db = Storage::DataBase::Instance();
+    // Sessions without the marker numbered permutations by first use and overwrote the files by
+    // name: a meta and its SPIR-V are separate writes, so an exit between them can pair one
+    // shader's meta with another's SPIR-V. Another translator may also have produced different
+    // SPIR-V. Only the numbered permutation files are dropped (once): pipeline keys and the
+    // profile stay. A kept key whose slot now holds another permutation makes the warm-up build
+    // that key with the new permutation's module; a draw of the new permutation with the same
+    // state computes that key and gets this pipeline, built with the key's saved vertex input,
+    // which is harmless with vertex input dynamic state (vk_graphics_pipeline.cpp). A key
+    // whose slot is gone is skipped.
+    size_t dropped = 0;
+    for (const auto type : {Storage::BlobType::ShaderMeta, Storage::BlobType::ShaderBinary}) {
+        for (const auto& name : db.ListBlobs(type)) {
+            db.Remove(type, name);
+            ++dropped;
+        }
+    }
+    std::printf("Pipeline startup: %zu saved shader files dropped for on-demand reads (%s), "
+                "pipeline keys kept\n",
+                dropped,
+                marker.empty()                       ? "no marker"
+                : marker == std::vector<u8>{0}       ? "disk shaders were off"
+                : marker == DiskShaderMarker()       ? "the driver's pipeline binary key changed"
+                                                     : "another translator");
+    // gow3 (GOW3_PRECOMPILE_BOOT): the rebuild of the list the caller prepared
+    // (PreparePrecompileList), then its pipeline pass.
+    const bool rebuilt = RunPrecompileList(progress);
+    if (rebuilt) {
+        db.Flush();
+        IndexDiskShaders();
+        // The pass's selections read programs from the store (DiskShadersActive).
+        disk_shaders = true;
+        BuildPrecompilePipelines(progress);
+    }
+    // gow3: the build counts as done only once its pipeline pass has ended: the driver's key
+    // (empty unless a prepared list is rebuilt on demand), then the marker, are saved after it,
+    // so a start that ends in the rebuild or the pass drops the files and builds again next
+    // time. Also when there was no list or the rebuild could not run (its crash marker not
+    // written), else every start would drop the store again. A later start with another key
+    // builds again (DiskShaderStartOf).
+    if (!driver_key.empty()) {
+        db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
+    }
+    db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
+}
+
+// gow3 (GOW3_PRECOMPILE_BOOT): with pipeline binaries off (NVIDIA) the presenter takes a
+// warm-up, not StartOnDemand, so the rebuild and its pass run here first, as StartOnDemand runs
+// them, with the same marker. The session then numbers permutations as the store does, as on
+// demand: a draw reads a program the warm-up has not merged whole at its saved indices, and one
+// whose spec is missing from a program the warm-up merged in part reads the rest first
+// (LoadDiskProgram), so a new permutation never takes a saved slot and the warm-up finds its
+// stages at their saved indices (MergeWarmStage).
+bool PipelineCache::PrecompileBootBeforeWarmUp(const std::function<void(u32, u32)>& progress) {
+    auto& db = Storage::DataBase::Instance();
+    // As in StartOnDemand: GOW3_DISK_SHADERS=0 leaves the start as it was.
+    const bool disk_on = DiskShadersWanted();
+    if (!db.ConcurrentReads() || !disk_on) {
+        return false;
+    }
+    const bool compatible = CheckCacheProfile();
+    if (!db.IsOpened()) {
+        return false;
+    }
+    // A list that is not ready (the game files gave too little of the code, the list cannot be
+    // read) leaves the start as without a list: nothing dropped, the marker as it was,
+    // disk_shaders off, the warm-up. No driver key: no saved pipeline binaries to lose.
+    return BeginDiskShaders(compatible, false, {}, progress);
+}
+
+// gow3: what both start paths do once the store is open with concurrent reads and disk shaders
+// are wanted (each caller checks that in its own order). The marker is read only from a store
+// CheckCacheProfile found compatible. A store with this build's marker is indexed. Otherwise the
+// list and its code are read before anything is dropped (PreparePrecompileList). When they are
+// not ready and renew_store_without_build is false, nothing is touched and it returns false.
+// Else the saved shader files are dropped for the rebuild (RebuildDiskShaders), also when it
+// cannot run. With this build's marker and a driver key, a recorded key that differs from it
+// rebuilds as well when the list is ready (DiskShaderStartOf). disk_shaders is set on every path
+// but that one. True when the files were dropped.
+bool PipelineCache::BeginDiskShaders(bool compatible, bool renew_store_without_build,
+                                     const std::vector<u8>& driver_key,
+                                     const std::function<void(u32, u32)>& progress) {
+    auto& db = Storage::DataBase::Instance();
+    std::vector<u8> marker, recorded_key;
+    if (compatible) {
+        db.Load(Storage::BlobType::ShaderProfile, "disk_shaders", marker);
+        // A store from before the key has none (a Load would log the failed open).
+        if (!driver_key.empty() &&
+            std::ranges::contains(db.ListBlobs(Storage::BlobType::ShaderProfile), "driver_key")) {
+            db.Load(Storage::BlobType::ShaderProfile, "driver_key", recorded_key);
+        }
+    }
+    const bool marker_equal = marker == DiskShaderMarker();
+    const bool key_recorded = !recorded_key.empty();
+    const bool key_equal = recorded_key == driver_key;
+    // The list is read first, on both paths, whenever a ready one would be rebuilt.
+    const bool list_ready = DiskShaderStartOf(marker_equal, key_recorded, key_equal, true) ==
+                                DiskShaderStart::Rebuild &&
+                            PreparePrecompileList(progress);
+    const auto start = DiskShaderStartOf(marker_equal, key_recorded, key_equal, list_ready);
+    if (start == DiskShaderStart::RenewWithoutBuild && !renew_store_without_build) {
+        return false;
+    }
+    const bool rebuild = start != DiskShaderStart::IndexOnly;
+    if (rebuild) {
+        // The key is recorded only for a list rebuilt.
+        RebuildDiskShaders(marker,
+                           start == DiskShaderStart::Rebuild ? driver_key : std::vector<u8>{},
+                           progress);
+    } else {
+        IndexDiskShaders();
+        // gow3: a store with no recorded key (made before the key, renewed without a ready list
+        // or by the warm-up path) records the driver's now, so a later driver update is seen.
+        if (!driver_key.empty() && !key_recorded) {
+            db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
+        }
+    }
+    disk_shaders = true;
+    return rebuild;
+}
+
+bool PipelineCache::DiskShadersWanted() const {
+    // gow3: GOW3_DISK_SHADERS=0 (or the toggle bit) translates every shader again, as before.
+    return EmulatorSettingsImpl::Flag("GOW3_DISK_SHADERS", true) &&
+           !Gow3Toggle::Disabled(Gow3Toggle::DiskShaders);
 }
 
 bool PipelineCache::DiskShadersActive() const {
@@ -1202,7 +1305,7 @@ void PipelineCache::IndexDiskShaders() {
         }
         const u64 hash = std::strtoull(name.substr(0, sep).c_str(), nullptr, 16);
         const auto idx = std::strtoul(name.c_str() + sep + 1, nullptr, 10);
-        if (hash && idx < 64) {
+        if (hash && idx < Precompile::MaxPermutations) {
             disk_permutations[hash].push_back(u32(idx));
         }
     }
@@ -1221,6 +1324,9 @@ void PipelineCache::IndexDiskShaders() {
 // separate writes, and a slot refilled with another shader must never pair an old meta with
 // the new SPIR-V. The deletes queue in the store's write order, meta first: SPIR-V is written
 // first, so an exit at any point leaves at most a SPIR-V without a meta, rejected next start.
+// A program a warm-up loaded in part (MergeWarmStage, LoadPipelineStage) is in program_cache
+// already: a draw that misses its spec reads the slots still empty here (GetProgram), before a
+// new permutation takes an index.
 bool PipelineCache::LoadDiskProgram(u64 hash) {
     const auto found = disk_permutations.find(hash);
     if (found == disk_permutations.end()) {
@@ -1228,10 +1334,15 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
     }
     const auto started = std::chrono::steady_clock::now();
     auto& db = Storage::DataBase::Instance();
+    const auto in_use = program_cache.find(hash);
+    Program* const merged = in_use != program_cache.end() ? in_use->second.get() : nullptr;
     auto program = std::make_unique<Program>();
     bool have_info = false;
     size_t inserted = 0;
     for (const u32 idx : found->second) {
+        if (merged && idx < merged->modules.size() && merged->modules[idx].module) {
+            continue; // a warm-up merged it from the same files
+        }
         const auto meta_name = fmt::format("{:#018x}", HashCombine(hash, u64{idx}));
         const auto spv_name = fmt::format("{:#018x}_{}", hash, idx);
         const auto reject = [&] {
@@ -1260,12 +1371,8 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
         // Not CompileSPV, which asserts: a saved blob the driver refuses is translated again.
         std::vector<u32> code(spv.size() / sizeof(u32));
         std::memcpy(code.data(), spv.data(), spv.size());
-        const vk::ShaderModuleCreateInfo module_info{
-            .codeSize = code.size() * sizeof(u32),
-            .pCode = code.data(),
-        };
-        const auto [module_result, module] = instance.GetDevice().createShaderModule(module_info);
-        if (module_result != vk::Result::eSuccess || !module) {
+        const auto module = TryCreateShaderModule(code);
+        if (!module) {
             reject();
             continue;
         }
@@ -1273,7 +1380,7 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
             program->info = std::move(info);
             have_info = true;
         }
-        spec.info = &program->info;
+        spec.info = merged ? &merged->info : &program->info;
         program->InsertPermut(module, std::move(spec), idx);
         disk_modules_unused.insert(module);
         ++inserted;
@@ -1281,9 +1388,21 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
     }
     if (inserted) {
         program->modules.resize(std::max<size_t>(program->modules.size(), found->second.back() + 1));
-        program->info_template = std::make_unique<Shader::Info>(program->info);
+        if (!merged) {
+            program->info_template = std::make_unique<Shader::Info>(program->info);
+        }
         std::unique_lock lock{programs_mutex};
-        program_cache.emplace(hash, std::move(program));
+        if (merged) {
+            merged->modules.resize(std::max(merged->modules.size(), program->modules.size()));
+            for (size_t idx = 0; idx < program->modules.size(); ++idx) {
+                auto& loaded = program->modules[idx];
+                if (loaded.module) {
+                    merged->InsertPermut(loaded.module, std::move(loaded.spec), idx);
+                }
+            }
+        } else {
+            program_cache.emplace(hash, std::move(program));
+        }
         ++disk_stats.programs;
         disk_stats.unused_peak = std::max<u64>(disk_stats.unused_peak, disk_modules_unused.size());
     }
@@ -1292,6 +1411,62 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
                                   std::chrono::steady_clock::now() - started)
                                   .count());
     return inserted != 0;
+}
+
+// gow3 (GOW3_PRECOMPILE_LOAD): a program in use binds with its translated Info (the template,
+// GetProgram's AddBindings); a saved one with that of its first permutation LoadShaderMeta
+// accepts, as LoadDiskProgram takes it.
+bool PipelineCache::InUseInfo(u64 hash, Shader::Info& info) {
+    if (const auto found = program_cache.find(hash); found != program_cache.end()) {
+        if (!found->second->info_template) {
+            return false; // its first translation is pending
+        }
+        info = *found->second->info_template;
+        return true;
+    }
+    const auto saved = disk_permutations.find(hash);
+    if (saved == disk_permutations.end()) {
+        return false;
+    }
+    auto& db = Storage::DataBase::Instance();
+    for (const u32 idx : saved->second) {
+        std::vector<u8> meta;
+        db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", HashCombine(hash, u64{idx})),
+                meta);
+        if (meta.empty()) {
+            continue;
+        }
+        Serialization::Archive meta_ar{std::move(meta)};
+        Shader::Info candidate{};
+        Shader::StageSpecialization spec{};
+        std::optional<Shader::Gcn::FetchShaderData> fetch;
+        size_t perm_idx{};
+        if (LoadShaderMeta(meta_ar, candidate, fetch, spec, perm_idx) && perm_idx == idx &&
+            candidate.pgm_hash == hash) {
+            info = std::move(candidate);
+            return true;
+        }
+    }
+    return false;
+}
+
+// gow3 (GOW3_PRECOMPILE_LOAD): the loader's saved permutations, added to the index as
+// IndexDiskShaders adds the whole store's (sorted: LoadDiskProgram sizes the program by the
+// last), once they are on disk. A program in use by now keeps the numbering it has: none of it
+// is read from the store again.
+void PipelineCache::AddSavedPermutations(std::vector<std::pair<u64, u32>>& saved) {
+    std::erase_if(saved, [this](const std::pair<u64, u32>& permutation) {
+        const auto [hash, idx] = permutation;
+        if (program_cache.contains(hash)) {
+            return true;
+        }
+        auto& indices = disk_permutations[hash];
+        const auto at = std::ranges::lower_bound(indices, idx);
+        if (at == indices.end() || *at != idx) {
+            indices.insert(at, idx);
+        }
+        return false;
+    });
 }
 
 size_t PipelineCache::NewPermutationIndex(const Program& program) const {
@@ -1414,7 +1589,9 @@ bool PipelineCache::StartBackgroundWarmUp() {
     if (!CheckCacheProfile()) {
         return true; // nothing cached yet
     }
-    ForgetDiskShaders();
+    if (!disk_shaders) { // set by PrecompileBootBeforeWarmUp: this session numbers as the store
+        ForgetDiskShaders();
+    }
     background = new BackgroundWarmup;
     auto& warm = *background;
     warm.started = std::chrono::steady_clock::now();
@@ -1527,10 +1704,14 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
     }
     // The game already uses this shader: its permutations are the ones that count.
     Program& program = *it_pgm->second;
-    if (program.pending) {
-        return false; // the game is compiling a permutation that takes the next index
-    }
     const auto it = std::ranges::find(program.modules, stage.spec, &Program::Module::spec);
+    const bool at_saved_index =
+        it != program.modules.end() &&
+        size_t(std::distance(program.modules.begin(), it)) == stage.perm_idx;
+    if (WarmStageWaitsForTranslation(program.pending != nullptr, DiskShadersActive(),
+                                     at_saved_index)) {
+        return false; // the game is translating a permutation: nothing is inserted meanwhile
+    }
     if (it != program.modules.end()) {
         if (size_t(std::distance(program.modules.begin(), it)) != stage.perm_idx) {
             return false;
@@ -1546,6 +1727,62 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
         stage.result = stage.module;
     }
     stage.info = &program.info;
+    return true;
+}
+
+// gow3 (GOW3_PRECOMPILE_LOAD): a module from SPIR-V without CompileSPV's assert; null when the
+// driver refuses it.
+vk::ShaderModule PipelineCache::TryCreateShaderModule(std::span<const u32> spv) {
+    const vk::ShaderModuleCreateInfo module_info{
+        .codeSize = spv.size() * sizeof(u32),
+        .pCode = spv.data(),
+    };
+    const auto [module_result, module] = instance.GetDevice().createShaderModule(module_info);
+    return module_result == vk::Result::eSuccess ? module : vk::ShaderModule{};
+}
+
+// gow3 (GOW3_PRECOMPILE_LOAD): as a merge into a program the game already uses, at the index the
+// game's own translation would take, so the store's names and pipeline keys stay those the game
+// would write; the SPIR-V before the meta, as the shader compiler writes them.
+bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
+                                      Shader::StageSpecialization&& spec,
+                                      bool& inserted_out) {
+    const auto it_pgm = program_cache.find(hash);
+    if (it_pgm == program_cache.end() || it_pgm->second->pending) {
+        return false; // a pending translation takes the next index
+    }
+    Program& program = *it_pgm->second;
+    spec.info = &program.info;
+    const auto it = std::ranges::find(program.modules, spec, &Program::Module::spec);
+    if (it != program.modules.end()) {
+        inserted_out = false;
+        return true;
+    }
+    const size_t index = NewPermutationIndex(program);
+    if (index >= Precompile::MaxPermutations) {
+        return false; // the entry build's Translate never reads an index this high
+    }
+    // A shader patch for this permutation replaces the translation: CompileModule and the
+    // async build load it, so the game builds it.
+    const auto hw_stage = program.info.hw_stage;
+    if (EmulatorSettings.IsPatchShaders() && GetShaderPatch(hash, hw_stage, index, "spv")) {
+        return false;
+    }
+    // Not CompileSPV, which asserts: a module the driver refuses is left to the game.
+    const auto module = TryCreateShaderModule(spv);
+    if (!module) {
+        return false;
+    }
+    Vulkan::SetObjectName(instance.GetDevice(), module, GetShaderName(hw_stage, hash, index));
+    RegisterShaderBinary(std::move(spv), hash, index);
+    RegisterShaderMeta(program.info, spec.fetch_shader_data, spec, HashCombine(hash, u64(index)),
+                       index);
+    {
+        std::unique_lock lock{programs_mutex};
+        program.InsertPermut(module, std::move(spec), index);
+    }
+    disk_stats.compiled += DiskShadersActive();
+    inserted_out = true;
     return true;
 }
 

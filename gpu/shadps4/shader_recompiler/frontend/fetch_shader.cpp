@@ -14,7 +14,8 @@ namespace Shader::Gcn {
 
 namespace {
 thread_local const FetchShaderSnapshot* compiler_snapshot GOW3_TLS_INITIAL_EXEC = nullptr;
-}
+thread_local const FetchShaderOverride* boot_override GOW3_TLS_INITIAL_EXEC = nullptr;
+} // namespace
 
 AmdGpu::Buffer VertexAttribute::GetSharp(const Shader::Info& info) const noexcept {
     if (compiler_snapshot && compiler_snapshot->info == &info && compiler_snapshot->fetch) {
@@ -53,6 +54,19 @@ ScopedFetchShaderSnapshot::ScopedFetchShaderSnapshot(const FetchShaderSnapshot& 
 
 ScopedFetchShaderSnapshot::~ScopedFetchShaderSnapshot() {
     compiler_snapshot = previous;
+}
+
+ScopedFetchShaderOverride::ScopedFetchShaderOverride(const FetchShaderOverride* override_)
+    : previous{boot_override} {
+    boot_override = override_;
+}
+
+ScopedFetchShaderOverride::~ScopedFetchShaderOverride() {
+    boot_override = previous;
+}
+
+bool FetchShaderOverridden() {
+    return boot_override != nullptr;
 }
 
 /**
@@ -99,6 +113,10 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     }
     if (!info.has_fetch_shader) {
         return std::nullopt;
+    }
+    if (boot_override && boot_override->pgm_hash == info.pgm_hash &&
+        boot_override->sgpr_base == info.fetch_shader_sgpr_base) {
+        return boot_override->data;
     }
 
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);

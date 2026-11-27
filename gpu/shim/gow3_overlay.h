@@ -30,6 +30,10 @@ void UpdateTextInput(SDL_Window* window);
 
 /// Start-up loading screen (pipeline cache warm-up): `total` 0 shows no count.
 void SetLoading(bool active, u32 done, u32 total);
+/// What the loading screen says: the pipeline cache warm-up (the default), or the start-up
+/// rebuild from a precompile list (title and bar only).
+enum class LoadingKind : u8 { ShaderCache, PrepareShaders };
+void SetLoadingKind(LoadingKind kind);
 /// Background cache warm-up: a small corner note while the game runs; `total` 0 hides it.
 void SetBackgroundLoading(u32 done, u32 total);
 

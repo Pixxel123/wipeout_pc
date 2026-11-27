@@ -13,16 +13,18 @@
 
 #include <miniz.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <queue>
 
 namespace {
 
 std::mutex submit_mutex{};
-u32 num_requests{};
+std::atomic<u32> num_requests{}; // gow3: the IO thread decrements it without the submit lock
 std::condition_variable_any request_cv{};
 std::queue<std::packaged_task<void()>> req_queue{};
 std::mutex m_request{};
@@ -40,7 +42,7 @@ void ProcessIO(const std::stop_token& stoken) {
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests; });
+            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests != 0; });
         }
 
         if (stoken.stop_requested()) {
@@ -216,6 +218,26 @@ void DataBase::Remove(BlobType type, const std::string& name) {
     std::scoped_lock lk{submit_mutex};
     ++num_requests;
     request_cv.notify_one();
+}
+
+void DataBase::Flush() {
+    if (!opened) {
+        return;
+    }
+    // ProcessIO takes each task's own future, so the wait goes through a promise of its own.
+    auto done = std::make_shared<std::promise<void>>();
+    auto finished = done->get_future();
+    {
+        auto request = std::packaged_task<void()>{[done] { done->set_value(); }};
+        std::scoped_lock lock{m_request};
+        req_queue.emplace(std::move(request));
+    }
+    {
+        std::scoped_lock lk{submit_mutex};
+        ++num_requests;
+        request_cv.notify_one();
+    }
+    finished.wait();
 }
 
 bool DataBase::Save(BlobType type, const std::string& name, std::vector<u8>&& data) {

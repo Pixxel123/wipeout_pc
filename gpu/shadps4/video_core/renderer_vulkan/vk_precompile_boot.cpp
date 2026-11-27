@@ -1,0 +1,1393 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// gow3 (GOW3_PRECOMPILE_BOOT, on unless 0): after a recompiler change dropped the shader store's
+// translated shaders (StartOnDemand, PrecompileBootBeforeWarmUp), the programs of a list
+// recorded by an earlier launch (GOW3_PRECOMPILE_RECORD) are translated back into the store
+// before the game runs, so the first race reads them from disk as on a second visit. The list
+// is GOW3_PRECOMPILE_LIST=<file>, else the one the port ships (precompile/shaders.list,
+// BootListPath); without either nothing runs.
+//
+// Each entry is replayed as a selection on a private PipelineSelection, through
+// RefreshGraphicsKey itself, so stage order, runtime info and the bindings carried from the
+// fragment to the vertex stage are those of a draw. Its registers, user data and table words
+// come from the list and sit in a shadow copy (vk_precompile_shadow.h) together with the
+// recorded program code. The list holds the vertex stage's fetch shader as its parse, not its
+// code (list version 4): the parse is handed to ParseFetchShader on this thread for the time of
+// the selection (ScopedFetchShaderOverride, Select and Pipeline), and the fetch shader pointer
+// leads to the dead page, so a read of the code faults and rejects the entry. A version 3 list
+// holds the code among the entry's words, and the parser reads it from the shadow copy.
+// GetProgram hands each stage to BootProgram instead of program_cache:
+// a program not seen yet in this rebuild is translated as permutation 0; a later entry of the
+// same program that specialises differently is translated as the next permutation, numbered in
+// first-seen order. Each translation is written as the shader compiler writes it (SPIR-V, then
+// the meta with the program's first Info), and nothing of the pipeline cache's own state is
+// touched: program_cache, the pending builds, the failure lists and the pipelines.
+//
+// Single-threaded and blocking, on Linux and Windows (the fault handler, vk_precompile_guard).
+// Every SRT walker this rebuild creates is watched: a read of one that faults is served as zero
+// and rejects the entry, so the SRT walker patch never rewrites a walker that the store then
+// saves. A walker that reads a word or follows a pointer the recording did not would read the
+// shadow's gaps or a stale guest address without faulting, so each walk is first run on the
+// recorded words alone (CheckWalk). An assert in the translator ends the game instead: a marker
+// file beside the list (for the shipped list, in the shader cache folder) names the entry being
+// translated, and the next start skips the entries it names (CrashMarker).
+//
+// Once the store has indexed what the rebuild wrote, the pipeline of each entry it built is
+// selected and handed to the compile workers as the loader's are (Pipeline, below), and the
+// start waits for them (BuildPrecompilePipelines); GOW3_PRECOMPILE_BOOT_PIPELINES=0 skips that.
+//
+// A list without the code of some of its programs gets it from the player's game files when an
+// index of the files that hold it lies beside the list (<list>.files, vk_precompile_files.h):
+// the update folder (GOW3_PATCH_DIR), then the game's (GOW3_GAME_DIR). The code is read before
+// the first entry and released with the list after the pipeline pass. Without the index, or
+// when fewer than 9 in 10 of those programs are found, the rebuild is skipped and the start
+// goes on as without a list (PreparePrecompileList).
+//
+// The loader (GOW3_PRECOMPILE_LOAD, vk_precompile_load.cpp) builds entries the same way, with
+// its own checked copies of the code the shader scan found in guest memory in place of the
+// list's, so a list without code works. Only programs the loader calls needed (neither in use
+// nor saved) are translated and written; a stage of another program is only bound, with the
+// Info the game's own draws bind it with (Bind). Once its permutations are in the store's index,
+// a built entry's pipeline is selected again from a new shadow copy, as a draw-preparation
+// worker looks it up (Pipeline), and handed to the compile workers. A variant that selection
+// misses in a program in use or saved is translated from the same copy with the same checks,
+// added to the program at the index the game would give it and saved (AddVariant), and the
+// pipeline selected again.
+
+#include <algorithm>
+#include <bit>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <filesystem>
+#include <functional>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+#include <fmt/format.h>
+#ifdef __linux__
+#include <sys/resource.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#endif
+
+#include "common/hash.h"
+#include "common/path_util.h"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/passes/srt.h"
+#include "shader_recompiler/recompiler.h"
+#include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_compile_policy.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_precompile_fetch.h"
+#include "video_core/renderer_vulkan/vk_precompile_files.h"
+#include "video_core/renderer_vulkan/vk_precompile_guard.h"
+#include "video_core/renderer_vulkan/vk_precompile_list.h"
+#include "video_core/renderer_vulkan/vk_precompile_load.h"
+#include "video_core/renderer_vulkan/vk_precompile_shadow.h"
+#include "video_core/renderer_vulkan/vk_warmup_inbox.h"
+
+namespace Vulkan {
+
+namespace {
+
+using namespace Precompile;
+using Shader::HwStage;
+using Shader::SwStage;
+
+constexpr u32 MaxDetails = 8;        ///< detail lines per reason
+constexpr auto ProgressInterval = std::chrono::seconds(1);
+constexpr auto PipelineProgressInterval = std::chrono::seconds(5);
+/// The pipeline pass waits for the compile workers this long at a time, then looks at their
+/// queue again (as the loader's HoldPoll): wait_for takes no unbounded time.
+constexpr u64 PipelineWaitNs = 1'000'000;
+/// Variants one loader selection adds at most: a stage can miss once the one before it has its
+/// variant, and the motion pass selects every stage again.
+constexpr u32 MaxEntryVariants = 4;
+/// Size of the SRT walker code generator (flatten_extended_userdata_pass.cpp).
+constexpr u64 WalkerCodeSize = 32ull << 20;
+
+/// Why an entry was not translated.
+enum class Reject {
+    NotVertexFragment, ///< only vertex + fragment keys are recorded
+    NoCode,            ///< a program's code is not in the list
+    NoRoom,            ///< no room for the shadow copy
+    Faulted,           ///< a read outside the recorded words faulted
+    NotSelected,       ///< the selection stopped (an unsupported state)
+    SpecChanged,       ///< a translation specialises unlike the lookup that asked for it
+    StrayWalk,         ///< a walker reads a word or follows a pointer the recording did not
+    StrayFetch,        ///< the fetch shader is read through a pointer the recording did not
+    Exception,         ///< the translation threw
+    TooManyPermutations,
+    NoInfo,            ///< a program the loader only binds is in use but not translated yet
+    Count,
+};
+
+constexpr std::array<const char*, size_t(Reject::Count)> RejectNames = {
+    "not vertex + fragment", "no code", "no room", "faulted", "not selected", "spec changed",
+    "walk outside the recording", "fetch outside the recording", "exception",
+    "too many permutations", "program in use without its info",
+};
+
+/// The trace's reason for a missing variant the loader did not add, a static text: the
+/// translation's reject.
+const char* VariantLeft(Reject why) {
+    static const auto texts = [] {
+        std::array<std::string, size_t(Reject::Count)> texts;
+        for (size_t i = 0; i < texts.size(); ++i) {
+            texts[i] = std::string{"variant left to the game: "} + RejectNames[i];
+        }
+        return texts;
+    }();
+    return texts[size_t(why)].c_str();
+}
+
+/// Synthetic base of a stage's code in the shadow layout: no guest pointer (48 bits) has it.
+constexpr u64 CodeBase(u32 sw_stage) {
+    return (1ull << 63) | sw_stage;
+}
+
+/// Whether AmdGpu::GetParams finds this code's header without searching, with the real
+/// AmdGpu::BinaryInfo (the list checked the same through byte offsets).
+bool HeaderFoundFirst(std::span<const u32> code, u64 hash) {
+    if (CheckCode(hash, code)) {
+        return false;
+    }
+    const auto* info =
+        std::bit_cast<const AmdGpu::BinaryInfo*>(code.data() + CodeHeaderAt(code));
+    return info->Valid() && info->shader_hash == hash && info->length <= code.size_bytes();
+}
+
+bool VertexFragmentOnly(const RecordedKey& key, const AmdGpu::Regs& regs) {
+    return regs.stage_enable.raw == AmdGpu::ShaderStageEnable::Vs &&
+           std::ranges::all_of(key.stages, [](const RecordedStage& stage) {
+               return (stage.sw_stage == u32(SwStage::Fragment) &&
+                       stage.hw_stage == u32(HwStage::Fragment)) ||
+                      (stage.sw_stage == u32(SwStage::Vertex) &&
+                       stage.hw_stage == u32(HwStage::Vertex));
+           });
+}
+
+AmdGpu::ShaderProgram& ProgramAt(AmdGpu::Regs& regs, u32 hw_stage) {
+    return const_cast<AmdGpu::ShaderProgram&>(*regs.ProgramForStage(hw_stage));
+}
+
+/// A program translated in this rebuild: the Info of its first translation, which every meta
+/// of the program carries (as PublishShaders writes it), and its permutations' specs by index.
+struct TranslatedProgram {
+    Shader::Info info;
+    std::vector<Shader::StageSpecialization> specs;
+};
+
+/// The shadow copy of one entry: its words and each stage's code, with a guard page after each.
+struct Shadow {
+    std::vector<GuestWord> words;
+    std::optional<ShadowLayout> layout;
+    u64 address = 0;
+};
+
+/// The recorded words of the entry being checked, by guest address (base + offset), sorted.
+const std::vector<std::pair<u64, u32>>* g_recorded;
+
+/// WalkRecorder's guest read for a check walk: recorded words only. Runs in the fault handler.
+bool ReadRecorded(u64 address, void* out, size_t size) {
+    auto* bytes = static_cast<u8*>(out);
+    for (size_t at = 0; at < size; at += sizeof(u32)) {
+        const auto found = std::ranges::lower_bound(*g_recorded, address + at, {},
+                                                    &std::pair<u64, u32>::first);
+        if (found == g_recorded->end() || found->first != address + at) {
+            return false;
+        }
+        std::memcpy(bytes + at, &found->second, sizeof(u32));
+    }
+    return true;
+}
+
+/// The crash-loop guard: `<list>.boot` (the shipped list's: shaders.list.boot in the shader
+/// cache folder) names, one per line, the programs of the entries a start ended in, plus those
+/// of the entry being translated. A translator assert exits the game (_Exit) and the disk
+/// marker is saved only after the rebuild, so the next start rebuilds again and skips every
+/// entry that uses one of those programs: an assert is most likely the program's, whichever
+/// entry reached it.
+class CrashMarker {
+public:
+    explicit CrashMarker(std::string path_) : path{std::move(path_)} {
+        if (std::FILE* file = std::fopen(path.c_str(), "r")) {
+            for (unsigned long long hash; std::fscanf(file, "%llx", &hash) == 1;) {
+                earlier.insert(hash);
+            }
+            std::fclose(file);
+        }
+    }
+
+    [[nodiscard]] const std::string& Path() const {
+        return path;
+    }
+    /// Programs an earlier start ended in.
+    [[nodiscard]] size_t Earlier() const {
+        return earlier.size();
+    }
+
+    /// Whether the entry uses a program an earlier start ended in.
+    [[nodiscard]] bool Skip(const RecordedKey& key) const {
+        return std::ranges::any_of(key.stages, [&](const RecordedStage& stage) {
+            return earlier.contains(stage.hash);
+        });
+    }
+
+    /// Names the entry's programs (none for null) as being translated, before it starts;
+    /// false when the file cannot be written.
+    [[nodiscard]] bool Enter(const RecordedKey* key) {
+        std::FILE* file = std::fopen(path.c_str(), "w");
+        if (!file) {
+            return false;
+        }
+        bool written = true;
+        const auto put = [&](u64 hash) {
+            written &= std::fprintf(file, "%016llx\n", static_cast<unsigned long long>(hash)) > 0;
+        };
+        std::ranges::for_each(earlier, put);
+        if (key) {
+            for (const auto& stage : key->stages) {
+                put(stage.hash);
+            }
+        }
+        return std::fclose(file) == 0 && written;
+    }
+
+    /// The rebuild ended: nothing to skip next time.
+    void Finish() const {
+        std::remove(path.c_str());
+    }
+
+private:
+    std::string path;
+    std::set<u64> earlier;
+};
+
+u64 PeakMemoryMiB() {
+#ifdef __linux__
+    rusage usage{};
+    return getrusage(RUSAGE_SELF, &usage) == 0 ? u64(usage.ru_maxrss) >> 10 : 0;
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    return K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
+               ? u64(counters.PeakWorkingSetSize) >> 20
+               : 0;
+#else
+    return 0;
+#endif
+}
+
+/// What ReadListCode did: the files it counted (0 when nothing was read), the programs whose
+/// code the list lacks and those found in the game files (none read without an index), and why
+/// some were not found, for the log.
+struct ListCodeRead {
+    u32 files = 0;
+    u32 wanted = 0;
+    u32 read = 0;
+    std::string why;
+};
+
+/// The code of the programs `list` names but does not hold, read from the game files into it
+/// when the index `<list_path>.files` exists (ReadGameCode); the list's own code is kept. The
+/// loading screen shows the files read as the first phase.
+ListCodeRead ReadListCode(ParsedList& list, const char* list_path,
+                          const std::function<void(u32 done, u32 total)>& progress) {
+    std::set<u64> wanted;
+    for (const auto& key : list.keys) {
+        for (const auto& stage : key.stages) {
+            if (!list.code.contains(stage.hash)) {
+                wanted.insert(stage.hash);
+            }
+        }
+    }
+    if (wanted.empty()) {
+        return {};
+    }
+    const std::filesystem::path index = std::string{list_path} + ".files";
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(index, error)) {
+        return {0, u32(wanted.size()), 0, "no index beside the list"};
+    }
+    std::vector<std::filesystem::path> dirs;
+    for (const char* name : {"GOW3_PATCH_DIR", "GOW3_GAME_DIR"}) {
+        if (const char* dir = std::getenv(name); dir && dir[0]) {
+            dirs.emplace_back(dir);
+        }
+    }
+    if (dirs.empty()) {
+        std::printf("Precompile boot: no game folder is set (GOW3_PATCH_DIR, GOW3_GAME_DIR)\n");
+    }
+    const auto started = std::chrono::steady_clock::now();
+    const u32 entries = u32(list.keys.size());
+    u32 files = 0;
+    const auto game = ReadGameCode(
+        dirs, index,
+        [&](u32 done, u32 total) {
+            files = total;
+            if (progress) {
+                const auto [shown, all] = BootProgressOf(total, entries, done, 0, 0);
+                progress(shown, all);
+            }
+        },
+        wanted);
+    u32 read = 0;
+    for (const u64 hash : wanted) {
+        if (const auto found = game.by_program.find(hash); found != game.by_program.end()) {
+            std::vector<u32> words(found->second.size() / sizeof(u32));
+            std::memcpy(words.data(), found->second.data(), words.size() * sizeof(u32));
+            list.code.emplace(hash, std::move(words));
+            ++read;
+        }
+    }
+    for (size_t i = 0; i < game.missing.size() && i < MaxDetails; ++i) {
+        std::printf("Precompile boot: not read from the game files: %s\n", game.missing[i].c_str());
+    }
+    if (game.missing.size() > MaxDetails) {
+        std::printf("Precompile boot: not read from the game files: %zu more\n",
+                    game.missing.size() - MaxDetails);
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+    std::printf("Precompile boot: code read from the game files: %u programs from %u files in "
+                "%lld ms, %zu without code\n",
+                read, game.files_read, static_cast<long long>(ms), wanted.size() - read);
+    std::string why = dirs.empty()               ? "no game folder is set"
+                      : !game.missing.empty()    ? game.missing.front()
+                                                 : "the indexed game files do not hold them";
+    if (game.missing.size() > 1) {
+        why += fmt::format(" and {} more", game.missing.size() - 1);
+    }
+    return {files, u32(wanted.size()), read, std::move(why)};
+}
+
+} // namespace
+
+struct PrecompileBoot {
+    /// `code_`: program hash -> code words, the list's or the loader's.
+    PrecompileBoot(PipelineCache& cache_, const ParsedList& list_,
+                   const std::map<u64, std::vector<u32>>& code_, std::string marker_path)
+        : cache{cache_}, list{list_}, code{code_}, marker{std::move(marker_path)} {}
+
+    /// `progress(done, total)`: each entry and the end (BootProgressOf, the rebuild's half).
+    bool Run(const std::function<void(u32 done, u32 total)>& progress);
+    void Begin();
+    /// Builds one entry; why it was not translated, or none.
+    std::optional<Reject> Entry(u32 index, const RecordedKey& key);
+    PipelineCache::Result Program(const Shader::ShaderParams& params, HwStage hw_stage,
+                                  SwStage sw_stage, Shader::Backend::Bindings& binding,
+                                  const Shader::RuntimeInfo& runtime_info);
+    PipelineStep Pipeline(const RecordedKey& key, u64 until_ns, PipelineTrace* trace);
+
+    /// The rebuild's (Run): the entries it translated, by index, and how long it took.
+    std::vector<u32> built;
+    u64 run_ms = 0;
+    std::chrono::steady_clock::time_point started; ///< when Run began
+    /// The game files the list's code was read from first (ReadListCode), 0 for none: the
+    /// loading screen's first phase.
+    u32 files = 0;
+    bool load = false; ///< the loader's build: programs not needed are only bound
+    const char* log_name = "Precompile boot";
+    /// The loader's: the permutations written, program hash and index.
+    std::vector<std::pair<u64, u32>> written;
+    /// The loader's: a selection's missing variant is added (GOW3_PRECOMPILE_LOAD_VARIANTS).
+    bool variants_on = false;
+    VariantCounts variants; ///< the loader's selections' variants, added and left to the game
+    /// The loader's: per program hash, the specs of variants AddVariant could not add in this
+    /// loading state, which are not translated again in it.
+    std::unordered_map<u64, std::vector<Shader::StageSpecialization>> failed_variants;
+
+private:
+    void SetEntry(const RecordedKey& key);
+    const char* AddVariant(const PrepWorker& worker, bool& present);
+    std::optional<Reject> Select(const RecordedKey& key, Shadow& shadow);
+    PipelineCache::Result Bind(const Shader::ShaderParams& params,
+                               Shader::Backend::Bindings& binding);
+    bool MapShadow(const RecordedKey& key, Shadow& shadow);
+    std::unique_ptr<AmdGpu::Regs> Registers(const RecordedKey& key, const Shadow& shadow) const;
+    const RecordedStage* StageOf(u64 hash);
+    bool CheckWalk(const Shader::Info& info, u64 hash);
+    bool CheckFetch(const Shader::Info& info, const Shader::StageSpecialization& spec, u64 hash);
+    std::optional<size_t> Translate(TranslatedProgram& program,
+                                    const Shader::ShaderParams& params, HwStage hw_stage,
+                                    SwStage sw_stage, const Shader::Backend::Bindings& binding,
+                                    const Shader::RuntimeInfo& runtime_info,
+                                    const Shader::StageSpecialization* lookup);
+    std::optional<std::vector<u32>> TranslateChecked(Shader::Info& info,
+                                                     Shader::StageSpecialization& spec,
+                                                     const Shader::ShaderParams& params,
+                                                     const Shader::Backend::Bindings& binding,
+                                                     const Shader::RuntimeInfo& runtime_info,
+                                                     const Shader::StageSpecialization* lookup,
+                                                     std::optional<size_t> perm);
+    void Stop(Reject why, std::string detail);
+    void Watch();
+    [[nodiscard]] bool Failed() const;
+    void Detail(Reject why, const std::string& text);
+    void Report() const;
+
+    PipelineCache& cache;
+    const ParsedList& list;
+    const std::map<u64, std::vector<u32>>& code;
+    std::unordered_map<u64, TranslatedProgram> programs; ///< node-based: specs point at their Info
+    std::unordered_map<u64, Shader::Info> bound; ///< the loader's programs only bound (Bind)
+    Shader::Pools pools; ///< the rebuild's own: a fault jumps out of a translation
+    ShadowArena arena;
+    ThreadState::Range walker_code{}; ///< where the SRT walkers of this rebuild are generated
+    RecordSlots slots{g_reserved.record, RecordSlotSize, NumRecordSlots};
+    std::vector<GuestWord> walk_words;
+    std::vector<GuestPointer> walk_pointers;
+    std::vector<std::pair<u32, u64>> walk_roots;
+
+    // The entry being translated.
+    const RecordedKey* entry = nullptr;
+    std::vector<std::pair<u64, u32>> recorded; ///< its words by guest address
+    std::optional<Reject> stopped;
+    std::string stop_detail;
+
+    CrashMarker marker;
+    u32 translated = 0, permutations = 0, skipped = 0;
+    std::array<u32, size_t(Reject::Count)> rejects{};
+};
+
+/// False when the crash marker cannot be written: then nothing is translated.
+bool PrecompileBoot::Run(const std::function<void(u32, u32)>& progress) {
+    started = std::chrono::steady_clock::now();
+    if (!marker.Enter(nullptr)) {
+        std::printf("Precompile boot: cannot write %s (%s), rebuild off\n", marker.Path().c_str(),
+                    std::strerror(errno));
+        return false;
+    }
+    if (marker.Earlier()) {
+        std::printf("Precompile boot: an earlier start ended in the rebuild, entries using the %zu "
+                    "programs %s names are skipped\n",
+                    marker.Earlier(), marker.Path().c_str());
+    }
+    Begin();
+    const u32 count = u32(list.keys.size()); // at most MaxListEntries (LoadListFile)
+    std::printf("Precompile boot: translating %u entries into the shader store\n", count);
+    const auto report = [&](u32 passed) {
+        if (progress) {
+            const auto [done, total] = BootProgressOf(files, count, files, passed, 0);
+            progress(done, total);
+        }
+    };
+    auto last_progress = started;
+    for (u32 index = 0; index < count; ++index) {
+        report(index);
+        if (const auto now = std::chrono::steady_clock::now();
+            now - last_progress >= ProgressInterval) {
+            last_progress = now;
+            std::printf("Precompile boot: %u of %u entries, %u permutations written\n", index,
+                        count, permutations);
+        }
+        const auto& key = list.keys[index];
+        if (marker.Skip(key)) {
+            if (++skipped <= MaxDetails) {
+                std::printf("Precompile boot: entry %u (recorded key %016llx) skipped (crash "
+                            "marker)\n",
+                            index, static_cast<unsigned long long>(key.key_hash));
+            }
+            continue;
+        }
+        if (!marker.Enter(&key)) {
+            std::printf("Precompile boot: cannot write %s (%s), rebuild stopped at entry %u\n",
+                        marker.Path().c_str(), std::strerror(errno), index);
+            break;
+        }
+        if (!Entry(index, key)) {
+            built.push_back(index);
+        }
+    }
+    marker.Finish();
+    run_ms = u64(std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started)
+                     .count());
+    Report();
+    report(count);
+    return true;
+}
+
+/// Before the first entry.
+void PrecompileBoot::Begin() {
+    // Every walker translated from here on is generated after the current end of the walker
+    // code, inside the generator's 32 MiB. Its own bounds are private to the recompiler: the
+    // range below overshoots the generator's end by what it held before, nothing at start.
+    const u64 walkers = u64(Shader::RegisterWalkerCode(nullptr, 0));
+    walker_code = {walkers, walkers + WalkerCodeSize};
+    walk_words.reserve(MaxRecordedWords);
+    walk_pointers.reserve(MaxRecordedPointers);
+    walk_roots.reserve(ListUserDataWords);
+}
+
+/// The entry the checks read (StageOf, CheckWalk): its stages, pointers and words.
+void PrecompileBoot::SetEntry(const RecordedKey& key) {
+    entry = &key;
+    recorded.clear();
+    for (const auto& word : key.words) {
+        recorded.emplace_back(word.base + word.offset, word.value);
+    }
+    std::ranges::sort(recorded);
+}
+
+std::optional<Reject> PrecompileBoot::Entry(u32 index, const RecordedKey& key) {
+    Shadow shadow;
+    SetEntry(key);
+    stopped.reset();
+    stop_detail.clear();
+    const auto why = Select(key, shadow);
+    if (shadow.layout) {
+        arena.Unmap(shadow.address, *shadow.layout);
+    }
+    // A fault can jump out of a program's first translation before Program drops it, and the
+    // Infos' user data pointed into this entry's registers.
+    std::erase_if(programs, [](const auto& item) { return item.second.specs.empty(); });
+    for (auto& [hash, program] : programs) {
+        program.info.user_data = {};
+    }
+    for (auto& [hash, info] : bound) {
+        info.user_data = {};
+    }
+    entry = nullptr;
+    if (!why) {
+        ++translated;
+        return why;
+    }
+    ++rejects[size_t(*why)];
+    Detail(*why, fmt::format("entry {} (recorded key {:016x}) rejected, {}{}{}", index,
+                             key.key_hash, RejectNames[size_t(*why)],
+                             stop_detail.empty() ? "" : ": ", stop_detail));
+    return why;
+}
+
+/// Replays the entry's selection from its shadow copy; why it was not translated, or none.
+std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& shadow) {
+    for (const auto& stage : key.stages) {
+        const auto found = code.find(stage.hash);
+        if (found == code.end() || !HeaderFoundFirst(found->second, stage.hash)) {
+            stop_detail = fmt::format("no code for program {:016x}", stage.hash);
+            return Reject::NoCode;
+        }
+    }
+    if (!MapShadow(key, shadow)) {
+        return Reject::NoRoom;
+    }
+    const auto regs = Registers(key, shadow);
+    if (!VertexFragmentOnly(key, *regs)) {
+        return Reject::NotVertexFragment;
+    }
+    PipelineSelection selection{};
+    selection.regs = regs.get();
+    selection.boot = this;
+    // Checked on load (ValidSgprOffset): the u16 keeps the whole offset.
+    selection.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
+    bool selected = false;
+    // Out here: a fault jumps out of Guarded past the destructors inside it.
+    const auto fetch = FetchOverrideOf(key);
+    const Shader::Gcn::ScopedFetchShaderOverride fetch_scope{fetch ? &*fetch : nullptr};
+    Watch();
+    const bool completed = Guarded([&] {
+        // Caught here, inside the recovery point: the shader compiler's jobs catch them too.
+        try {
+            selected = cache.RefreshGraphicsKey(selection);
+        } catch (const std::exception& exception) {
+            Stop(Reject::Exception, exception.what());
+        } catch (...) {
+            Stop(Reject::Exception, "unknown");
+        }
+    });
+    const bool faulted = FaultState().faults != 0;
+    FaultState().Stop();
+    if (stopped) {
+        return stopped;
+    }
+    if (!completed || faulted) {
+        const auto& state = FaultState();
+        stop_detail = fmt::format("read outside the recorded words at {:#x} ({})", state.fault,
+                                  FaultPlace(state.fault));
+        return Reject::Faulted;
+    }
+    return selected ? std::nullopt : std::optional{Reject::NotSelected};
+}
+
+/// The loader's, for an entry built and indexed: its pipeline, selected from a new shadow copy
+/// lookup-only as a draw-preparation worker does, except that a program not in use is read from
+/// the store first (PipelineSelection::from_store). A missing program, a program in use whose
+/// translation is pending, or a read outside the recorded words drops it. A missing variant
+/// (permutation) of a program in use or saved is added (AddVariant), unless the game is
+/// translating one of that program or GOW3_PRECOMPILE_LOAD_VARIANTS=0, and the pipeline
+/// selected again; one not added, or one the program has an equal spec of already, drops it.
+/// One this loading state failed to add, or the game's own translation failed, is not
+/// translated again (failed_variants, the program's failed_permutations). The pipeline
+/// is handed to the compile workers inside the same recovery point, before the copy goes: the
+/// build's snapshot reads it. A variant after the first one of a call is added only before
+/// `until_ns` (CompilePolicy::Now), so one call does not run several translations; past it the
+/// call returns Full and the entry is selected again later, the variants added staying. One
+/// translation may still run past `until_ns`, and past the pump's 4 ms. `trace`
+/// (GOW3_PRECOMPILE_LOAD_TRACE), when set, gets the key selected and why it was dropped.
+PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
+                                      PipelineTrace* trace) {
+    if (cache.compiler->Depth() >= LoadQueueDepth) {
+        return PipelineStep::Full;
+    }
+    Shadow shadow;
+    if (!MapShadow(key, shadow)) {
+        if (trace) {
+            trace->dropped = "no room for the shadow copy";
+        }
+        return PipelineStep::Dropped;
+    }
+    const auto regs = Registers(key, shadow);
+    PrepWorker worker{};
+    PipelineSelection selection{};
+    const auto select = [&] {
+        worker = PrepWorker{};
+        selection = PipelineSelection{};
+        selection.regs = regs.get();
+        selection.worker = &worker;
+        selection.from_store = true;
+        selection.draw_indirect_params = {u16(key.vertex_sgpr_offset), key.instance_sgpr_offset};
+        return cache.RefreshGraphicsKey(selection);
+    };
+    auto step = PipelineStep::Dropped;
+    constexpr const char* faulted_out = "a read faulted out of the selection";
+    const char* why = faulted_out; // what a jump out of Guarded leaves
+    std::optional<u32> why_stage;
+    // AddVariant's checks stop the entry as an entry build's do: put back afterwards what the
+    // last entry build left, also when a fault jumps out.
+    const auto found_stopped = stopped;
+    const auto found_detail = stop_detail;
+    // Out here: a fault jumps out of Guarded past the destructors inside it.
+    const auto fetch = FetchOverrideOf(key);
+    const Shader::Gcn::ScopedFetchShaderOverride fetch_scope{fetch ? &*fetch : nullptr};
+    Watch();
+    Guarded([&] {
+        try {
+            for (u32 added = 0;; ++added) {
+                why = faulted_out;
+                why_stage.reset();
+                const bool selected = select();
+                if (selected && !worker.failed) {
+                    if (FaultState().faults != 0) {
+                        why = "read outside the recorded words";
+                        break;
+                    }
+                    if (trace) {
+                        trace->key_hash =
+                            std::hash<GraphicsPipelineKey>{}(selection.graphics_key);
+                        const auto* bytes = reinterpret_cast<const u8*>(&selection.graphics_key);
+                        trace->key.assign(bytes, bytes + sizeof(GraphicsPipelineKey));
+                    }
+                    step = cache.StartLoadPipeline(selection, worker, &why);
+                    break;
+                }
+                why = worker.failed && worker.failure ? worker.failure : "selection failed";
+                why_stage = worker.failed && worker.failure ? std::optional{worker.failed_stage}
+                                                            : std::nullopt;
+                if (!worker.missing_spec) {
+                    break;
+                }
+                if (added == MaxEntryVariants) {
+                    static const std::string most_added = fmt::format(
+                        "variant left to the game: {} added already", MaxEntryVariants);
+                    ++variants.left;
+                    why = most_added.c_str();
+                    break;
+                }
+                // In program_cache: the lookup just found it there.
+                const auto& spec = *worker.missing_spec;
+                const u64 hash = spec.info->pgm_hash;
+                const auto& program = *cache.program_cache.at(hash);
+                const auto found = program.pending ? LoadVariant::Pending : LoadVariant::Missing;
+                ++variants.left; // also what a fault jumping out of AddVariant leaves
+                if (!AddsVariant(variants_on, found)) {
+                    why = variants_on
+                              ? "variant left to the game: the game's translation pending"
+                              : "variant left to the game: GOW3_PRECOMPILE_LOAD_VARIANTS=0";
+                    break;
+                }
+                // Not translated again: one this loading state failed to add, or one the game's
+                // own translation failed (GetProgram's test).
+                const auto failed_here = failed_variants.find(hash);
+                if ((failed_here != failed_variants.end() &&
+                     std::ranges::find(failed_here->second, spec) != failed_here->second.end()) ||
+                    std::ranges::find(program.failed_permutations, spec) !=
+                        program.failed_permutations.end()) {
+                    why = "variant left to the game: failed before in this load";
+                    break;
+                }
+                if (added > 0 && CompilePolicy::Now() >= until_ns) {
+                    --variants.left; // not left: selected again later
+                    step = PipelineStep::Full;
+                    break;
+                }
+                if (entry != &key) {
+                    SetEntry(key);
+                }
+                // What a fault jumping out of AddVariant leaves.
+                why = VariantLeft(Reject::Faulted);
+                // Taken back once added; a fault jumping out of AddVariant leaves it too. The
+                // copy points at the program's Info, as the cache's failed_permutations do: the
+                // lookup's is the worker's, which the next selection resets.
+                auto& failed = failed_variants[hash];
+                failed.push_back(spec);
+                failed.back().info = &program.info;
+                bool present = false;
+                if (const char* left = AddVariant(worker, present)) {
+                    why = left;
+                    break;
+                }
+                --variants.left;
+                if (present) {
+                    // The program has an equal spec, yet the selection missed it: selecting
+                    // again would miss it again. The spec stays recorded, so the next entry
+                    // that misses it does not translate it once more to find the same.
+                    ++variants.present;
+                    why = "variant left to the game: an equal spec already there";
+                    break;
+                }
+                failed.pop_back();
+                ++variants.added;
+            }
+        } catch (...) {
+            step = PipelineStep::Dropped;
+            why = "exception";
+            why_stage.reset();
+        }
+    });
+    FaultState().Stop();
+    entry = nullptr;
+    stopped = found_stopped;
+    stop_detail = found_detail;
+    arena.Unmap(shadow.address, *shadow.layout);
+    if (trace && step == PipelineStep::Dropped) {
+        trace->dropped = why;
+        trace->stage = why_stage;
+    }
+    return step;
+}
+
+/// The entry's words and each stage's code, laid out with guard pages and filled in.
+bool PrecompileBoot::MapShadow(const RecordedKey& key, Shadow& shadow) {
+    shadow.words = key.words;
+    for (const auto& stage : key.stages) {
+        // A code region is only marked out here (its first and last word) and copied in after
+        // the fill. Padded to whole pages: the program address register holds bits 8 and up,
+        // and a region ends right before its guard page.
+        const size_t bytes = code.at(stage.hash).size() * sizeof(u32);
+        const size_t padded = (bytes + PageSize - 1) / PageSize * PageSize;
+        shadow.words.push_back({CodeBase(stage.sw_stage), 0, 0});
+        shadow.words.push_back({CodeBase(stage.sw_stage), u32(padded - 4), 0});
+    }
+    shadow.layout.emplace(shadow.words, PageSize);
+    const auto address = arena.Map(*shadow.layout);
+    if (!address) {
+        shadow.layout.reset();
+        return false;
+    }
+    shadow.address = *address;
+    shadow.layout->Fill(reinterpret_cast<u8*>(*address), *address, shadow.words, key.pointers,
+                        g_reserved.shadow);
+    for (const auto& stage : key.stages) {
+        const auto& words = code.at(stage.hash);
+        const u64 at = *shadow.layout->Translate(CodeBase(stage.sw_stage), *address);
+        std::memcpy(reinterpret_cast<void*>(at), words.data(), words.size() * sizeof(u32));
+    }
+    return true;
+}
+
+/// The recorded registers, with each stage's code address and user-data pointers led into
+/// the shadow copy; stages not recorded have no program.
+std::unique_ptr<AmdGpu::Regs> PrecompileBoot::Registers(const RecordedKey& key,
+                                                        const Shadow& shadow) const {
+    auto regs = std::make_unique<AmdGpu::Regs>();
+    regs->reg_array.fill(0);
+    for (const auto& [index, value] : key.regs) {
+        regs->reg_array[index] = value;
+    }
+    for (u32 hw_stage = 0; hw_stage < ListHwStages; ++hw_stage) {
+        ProgramAt(*regs, hw_stage).address = 0;
+    }
+    for (const auto& stage : key.stages) {
+        auto& program = ProgramAt(*regs, stage.hw_stage);
+        const u64 at = *shadow.layout->Translate(CodeBase(stage.sw_stage), shadow.address);
+        program.address = at >> 8; // 40 bits: the address without its low 8
+        program.user_data = stage.user_data;
+        for (const auto& [sgpr, target] : stage.roots) {
+            u64 pointer;
+            std::memcpy(&pointer, &program.user_data[sgpr], sizeof(pointer));
+            pointer = Repoint(pointer, shadow.layout->Translate(target, shadow.address)
+                                           .value_or(g_reserved.shadow));
+            std::memcpy(&program.user_data[sgpr], &pointer, sizeof(pointer));
+        }
+    }
+    return regs;
+}
+
+/// GetProgram for a boot selection: the program's permutation for this stage, translated and
+/// written to the store when it is new.
+PipelineCache::Result PrecompileBoot::Program(const Shader::ShaderParams& params,
+                                              HwStage hw_stage, SwStage sw_stage,
+                                              Shader::Backend::Bindings& binding,
+                                              const Shader::RuntimeInfo& runtime_info) {
+    if (stopped) {
+        return {};
+    }
+    if (load && !cache.ProgramNeeded(params.hash)) {
+        return Bind(params, binding);
+    }
+    auto [it, is_new] = programs.try_emplace(params.hash);
+    auto& program = it->second;
+    std::optional<size_t> perm;
+    if (is_new) {
+        perm = Translate(program, params, hw_stage, sw_stage, binding, runtime_info, nullptr);
+        if (!perm) {
+            programs.erase(it);
+            return {};
+        }
+    } else {
+        // As GetProgram looks a permutation up: the first Info with this draw's user data.
+        program.info.pgm_base = params.Base();
+        program.info.user_data = params.user_data;
+        program.info.RefreshFlatBuf();
+        if (Failed() || !CheckWalk(program.info, params.hash)) {
+            return {};
+        }
+        const Shader::StageSpecialization spec{program.info, runtime_info, cache.profile,
+                                               binding};
+        if (!CheckFetch(program.info, spec, params.hash)) {
+            return {};
+        }
+        const auto found = std::ranges::find(program.specs, spec);
+        perm = found != program.specs.end()
+                   ? std::optional{size_t(std::distance(program.specs.begin(), found))}
+                   : Translate(program, params, hw_stage, sw_stage, binding, runtime_info,
+                               &spec);
+        if (!perm) {
+            return {};
+        }
+    }
+    program.info.AddBindings(binding);
+    return std::make_tuple(&program.info, vk::ShaderModule{},
+                           program.specs[*perm].fetch_shader_data,
+                           HashCombine(params.hash, u64(*perm)));
+}
+
+/// The loader's stage of a program in use or saved: only its bindings, which the next stage's
+/// spec depends on, from the Info GetProgram binds the program with (InUseInfo). Nothing is
+/// translated or written. Its walker is not run: the flattened user data is the user data and
+/// zeros past it, read after the stages only by the motion check (sharps of no buffer).
+PipelineCache::Result PrecompileBoot::Bind(const Shader::ShaderParams& params,
+                                           Shader::Backend::Bindings& binding) {
+    auto found = bound.find(params.hash);
+    if (found == bound.end()) {
+        Shader::Info info{};
+        if (!cache.InUseInfo(params.hash, info)) {
+            Stop(Reject::NoInfo, fmt::format("program {:016x}", params.hash));
+            return {};
+        }
+        found = bound.emplace(params.hash, std::move(info)).first;
+    }
+    auto& info = found->second;
+    info.pgm_base = params.Base();
+    info.user_data = params.user_data;
+    info.flattened_ud_buf.assign(info.srt_info.flattened_bufsize_dw, 0);
+    std::copy_n(info.user_data.begin(),
+                std::min(info.user_data.size(), info.flattened_ud_buf.size()),
+                info.flattened_ud_buf.begin());
+    info.AddBindings(binding);
+    return PipelineCache::Result{&info, vk::ShaderModule{}, std::nullopt,
+                                 HashCombine(params.hash, u64{0})};
+}
+
+/// Translates a new permutation as the shader compiler does (QueueShader), checks it and
+/// writes it; its index, or none when the entry stops. `lookup` is the spec a later
+/// permutation was looked up with, null for the program's first translation.
+std::optional<size_t> PrecompileBoot::Translate(TranslatedProgram& program,
+                                                const Shader::ShaderParams& params,
+                                                HwStage hw_stage, SwStage sw_stage,
+                                                const Shader::Backend::Bindings& binding,
+                                                const Shader::RuntimeInfo& runtime_info,
+                                                const Shader::StageSpecialization* lookup) {
+    const size_t perm = program.specs.size();
+    if (perm >= MaxPermutations) {
+        Stop(Reject::TooManyPermutations, fmt::format("program {:016x}", params.hash));
+        return std::nullopt;
+    }
+    Shader::Info info{hw_stage, sw_stage, params};
+    Shader::StageSpecialization spec;
+    auto spv = TranslateChecked(info, spec, params, binding, runtime_info, lookup, perm);
+    if (!spv) {
+        return std::nullopt;
+    }
+    if (!lookup) {
+        program.info = std::move(info);
+    }
+    spec.info = &program.info;
+    RegisterShaderBinary(std::move(*spv), params.hash, perm);
+    RegisterShaderMeta(program.info, spec.fetch_shader_data, spec,
+                       HashCombine(params.hash, u64(perm)), perm);
+    if (load) {
+        written.emplace_back(params.hash, u32(perm));
+    }
+    program.specs.push_back(std::move(spec));
+    ++permutations;
+    return perm;
+}
+
+/// The checked translation of Translate and AddVariant: `params` translated into `info` (made
+/// from them) as the shader compiler does, its walk and fetch shader checked against the
+/// recording and its spec, `spec` (pointing at `info`), against the spec the race looks it up
+/// with: `lookup`, or for a program's first translation that of a fresh runtime info. The
+/// SPIR-V, or none when the entry stops. `perm` names the permutation in the reject's detail.
+std::optional<std::vector<u32>> PrecompileBoot::TranslateChecked(
+    Shader::Info& info, Shader::StageSpecialization& spec, const Shader::ShaderParams& params,
+    const Shader::Backend::Bindings& binding, const Shader::RuntimeInfo& runtime_info,
+    const Shader::StageSpecialization* lookup, std::optional<size_t> perm) {
+    const auto& profile = cache.profile;
+    auto runtime = runtime_info;
+    const auto ir = Shader::TranslateProgram(params.code, pools, info, runtime, profile);
+    if (Failed() || !CheckWalk(info, params.hash)) {
+        return std::nullopt;
+    }
+    spec = Shader::StageSpecialization{info, runtime, profile, binding};
+    if (!CheckFetch(info, spec, params.hash)) {
+        return std::nullopt;
+    }
+    auto emit_binding = binding;
+    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, ir, emit_binding);
+    if (Failed()) {
+        return std::nullopt;
+    }
+    // The race looks this permutation up with the program's first Info and a fresh runtime
+    // info: a spec that differs from that lookup would never be found.
+    const auto expected =
+        lookup ? *lookup : Shader::StageSpecialization{info, runtime_info, profile, binding};
+    if (!(spec == expected)) {
+        Stop(Reject::SpecChanged,
+             perm ? fmt::format("program {:016x} permutation {}", params.hash, *perm)
+                  : fmt::format("program {:016x} variant", params.hash));
+        return std::nullopt;
+    }
+    return spv;
+}
+
+/// The loader's, inside Pipeline's recovery point while its shadow copy is mapped: the variant
+/// `worker`'s selection missed in a program in use or saved, translated from what that lookup
+/// read (the copy's code and its user data, led into the copy as Registers leads them), checked
+/// as an entry's translation is, then inserted into the program and saved at the index the game
+/// would give it (InsertLoadVariant). Null when added or already there (`present`); else why
+/// it was left (VariantLeft), when a check failed or the program did not take it; the entry
+/// does not stop. Nothing of the rebuild's own is touched: programs, written, permutations.
+const char* PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) {
+    const auto& lookup = *worker.missing_spec;
+    const auto& looked_up = *lookup.info; // the worker's copy of the program's Info
+    const auto* base = reinterpret_cast<const u32*>(looked_up.pgm_base);
+    const Shader::ShaderParams params{
+        .user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{
+            looked_up.user_data.data(), Shader::ShaderParams::NumShaderUserData},
+        .code = {base, AmdGpu::SearchBinaryInfo(base).length / sizeof(u32)},
+        .hash = looked_up.pgm_hash,
+    };
+    stopped.reset();
+    stop_detail.clear();
+    Shader::Info info{worker.missing_hw, SwStage(worker.failed_stage), params};
+    Shader::StageSpecialization spec;
+    std::optional<std::vector<u32>> spv;
+    try {
+        spv = TranslateChecked(info, spec, params, worker.missing_binding,
+                               worker.missing_runtime, &lookup, std::nullopt);
+    } catch (const std::exception& exception) {
+        Stop(Reject::Exception, exception.what());
+    } catch (...) {
+        Stop(Reject::Exception, "unknown");
+    }
+    if (!spv) {
+        return VariantLeft(stopped.value_or(Reject::Faulted));
+    }
+    bool inserted = false;
+    if (!cache.InsertLoadVariant(params.hash, std::move(*spv), std::move(spec), inserted)) {
+        return "variant left to the game: the program did not take it";
+    }
+    present = !inserted;
+    return nullptr;
+}
+
+/// Runs the program's walker on the stage's recorded user data and words alone, served by the
+/// fault handler as when they were recorded: false (the entry stops) when it reads a word or
+/// follows a pointer the recording did not, or when the walk through the shadow copy (the
+/// flattened user data `info` holds) read other values. The shadow copy cannot tell by itself:
+/// its gaps read as zero and a pointer it does not lead in still holds a guest address, both
+/// without a fault; a word recorded through one table but read through another, or half of a
+/// pointer read as a plain word (repointed in the copy), reads other values there.
+bool PrecompileBoot::CheckWalk(const Shader::Info& info, u64 hash) {
+    if (!info.srt_info.walker_func) {
+        return true;
+    }
+    const auto* stage = StageOf(hash);
+    if (!stage) {
+        return false;
+    }
+    std::vector<u32> flat(info.srt_info.flattened_bufsize_dw);
+    walk_words.clear();
+    walk_pointers.clear();
+    walk_roots.clear();
+    slots.Reset();
+    WalkRecorder recorder{slots, stage->user_data, ReadRecorded, walk_words, walk_pointers,
+                          walk_roots};
+    auto& state = FaultState();
+    const u32 faults = state.faults;
+    g_recorded = &recorded;
+    state.recorder = &recorder;
+    info.srt_info.walker_func(reinterpret_cast<const u32*>(slots.Address(0)), flat.data());
+    state.recorder = nullptr;
+    g_recorded = nullptr;
+    const char* why = recorder.error;
+    if (!why && state.faults != faults) {
+        why = "a read outside the record slots faulted";
+    }
+    if (!why && !std::ranges::all_of(walk_pointers, [&](const GuestPointer& pointer) {
+            return std::ranges::find(entry->pointers, pointer) != entry->pointers.end();
+        })) {
+        why = "a table pointer the recording did not follow";
+    }
+    if (!why && !std::ranges::all_of(walk_roots, [&](const auto& root) {
+            return std::ranges::find(stage->roots, root) != stage->roots.end();
+        })) {
+        why = "a user-data pointer the recording did not follow";
+    }
+    // Past the user data, which the shadow walk read with its pointers repointed.
+    const auto& walked = info.flattened_ud_buf;
+    if (!why && (walked.size() != flat.size() || flat.size() < ListUserDataWords ||
+                 !std::equal(flat.begin() + ListUserDataWords, flat.end(),
+                             walked.begin() + ListUserDataWords))) {
+        why = "the shadow copy gave other values than the recording";
+    }
+    if (why) {
+        Stop(Reject::StrayWalk, fmt::format("program {:016x}: {}", hash, why));
+    }
+    return !why;
+}
+
+/// The entry's recorded stage of a program; null (the entry stops) when there is none.
+const RecordedStage* PrecompileBoot::StageOf(u64 hash) {
+    const auto stage = std::ranges::find(entry->stages, hash, &RecordedStage::hash);
+    if (stage == entry->stages.end()) {
+        Stop(Reject::StrayWalk, fmt::format("program {:016x} is not recorded", hash));
+        return nullptr;
+    }
+    return &*stage;
+}
+
+/// Whether the fetch shader and its vertex buffer tables were read through user-data pointers
+/// the recording followed (false: the entry stops). Any other pair of user-data words still
+/// holds a guest address, which the committed guest pool serves without a fault. In a list
+/// that holds parses (version 4) the entry's parse must be the one of this fetch shader.
+bool PrecompileBoot::CheckFetch(const Shader::Info& info, const Shader::StageSpecialization& spec,
+                                u64 hash) {
+    if (!info.has_fetch_shader) {
+        return true;
+    }
+    const auto* stage = StageOf(hash);
+    if (!stage) {
+        return false;
+    }
+    if (list.version != ListVersionStubWords &&
+        (!entry->fetch || entry->fetch->sgpr_base != info.fetch_shader_sgpr_base)) {
+        Stop(Reject::StrayFetch, fmt::format("program {:016x}: fetch shader not recorded", hash));
+        return false;
+    }
+    const auto followed = [&](u32 sgpr) {
+        return std::ranges::any_of(stage->roots,
+                                   [&](const auto& root) { return root.first == sgpr; });
+    };
+    bool recorded = followed(info.fetch_shader_sgpr_base);
+    if (spec.fetch_shader_data) {
+        for (const auto& attrib : spec.fetch_shader_data->attributes) {
+            recorded = recorded && followed(attrib.sgpr_base);
+        }
+    }
+    if (!recorded) {
+        Stop(Reject::StrayFetch, fmt::format("program {:016x}", hash));
+    }
+    return recorded;
+}
+
+/// Stops the entry: the selection goes on to its end without translating anything more.
+void PrecompileBoot::Stop(Reject why, std::string detail) {
+    if (!stopped) {
+        stopped = why;
+        stop_detail = std::move(detail);
+    }
+}
+
+/// Notes this thread's faults; reads of the walkers of this rebuild are served as zero.
+void PrecompileBoot::Watch() {
+    FaultState().Watch({&walker_code, 1});
+}
+
+/// Whether the entry stopped or a read outside the recorded words faulted.
+bool PrecompileBoot::Failed() const {
+    return stopped || FaultState().faults != 0;
+}
+
+/// Up to MaxDetails lines per reason.
+void PrecompileBoot::Detail(Reject why, const std::string& text) {
+    if (rejects[size_t(why)] <= MaxDetails) {
+        std::printf("%s: %s\n", log_name, text.c_str());
+    }
+}
+
+void PrecompileBoot::Report() const {
+    std::string reasons;
+    u32 rejected = 0;
+    for (size_t i = 0; i < rejects.size(); ++i) {
+        rejected += rejects[i];
+        if (rejects[i]) {
+            reasons += fmt::format("{}{} {}", reasons.empty() ? "" : ", ", rejects[i],
+                                   RejectNames[i]);
+        }
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+    std::printf("%s\n",
+                fmt::format("Precompile boot: {} entries, {} translated, {} programs, {} "
+                            "permutations written, {} rejected{}, {} skipped (crash marker), "
+                            "{} ms, peak memory {} MiB",
+                            list.keys.size(), translated, programs.size(), permutations,
+                            rejected, reasons.empty() ? "" : " (" + reasons + ")", skipped, ms,
+                            PeakMemoryMiB())
+                    .c_str());
+}
+
+PipelineCache::Result PipelineCache::BootProgram(PipelineSelection& sel, HwStage hw_stage,
+                                                 SwStage sw_stage,
+                                                 const Shader::ShaderParams& params,
+                                                 Shader::Backend::Bindings& binding,
+                                                 const Shader::RuntimeInfo& runtime_info) {
+    return sel.boot->Program(params, hw_stage, sw_stage, binding, runtime_info);
+}
+
+LoadBuilder::LoadBuilder(PipelineCache& cache, const ParsedList& list,
+                         const std::map<u64, std::vector<u32>>& code, bool variants)
+    : boot{std::make_unique<PrecompileBoot>(cache, list, code, std::string{})} {
+    // No crash marker (an empty path names none): nothing is skipped.
+    boot->load = true;
+    boot->log_name = "Precompile load";
+    boot->variants_on = variants;
+    boot->Begin();
+}
+
+LoadBuilder::~LoadBuilder() = default;
+
+const char* LoadBuilder::Build(u32 index, const RecordedKey& key, bool& no_info) {
+    const auto why = boot->Entry(index, key);
+    no_info = why == Reject::NoInfo;
+    return why ? RejectNames[size_t(*why)] : nullptr;
+}
+
+std::vector<std::pair<u64, u32>> LoadBuilder::TakeWritten() {
+    return std::exchange(boot->written, {});
+}
+
+PipelineStep LoadBuilder::Pipeline(const RecordedKey& key, u64 until_ns, PipelineTrace* trace) {
+    return boot->Pipeline(key, until_ns, trace);
+}
+
+const VariantCounts& LoadBuilder::Variants() const {
+    return boot->variants;
+}
+
+void LoadBuilder::ResetVariants() {
+    boot->variants = {};
+}
+
+void LoadBuilder::ForgetFailedVariants() {
+    boot->failed_variants.clear();
+}
+
+/// The rebuild with the list it refers to, which is declared first.
+struct PrecompileBootRun {
+    PrecompileBootRun(PipelineCache& cache, ParsedList&& list_, std::string marker_path)
+        : list{std::move(list_)}, boot{cache, list, list.code, std::move(marker_path)} {}
+
+    ParsedList list;
+    PrecompileBoot boot;
+};
+
+void PrecompileBootDeleter::operator()(PrecompileBootRun* run) const {
+    delete run;
+}
+
+bool PipelineCache::PreparePrecompileList(const std::function<void(u32, u32)>& progress) {
+    // With GOW3_PRECOMPILE_LOAD=1 the loader builds the list instead (it logs that).
+    if (!BootRequested() || LoadRequested()) {
+        return false;
+    }
+    const std::string path = BootListPath();
+    if (path.empty()) {
+        return false;
+    }
+#if !defined(__linux__) && !defined(_WIN32)
+    std::printf("Precompile boot: not supported on this platform\n");
+    return false;
+#else
+    auto parsed = LoadListFile(path.c_str(), MaxListEntries);
+    if (!parsed) {
+        return false;
+    }
+    const auto code = ReadListCode(*parsed, path.c_str(), progress);
+    if (!GameCodeSuffices(code.wanted, code.read)) {
+        std::printf("Precompile boot: skipped, the game files gave %u of %u programs (%s)\n",
+                    code.read, code.wanted, code.why.c_str());
+        return false;
+    }
+    if (!SetUpFaultGuard()) {
+        return false;
+    }
+    // The shipped list may sit on a read-only mount (the AppImage): its crash marker is kept in
+    // the shader cache folder.
+    const std::string crash_marker =
+        path == ShippedListPath ? Common::FS::PathToUTF8String(
+                                      Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
+                                      "shaders.list.boot")
+                                : path + ".boot";
+    // Kept for the pipeline pass (BuildPrecompilePipelines), which releases it.
+    precompile_boot.reset(new PrecompileBootRun{*this, std::move(*parsed), crash_marker});
+    precompile_boot->boot.files = code.files;
+    return true;
+#endif
+}
+
+bool PipelineCache::RunPrecompileList(const std::function<void(u32, u32)>& progress) {
+    if (precompile_boot && !precompile_boot->boot.Run(progress)) {
+        precompile_boot.reset();
+    }
+    return precompile_boot != nullptr;
+}
+
+/// Each entry the rebuild built, its pipeline selected from the store as the loader selects it
+/// (PrecompileBoot::Pipeline, the variant step included) and handed to the compile workers;
+/// while their queue is full (Full) this waits for them, publishes and tries the entry again.
+/// No time limit: the whole pass runs before the game does. Optimised rebuilds of fast first
+/// builds are not waited for; they run later on the low lane, as any other's do.
+void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>& on_screen) {
+    // Released when this returns, also with the pass off.
+    const PrecompileBootPtr run = std::move(precompile_boot);
+    if (!run) {
+        return;
+    }
+    if (const char* pipelines = std::getenv("GOW3_PRECOMPILE_BOOT_PIPELINES");
+        pipelines && std::string_view{pipelines} == "0") {
+        std::printf("Precompile boot: pipelines off (GOW3_PRECOMPILE_BOOT_PIPELINES=0)\n");
+        return;
+    }
+    auto& boot = run->boot;
+    // The loader's variant step, which only a loader object switches on otherwise.
+    boot.variants_on = true;
+    const u32 entries = u32(boot.built.size());
+    const u64 published_before = load_builds_published, failed_before = load_builds_failed;
+    // One per fast first build published; nothing takes them while the pass runs.
+    const size_t rebuilds_before = waiting_rebuilds.size();
+    constexpr u64 no_limit = std::numeric_limits<u64>::max();
+    u32 had = 0, dropped = 0;
+    const auto started = std::chrono::steady_clock::now();
+    auto last_progress = started;
+    const auto progress = [&](const auto& print) {
+        if (const auto now = std::chrono::steady_clock::now();
+            now - last_progress >= PipelineProgressInterval) {
+            last_progress = now;
+            print();
+        }
+    };
+    // The loading screen's second half counts the list's entries as the rebuild's does: up to
+    // the built entry handed over, so the entries the rebuild did not build count as passed and
+    // the bar ends full.
+    const u32 count = u32(run->list.keys.size());
+    u32 passed = 0;
+    const auto report = [&] {
+        if (on_screen) {
+            const auto [shown, total] =
+                BootProgressOf(boot.files, count, boot.files, count, passed);
+            on_screen(shown, total);
+        }
+    };
+    const auto entries_done = [&](u32 done) {
+        passed = boot.built[done];
+        report();
+        progress([&] {
+            std::printf("Precompile boot: pipelines: %u of %u entries\n", done, entries);
+        });
+    };
+    // A build counts as running until PublishGraphics takes it: wait, then publish.
+    const auto wait_and_publish = [this] {
+        WaitLoadBuilds(CompilePolicy::Now() + PipelineWaitNs);
+        PublishGraphics();
+    };
+    for (u32 done = 0; done < entries; ++done) {
+        entries_done(done);
+        const u32 index = boot.built[done];
+        const auto& key = run->list.keys[index];
+        // Why the first MaxDetails were dropped.
+        PipelineTrace found;
+        PipelineTrace* const trace = dropped < MaxDetails ? &found : nullptr;
+        auto step = boot.Pipeline(key, no_limit, trace);
+        while (step == PipelineStep::Full) {
+            entries_done(done);
+            wait_and_publish();
+            found = {};
+            step = boot.Pipeline(key, no_limit, trace);
+        }
+        had += step == PipelineStep::Have;
+        if (step == PipelineStep::Dropped && ++dropped <= MaxDetails) {
+            std::printf("Precompile boot: pipelines: entry %u (recorded key %016llx) dropped%s, "
+                        "%s\n",
+                        index, static_cast<unsigned long long>(key.key_hash),
+                        found.stage ? fmt::format(" at sw stage {}", *found.stage).c_str() : "",
+                        found.dropped ? found.dropped : "no reason given");
+        }
+    }
+    do {
+        report();
+        progress([&] {
+            std::printf("Precompile boot: pipelines: waiting for %zu builds\n",
+                        LoadBuildsRunning());
+        });
+        wait_and_publish();
+    } while (LoadBuildsRunning() > 0);
+    passed = count;
+    report();
+    const auto now = std::chrono::steady_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count();
+    const auto total_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - boot.started).count();
+    std::printf("Precompile boot: pipelines: %u entries, %llu built, %u built already, %u "
+                "dropped, %llu failed, %u variants added, %zu fast first builds waiting for "
+                "their optimised rebuild, in %lld ms (translation %llu ms), %lld ms since the "
+                "rebuild began\n",
+                entries,
+                static_cast<unsigned long long>(load_builds_published - published_before), had,
+                dropped, static_cast<unsigned long long>(load_builds_failed - failed_before),
+                boot.variants.added, waiting_rebuilds.size() - rebuilds_before,
+                static_cast<long long>(ms), static_cast<unsigned long long>(boot.run_ms),
+                static_cast<long long>(total_ms));
+}
+
+} // namespace Vulkan

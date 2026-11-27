@@ -71,6 +71,14 @@ def isa_rewrite_wanted(missing, env):
     return bool(missing)
 
 
+def export_game_folders(env, game):
+    """The engine reads the first start's shader code from the game files: it gets the folders
+    this script resolved, absolute (the game's and the update's, not the combined or mod view)."""
+    env['GOW3_GAME_DIR'] = os.path.abspath(game)
+    if env.get('GOW3_PATCH_DIR'):
+        env['GOW3_PATCH_DIR'] = os.path.abspath(env['GOW3_PATCH_DIR'])
+
+
 def run_script(name, *args, capture=False, check=True):
     # Inside the packaged launcher executable (PyInstaller) the executable runs scripts itself.
     script = ['--script'] if getattr(sys, 'frozen', False) else []
@@ -225,6 +233,7 @@ def main():
     game = Path(env.get('GOW3_GAME_DIR', PORT.parent / 'CUSA01623'))
     if not (game / 'eboot.bin').is_file():
         fail(f'No eboot.bin in {game} (set GOW3_GAME_DIR).')
+    export_game_folders(env, game)
     update_view = None
     unlinked = {}  # large files a drive without links kept out of the view: the game reads them in place
     if env.get('GOW3_PATCH_DIR'):

@@ -13,6 +13,7 @@
 #include "gow3_threads.h"
 
 #include "common/hash.h"
+#include "common/scope_exit.h"
 #include "common/thread.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -33,6 +34,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_precompile_scan.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -78,7 +80,14 @@ struct AsyncGraphicsCompilation {
     GraphicsPipeline::SerializationSupport data;
     std::unique_ptr<GraphicsPipeline> pipeline;
     bool failure_logged = false;
+<<<<<<< ours
     // gow3: a fast first build is rebuilt optimised from the same snapshot (StartRebuilds).
+=======
+    /// gow3 (GOW3_PRECOMPILE_LOAD): handed over by the loader, not by a draw: the compile
+    /// leaves the compile policy alone, and a failed build leaves pending_graphics.
+    bool loader = false;
+    // gow3: a fast first build is rebuilt optimised from the same snapshot (QueueRebuilds).
+>>>>>>> theirs
     GraphicsPipeline* published = nullptr;
     AsyncJob<bool> rebuild;
     std::unique_ptr<GraphicsPipeline> optimized;
@@ -336,6 +345,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    Precompile::StartScanDiagnostic(); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
@@ -408,7 +418,15 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     // gow3: the compiler threads always exist; the in-game menu switches async compilation live
     // (Gow3Settings::async_shaders, GOW3_ASYNC_SHADERS at start).
     {
-        const auto count = std::clamp(Gow3Threads::Available() / 2, 1u, 6u);
+        auto count = std::clamp(Gow3Threads::Available() / 2, 1u, 6u);
+        // Probe GOW3_COMPILE_WORKERS=<1-16>: the number of compile workers, to see what the
+        // loader's pipeline builds gain from more of them during a loading screen.
+        if (const char* env = std::getenv("GOW3_COMPILE_WORKERS")) {
+            if (const int asked = std::atoi(env); asked >= 1 && asked <= 16) {
+                count = unsigned(asked);
+                std::printf("Compile workers: %u (GOW3_COMPILE_WORKERS)\n", count);
+            }
+        }
         const auto capture_count = std::min(2u, std::max(1u, Gow3Threads::Available() / 4));
         for (unsigned i = 0; i < count; ++i) {
             auto [result, worker_cache] = instance.GetDevice().createPipelineCacheUnique({});
@@ -440,6 +458,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                  "first builds {})",
                  capture_count, count, fast_first_builds ? "on" : "off");
     }
+    precompile = MakePrecompileRecord();
+    precompile_load = MakePrecompileLoad(*this);
 }
 
 PipelineCache::~PipelineCache() {
@@ -663,6 +683,12 @@ void PipelineCache::PublishShaders(bool wait) {
 }
 
 void PipelineCache::PublishGraphics(bool wait) {
+    // gow3: called for every draw. The map keeps the buckets of its largest size (about 2048
+    // after ~700 builds were pending at once), and begin() walks all of them to find the first
+    // entry, also when there is none: nothing pending, nothing to walk.
+    if (pending_graphics.empty()) {
+        return;
+    }
     for (auto it = pending_graphics.begin(); it != pending_graphics.end();) {
         auto build = it.value();
         if (wait) {
@@ -675,7 +701,20 @@ void PipelineCache::PublishGraphics(bool wait) {
                           std::hash<GraphicsPipelineKey>{}(it.key()), build->job.Error());
                 build->failure_logged = true;
             }
+            if (build->job.Failed() && build->loader) {
+                // gow3 (GOW3_PRECOMPILE_LOAD): dropped, so a draw builds this pipeline itself.
+                ++load_builds_failed;
+                it = pending_graphics.erase(it);
+                continue;
+            }
             ++it;
+            continue;
+        }
+        if (build->loader && !build->pipeline->Handle()) {
+            // gow3 (GOW3_PRECOMPILE_LOAD): the driver refused it (logged when built): dropped,
+            // so a draw builds this pipeline itself.
+            ++load_builds_failed;
+            it = pending_graphics.erase(it);
             continue;
         }
         const auto key = it.key();
@@ -693,6 +732,7 @@ void PipelineCache::PublishGraphics(bool wait) {
             ++g_gow3_fast_builds;
         }
         ++num_new_pipelines;
+        load_builds_published += build->loader;
         it = pending_graphics.erase(it);
     }
 }
@@ -897,6 +937,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!refreshed) {
         if (sel.compilation_pending) {
             ++g_gow3_pending_draws;
+            if (Precompile::g_load_trace.load(std::memory_order_relaxed)) {
+                Precompile::g_load_trace_skipped.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         return nullptr;
     }
@@ -904,43 +947,36 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         found != graphics_pipelines.end()) {
         return found->second.get();
     }
+    if (precompile) {
+        CapturePrecompile();
+    }
     // gow3: the policy decides only for a missing build; one a worker already has stays with it.
     const bool background =
         AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect();
+    // gow3 (GOW3_PRECOMPILE_LOAD): a miss the draw would build itself and skip waits for the
+    // loader's pipelines not handed over yet, which may include this one; a key the loader did
+    // not build goes on to the draw's own build. Only `sel` gets here: the draw-preparation
+    // workers and the loader's own selections never call GetGraphicsPipeline.
+    if (background && !pending_graphics.contains(sel.graphics_key) &&
+        PrecompileLoadHoldPipelines()) {
+        if (const auto found = graphics_pipelines.find(sel.graphics_key);
+            found != graphics_pipelines.end()) {
+            return found->second.get();
+        }
+    }
     if (background || pending_graphics.contains(sel.graphics_key)) {
         if (background && !pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_gow3_snapshot_ns};
-            auto build = std::make_shared<AsyncGraphicsCompilation>();
-            build->selection = sel;
-            build->selection.regs = nullptr;
-            build->live_infos = sel.infos;
-            for (u32 i = 0; i < MaxShaderStages; ++i) {
-                if (sel.infos[i]) {
-                    build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
-                    build->user_data[i].assign(sel.infos[i]->user_data.begin(), sel.infos[i]->user_data.end());
-                    build->infos[i]->user_data = build->user_data[i];
-                    build->selection.infos[i] = build->infos[i].get();
-                    build->fetch[i].Capture(*build->infos[i]);
-                }
-            }
-            const bool queued = build->job.Start(*compiler, [this, build] {
-                // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
-                Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
-                PhaseTimer compile{g_gow3_async_ns};
-                auto& s = build->selection;
-                build->pipeline = std::make_unique<GraphicsPipeline>(
-                    instance, scheduler, desc_heap, profile, s.graphics_key,
-                    *worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
-                    s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false,
-                    fast_first_builds ? PipelineBuild::Fast : PipelineBuild::Optimized);
-                return build;
-            });
-            if (queued) {
-                pending_graphics.emplace(sel.graphics_key, std::move(build));
+            const bool started = StartGraphicsBuild(sel, sel.infos, false) != nullptr;
+            capture.Stop();
+            if (started && precompile_load) {
+                PrecompileLoadTraceDraw(); // gow3 diagnostic, GOW3_PRECOMPILE_LOAD_TRACE
             }
         }
+        // gow3 (GOW3_PRECOMPILE_LOAD): one the loader is building is waited for while loading.
         if (const auto pending = pending_graphics.find(sel.graphics_key);
-            pending != pending_graphics.end() && GraceWait(pending->second->job)) {
+            pending != pending_graphics.end() &&
+            (WaitLoadBuild(*pending->second) || GraceWait(pending->second->job))) {
             PublishGraphics(); // #154: built within the grace wait, drawn now
             if (const auto found = graphics_pipelines.find(sel.graphics_key);
                 found != graphics_pipelines.end()) {
@@ -948,10 +984,16 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             }
         }
         ++g_gow3_pending_draws;
+        if (Precompile::g_load_trace.load(std::memory_order_relaxed)) {
+            Precompile::g_load_trace_skipped.fetch_add(1, std::memory_order_relaxed);
+        }
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     if (is_new) {
+        if (precompile_load) {
+            PrecompileLoadTraceDraw(); // gow3 diagnostic, GOW3_PRECOMPILE_LOAD_TRACE
+        }
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
@@ -977,6 +1019,111 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         sel.fetch_shader.reset();
     }
     return it->second.get();
+}
+
+std::shared_ptr<AsyncGraphicsCompilation> PipelineCache::StartGraphicsBuild(
+    const PipelineSelection& sel, const std::array<const Shader::Info*, MaxShaderStages>& live,
+    bool loader) {
+    auto build = std::make_shared<AsyncGraphicsCompilation>();
+    build->selection = sel;
+    build->selection.regs = nullptr;
+    build->selection.worker = nullptr;
+    build->live_infos = live;
+    build->loader = loader;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (sel.infos[i]) {
+            build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
+            build->user_data[i].assign(sel.infos[i]->user_data.begin(), sel.infos[i]->user_data.end());
+            build->infos[i]->user_data = build->user_data[i];
+            build->selection.infos[i] = build->infos[i].get();
+            build->fetch[i].Capture(*build->infos[i]);
+        }
+    }
+    const bool queued = build->job.Start(*compiler, [this, build] {
+        // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
+        Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
+        PhaseTimer compile{g_gow3_async_ns};
+        t_loader_build = build->loader;
+        SCOPE_EXIT {
+            t_loader_build = false;
+        };
+        auto& s = build->selection;
+        build->pipeline = std::make_unique<GraphicsPipeline>(
+            instance, scheduler, desc_heap, profile, s.graphics_key,
+            *worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
+            s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false,
+            fast_first_builds ? PipelineBuild::Fast : PipelineBuild::Optimized);
+        return build;
+    });
+    if (!queued) {
+        return nullptr;
+    }
+    pending_graphics.emplace(sel.graphics_key, build);
+    return build;
+}
+
+Precompile::PipelineStep PipelineCache::StartLoadPipeline(const PipelineSelection& selection,
+                                                          const PrepWorker& worker,
+                                                          const char** why) {
+    using Precompile::PipelineStep;
+    const auto& key = selection.graphics_key;
+    if (graphics_pipelines.contains(key) || pending_graphics.contains(key)) {
+        return PipelineStep::Have;
+    }
+    if (EmulatorSettings.IsShaderCollect()) {
+        if (why) {
+            *why = "shader collection is on";
+        }
+        return PipelineStep::Dropped; // no background build either (GetGraphicsPipeline)
+    }
+    // The published pipeline binds each program's own Info, as a draw's does; the worker's
+    // copies only feed the build's snapshot.
+    std::array<const Shader::Info*, MaxShaderStages> live{};
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (!selection.infos[i]) {
+            continue;
+        }
+        const auto found = std::ranges::find_if(worker.infos, [&](const auto& item) {
+            return &item.second == selection.infos[i];
+        });
+        if (found == worker.infos.end()) {
+            if (why) {
+                *why = "a stage's Info is not the selection's";
+            }
+            return PipelineStep::Dropped;
+        }
+        live[i] = &found->first->info;
+    }
+    SeedWorkerCaches();
+    return StartGraphicsBuild(selection, live, true) ? PipelineStep::Queued : PipelineStep::Full;
+}
+
+bool PipelineCache::WaitLoadBuilds(u64 until_ns) {
+    for (const auto& [_, build] : pending_graphics) {
+        if (!build->loader || !build->job.Pending()) {
+            continue; // a draw's, or published or failed already
+        }
+        const u64 now = CompilePolicy::Now();
+        if (now >= until_ns || !build->job.WaitFor(std::chrono::nanoseconds{until_ns - now})) {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t PipelineCache::LoadBuildsRunning() const {
+    return std::ranges::count_if(pending_graphics, [](const auto& item) {
+        return item.second->loader && item.second->job.Pending();
+    });
+}
+
+bool PipelineCache::WaitLoadBuild(const AsyncGraphicsCompilation& build) {
+    if (!build.loader || !build.job.Pending()) {
+        return false;
+    }
+    return PrecompileLoadWait([&build](u64 left_ns) {
+        return build.job.WaitFor(std::chrono::nanoseconds{left_ns});
+    });
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
@@ -1399,13 +1546,25 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
+    if (sel.boot) {
+        // gow3: the start-up rebuild from a precompile list translates its own programs.
+        return BootProgram(sel, hw_stage, sw_stage, params, binding, runtime_info);
+    }
     if (sel.worker) {
         // gow3: draw-preparation worker: look up only, with the worker's own Info copy.
         auto& worker = *sel.worker;
+        if (sel.from_store && DiskShadersActive() && !program_cache.contains(params.hash)) {
+            // GPU command thread, the only writer (LoadDiskProgram takes the lock itself).
+            LoadDiskProgram(params.hash);
+        }
         std::shared_lock lk{programs_mutex};
         const auto found_program = program_cache.find(params.hash);
         if (found_program == program_cache.end() || !found_program->second->info_template) {
             worker.failed = true;
+            worker.failure = found_program == program_cache.end()
+                                 ? "program neither in use nor in the store"
+                                 : "program's translation pending";
+            worker.failed_stage = u32(sw_stage);
             return {};
         }
         const Program* program = found_program->second.get();
@@ -1417,18 +1576,33 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // pointers in the registers; ahead of the GPU thread that memory may already be
         // reused. A fault returns here (runtime_fault_recover) and the draw is left to the GPU
         // thread. A jump out of the specialization leaks its partial allocations (rare).
+        // The precompile loader keeps its own recovery point around the whole selection.
+        sigjmp_buf* const outer = runtime_fault_recover;
         sigjmp_buf recover;
         if (sigsetjmp(recover, 0)) {
+            runtime_fault_recover = outer;
             worker.failed = true;
+            worker.failure = "read faulted in its specialization";
+            worker.failed_stage = u32(sw_stage);
             return {};
         }
         runtime_fault_recover = &recover;
         info.RefreshFlatBuf();
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
-        runtime_fault_recover = nullptr;
+        runtime_fault_recover = outer;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
         if (it == program->modules.end()) {
             worker.failed = true;
+            worker.failure = "permutation missing";
+            worker.failed_stage = u32(sw_stage);
+            if (sel.from_store) {
+                // The loader may translate it (PrecompileBoot::AddVariant), with the bindings
+                // this stage started from.
+                worker.missing_spec = std::move(spec);
+                worker.missing_binding = binding;
+                worker.missing_runtime = runtime_info;
+                worker.missing_hw = hw_stage;
+            }
             return {};
         }
         info.AddBindings(binding);
@@ -1440,6 +1614,15 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     }
 
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
+    if (it_pgm == program_cache.end()) {
+        Precompile::ScanProgramUsed(params.hash); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
+        // gow3 diagnostic GOW3_PRECOMPILE_LOAD: may build list entries into the store first,
+        // and its pipeline selections may read programs from it, this one too: found again.
+        PrecompileLoadFirstUse(params.hash);
+        if (precompile_load) {
+            it_pgm = program_cache.find(params.hash);
+        }
+    }
     if (it_pgm == program_cache.end() && DiskShadersActive() && LoadDiskProgram(params.hash)) {
         it_pgm = program_cache.find(params.hash);
     }
@@ -1507,9 +1690,6 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
-    size_t perm_idx = NewPermutationIndex(*program);
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
-
     vk::ShaderModule module{};
 
     // gow3: consecutive draws of a program almost always use the same permutation.
@@ -1517,10 +1697,18 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                       program->modules[program->last_used].spec == spec
                   ? program->modules.begin() + program->last_used
                   : std::ranges::find(program->modules, spec, &Program::Module::spec);
+    if (it == program->modules.end() && DiskShadersActive() && LoadDiskProgram(params.hash)) {
+        // gow3: the warm-up merged only some of its saved slots: the rest are read first.
+        it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+    }
+    size_t perm_idx;
+    u64 perm_hash;
     if (it != program->modules.end()) {
         program->last_used = std::distance(program->modules.begin(), it);
     }
     if (it == program->modules.end()) {
+        perm_idx = NewPermutationIndex(*program);
+        perm_hash = HashCombine(params.hash, perm_idx);
         if (program->pending || std::ranges::find(program->failed_permutations, spec) !=
                                     program->failed_permutations.end()) {
             return {};

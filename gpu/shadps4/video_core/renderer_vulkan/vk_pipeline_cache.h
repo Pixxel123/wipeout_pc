@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <variant>
 #include <boost/container/static_vector.hpp>
@@ -17,6 +18,8 @@
 #include "shader_recompiler/specialization.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_precompile_load.h"
+#include "video_core/renderer_vulkan/vk_precompile_record.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
 
@@ -114,6 +117,13 @@ struct PipelineSelection {
     bool compilation_pending = false;
     DrawIndirectParams draw_indirect_params{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
+    /// gow3 (GOW3_PRECOMPILE_LOAD): with `worker`, on the GPU command thread: the lookup first
+    /// reads a program missing from program_cache from the store (LoadDiskProgram). It still
+    /// translates nothing: a missing program or permutation fails the selection.
+    bool from_store = false;
+    /// gow3: set: a start-up rebuild from a precompile list (vk_precompile_boot.cpp) translates
+    /// the programs, not program_cache.
+    struct PrecompileBoot* boot{};
 };
 
 /// gow3: a draw-preparation worker's own program state (see vk_draw_prep.h).
@@ -129,9 +139,29 @@ struct PrepWorker {
     std::unordered_map<const Program*, Shader::Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
     bool failed = false;
+    /// gow3 (GOW3_PRECOMPILE_LOAD_TRACE): why the lookup failed (a static text) and the
+    /// SwStage it failed at, so the loader's trace can say which program or permutation it was.
+    const char* failure = nullptr;
+    u32 failed_stage = 0;
+    /// gow3 (GOW3_PRECOMPILE_LOAD): for a loader selection (`from_store`) whose program lacks
+    /// the stage's permutation, the spec it looked up (its Info is the one in `infos`) and the
+    /// stage's bindings at its start, runtime info and hardware stage, so the loader can
+    /// translate it (PrecompileBoot::AddVariant).
+    std::optional<Shader::StageSpecialization> missing_spec;
+    Shader::Backend::Bindings missing_binding{};
+    Shader::RuntimeInfo missing_runtime{};
+    Shader::HwStage missing_hw{};
 };
 
 struct PreparedDraw;
+
+/// gow3 (GOW3_PRECOMPILE_BOOT, vk_precompile_boot.cpp): the start-up rebuild and the list it
+/// translated, kept for its pipeline pass (PipelineCache::BuildPrecompilePipelines).
+struct PrecompileBootRun;
+struct PrecompileBootDeleter {
+    void operator()(PrecompileBootRun* run) const;
+};
+using PrecompileBootPtr = std::unique_ptr<PrecompileBootRun, PrecompileBootDeleter>;
 
 class PipelineCache {
 public:
@@ -145,7 +175,14 @@ public:
     /// gow3: the same load on low-priority threads while the game runs; the GPU thread takes
     /// the results a few at a time (PumpWarmUp). False when it cannot (zip archive store).
     bool StartBackgroundWarmUp();
-    void StartOnDemand();
+    /// `progress(done, total)`: only while a start-up rebuild runs (PreparePrecompileList,
+    /// RunPrecompileList, BuildPrecompilePipelines).
+    void StartOnDemand(const std::function<void(u32 done, u32 total)>& progress);
+    /// gow3 (GOW3_PRECOMPILE_BOOT) without on-demand pipelines: the start-up rebuild and its
+    /// pipeline pass, once per translator, before WarmUp or StartBackgroundWarmUp; the session
+    /// then numbers permutations as the store does (disk_shaders). True when the saved shader
+    /// files were dropped for it; the presenter then skips the warm-up.
+    bool PrecompileBootBeforeWarmUp(const std::function<void(u32 done, u32 total)>& progress);
     void Sync();
     void ReportCompilerStats();
 
@@ -174,6 +211,13 @@ public:
     }
 
     const ComputePipeline* GetComputePipeline();
+
+    /// gow3 diagnostic (GOW3_PRECOMPILE_RECORD): reports the recording every few seconds.
+    /// GPU command thread, between submissions.
+    void ReportPrecompile();
+    /// gow3 diagnostic (GOW3_PRECOMPILE_LOAD): builds list entries while loading. GPU command
+    /// thread, between submissions.
+    void PumpPrecompileLoad();
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
                               std::optional<Shader::Gcn::FetchShaderData>, u64>;
@@ -211,11 +255,96 @@ private:
     bool RefreshGraphicsKey(PipelineSelection& sel);
     bool RefreshGraphicsStages(PipelineSelection& sel);
     bool RefreshComputeKey();
+    friend struct PrecompileRecord;
+    void CapturePrecompile();
+    friend struct PrecompileBoot;
+    /// gow3 (GOW3_PRECOMPILE_BOOT, vk_precompile_boot.cpp): the start-up rebuild in two steps.
+    /// PreparePrecompileList reads the list and the code it needs from the game files, before
+    /// anything is dropped: true keeps them for RunPrecompileList. False without a list, with
+    /// the switch off, a list that cannot be read or no fault guard, and (logged as skipped)
+    /// when the game files gave too little of that code or the list needs code and has no index
+    /// (GameCodeSuffices); the start then goes on as without a list.
+    bool PreparePrecompileList(const std::function<void(u32 done, u32 total)>& progress);
+    /// Translates the prepared list into the store after a recompiler change dropped its
+    /// shaders; false when nothing was prepared or the rebuild stopped. `progress(done, total)`
+    /// follows the entries (Precompile::BootProgressOf).
+    bool RunPrecompileList(const std::function<void(u32 done, u32 total)>& progress);
+    /// gow3 (GOW3_PRECOMPILE_BOOT): after RunPrecompileList and IndexDiskShaders, builds
+    /// the pipeline of every entry the rebuild built before the start goes on, unless
+    /// GOW3_PRECOMPILE_BOOT_PIPELINES=0; then releases the rebuild. Nothing without one.
+    /// `on_screen(done, total)` goes on from the rebuild's count.
+    void BuildPrecompilePipelines(const std::function<void(u32 done, u32 total)>& on_screen);
+    Result BootProgram(PipelineSelection& sel, Shader::HwStage hw_stage, Shader::SwStage sw_stage,
+                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding,
+                       const Shader::RuntimeInfo& runtime_info);
+    friend struct PrecompileLoad;
+    /// gow3 (GOW3_PRECOMPILE_LOAD): neither in use nor saved in the store, so the loader may
+    /// translate it and number its permutations from 0. GPU command thread.
+    [[nodiscard]] bool ProgramNeeded(u64 hash) const {
+        return !program_cache.contains(hash) && !disk_permutations.contains(hash);
+    }
+    /// gow3 (GOW3_PRECOMPILE_LOAD): the Info GetProgram binds a program in use or saved with;
+    /// false while there is none yet. GPU command thread.
+    bool InUseInfo(u64 hash, Shader::Info& info);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): permutations the loader saved, for LoadDiskProgram;
+    /// `saved` keeps those it indexed.
+    void AddSavedPermutations(std::vector<std::pair<u64, u32>>& saved);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): a variant the loader translated for a program in use,
+    /// inserted at the index the game would give it (NewPermutationIndex) and saved there.
+    /// False, writing nothing, when the program is gone, has a translation pending, would take
+    /// an index of Precompile::MaxPermutations or more, has a shader patch at that index (with
+    /// patching on) or its module cannot be created; an equal spec already there inserts
+    /// nothing, returns true and sets `inserted_out` false. GPU command thread, or at start the
+    /// thread of StartOnDemand or PrecompileBootBeforeWarmUp (the rebuild's pipeline pass,
+    /// before the game runs).
+    bool InsertLoadVariant(u64 hash, std::vector<u32>&& spv, Shader::StageSpecialization&& spec,
+                           bool& inserted_out);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): GetProgram, a program not in program_cache; while loading
+    /// the draw may wait for the loader here. Its pipeline selections may read programs from
+    /// the store into program_cache.
+    void PrecompileLoadFirstUse(u64 hash);
+    /// gow3: hands the pipeline `sel` selected to the compile workers, as a draw's background
+    /// build; null when their queue is full. `live`: the Infos the published pipeline binds,
+    /// `loader`: the loader's build (AsyncGraphicsCompilation::loader).
+    std::shared_ptr<AsyncGraphicsCompilation> StartGraphicsBuild(
+        const PipelineSelection& sel, const std::array<const Shader::Info*, MaxShaderStages>& live,
+        bool loader);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): the pipeline a loader selection (`worker`, `from_store`)
+    /// found, handed to the compile workers unless it is built or being built. GPU command
+    /// thread, or at start the thread of StartOnDemand or PrecompileBootBeforeWarmUp (the
+    /// rebuild's pipeline pass), while the selection's shadow copy is mapped: the build's
+    /// snapshot reads it.
+    /// `why`, when set, gets why it was dropped (GOW3_PRECOMPILE_LOAD_TRACE).
+    Precompile::PipelineStep StartLoadPipeline(const PipelineSelection& selection,
+                                               const PrepWorker& worker,
+                                               const char** why = nullptr);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): whether every build the loader handed over is done by
+    /// `until_ns` (CompilePolicy::Now), waiting for them until then. GPU command thread, or at
+    /// start the thread of StartOnDemand or PrecompileBootBeforeWarmUp (the rebuild's pipeline
+    /// pass).
+    bool WaitLoadBuilds(u64 until_ns);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): builds the loader handed over that are not published yet.
+    [[nodiscard]] size_t LoadBuildsRunning() const;
+    /// gow3 (GOW3_PRECOMPILE_LOAD): a draw of a pipeline the loader is building waits for it
+    /// while loading, from the loading state's hold budget; true when it is built.
+    bool WaitLoadBuild(const AsyncGraphicsCompilation& build);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): a draw's pipeline miss, before it builds the pipeline
+    /// itself: while loading, waits for the loader's pipelines not handed over or still
+    /// building, from the loading state's hold budget; true when it held. False without it.
+    bool PrecompileLoadHoldPipelines();
+    /// gow3 (GOW3_PRECOMPILE_LOAD): `wait(left_ns)` while loading with hold budget left, the
+    /// time it takes counted as held; false (no wait) otherwise, else what `wait` returned.
+    bool PrecompileLoadWait(const std::function<bool(u64 left_ns)>& wait);
+    /// gow3 (GOW3_PRECOMPILE_LOAD_TRACE): a draw starts its own build of the pipeline `sel`
+    /// selected; with the trace a line on what the list has of its programs. GPU command thread.
+    void PrecompileLoadTraceDraw();
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
     std::optional<std::vector<u32>> GetShaderPatch(u64 hash, Shader::HwStage stage, size_t perm_idx,
                                                    std::string_view ext);
+    /// gow3 (GOW3_PRECOMPILE_LOAD): a module from SPIR-V; null when the driver refuses it.
+    vk::ShaderModule TryCreateShaderModule(std::span<const u32> spv);
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
                                    Shader::Backend::Bindings& binding);
@@ -264,9 +393,9 @@ private:
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
-    /// gow3 (Gow3Toggle::DiskShaders): with on-demand startup, a program missing from
-    /// program_cache is first read from the store at its saved permutation indices, instead of
-    /// being translated again.
+    /// gow3 (Gow3Toggle::DiskShaders): with on-demand startup, or a warm-up after
+    /// PrecompileBootBeforeWarmUp, a program missing from program_cache is first read from the
+    /// store at its saved permutation indices, instead of being translated again.
     bool disk_shaders = false;
     bool disk_store_untrusted = false; ///< the bit went off live: the marker was reset
     std::unordered_map<u64, std::vector<u32>> disk_permutations; ///< pgm hash -> saved indices
@@ -279,14 +408,40 @@ private:
         u64 keys_skipped, keys_written;
     } disk_stats{}, disk_reported{};
     std::chrono::steady_clock::time_point disk_report{};
+    /// GOW3_DISK_SHADERS and the toggle bit allow disk shaders (StartOnDemand,
+    /// PrecompileBootBeforeWarmUp).
+    [[nodiscard]] bool DiskShadersWanted() const;
     [[nodiscard]] bool DiskShadersActive() const;
     void IndexDiskShaders();
+    /// The shared part of StartOnDemand and PrecompileBootBeforeWarmUp, with the store open,
+    /// concurrent reads and disk shaders wanted: index the store, or read the list and rebuild.
+    /// `compatible`: CheckCacheProfile's result. `renew_store_without_build`: a list that is not
+    /// ready still drops the store and saves the marker (StartOnDemand); false leaves the store
+    /// and disk_shaders as they were. `driver_key`: the driver's pipeline-binary key
+    /// (StartOnDemand), empty for no check; a store marked by this build whose recorded key
+    /// differs is rebuilt when the list is ready (DiskShaderStartOf). True when the saved shader
+    /// files were dropped.
+    bool BeginDiskShaders(bool compatible, bool renew_store_without_build,
+                          const std::vector<u8>& driver_key,
+                          const std::function<void(u32 done, u32 total)>& progress);
+    /// Drops the saved shader files `marker` does not vouch for, runs the start-up rebuild and
+    /// builds the rebuild's pipelines with disk_shaders on; then records `driver_key`
+    /// (ShaderProfile/driver_key) unless empty, and this build's marker (DiskShaderMarker).
+    void RebuildDiskShaders(const std::vector<u8>& marker, const std::vector<u8>& driver_key,
+                            const std::function<void(u32 done, u32 total)>& progress);
     bool LoadDiskProgram(u64 hash);
     /// Index for a new permutation: a slot the store left empty, else the next one.
     [[nodiscard]] size_t NewPermutationIndex(const Program& program) const;
     /// False when this pipeline key is already in the store (nothing to write).
     bool NewPipelineKey(const std::string& name);
     void ReportDiskShaders();
+
+    PrecompileRecordPtr precompile; ///< gow3: the recorder, null unless GOW3_PRECOMPILE_RECORD
+    PrecompileLoadPtr precompile_load; ///< gow3: the loader, null unless GOW3_PRECOMPILE_LOAD
+    /// gow3: the start-up rebuild until its pipeline pass ends, null otherwise.
+    PrecompileBootPtr precompile_boot;
+    /// gow3 (GOW3_PRECOMPILE_LOAD): the loader's builds published and failed (PublishGraphics).
+    u64 load_builds_published = 0, load_builds_failed = 0;
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

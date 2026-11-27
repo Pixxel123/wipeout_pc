@@ -17,6 +17,7 @@
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/vk_precompile_list.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
@@ -327,10 +328,44 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
                               EmulatorSettings.IsPipelineCacheEnabled();
     const bool capture_only = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARY_ISOLATED", false) &&
                               EmulatorSettingsImpl::Flag("GOW3_PIPELINE_CAPTURE_ONLY", false);
+    // gow3 (GOW3_PRECOMPILE_BOOT): a start-up rebuild shows its count; without one nothing is
+    // presented here. The first call presents at once.
+    std::chrono::steady_clock::time_point last_shown{};
+    const auto prepare_shaders = [&](u32 done, u32 total) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_shown < std::chrono::milliseconds(250)) {
+            return;
+        }
+        last_shown = now;
+        Gow3Overlay::SetLoading(true, done, total);
+        PresentLoadingFrame();
+    };
     if (UseOnDemandPipelines(binary_cache, instance.GetPipelineBinaryGlobalKey().keySize != 0,
                             capture_only, background_warmup)) {
-        rasterizer->GetPipelineCache().StartOnDemand();
+        Gow3Overlay::SetLoadingKind(Gow3Overlay::LoadingKind::PrepareShaders);
+        rasterizer->GetPipelineCache().StartOnDemand(prepare_shaders);
+        Gow3Overlay::SetLoading(false, 0, 0);
+        Gow3Overlay::SetLoadingKind(Gow3Overlay::LoadingKind::ShaderCache);
         return;
+    }
+
+    // gow3 (GOW3_PRECOMPILE_BOOT): with pipeline binaries off (NVIDIA) the rebuild runs before
+    // the warm-up. A start that rebuilt skips the warm-up: the saved shaders were dropped for
+    // the rebuild, the list's pipelines are built, and the blocking WarmUp expects none built.
+    const bool boot_requested = Precompile::BootRequested() && !Precompile::LoadRequested();
+    const std::string list = boot_requested ? Precompile::BootListPath() : std::string{};
+    std::error_code list_error;
+    const bool list_present = !list.empty() && std::filesystem::exists(list, list_error);
+    if (RunsPrecompileBoot(boot_requested, list_present, capture_only)) {
+        Gow3Overlay::SetLoadingKind(Gow3Overlay::LoadingKind::PrepareShaders);
+        const bool rebuilt =
+            rasterizer->GetPipelineCache().PrecompileBootBeforeWarmUp(prepare_shaders);
+        Gow3Overlay::SetLoading(false, 0, 0);
+        Gow3Overlay::SetLoadingKind(Gow3Overlay::LoadingKind::ShaderCache);
+        if (rebuilt) {
+            std::printf("Pipeline startup: no warm-up after the start-up rebuild\n");
+            return;
+        }
     }
 
     // gow3: by default the cached pipelines load while the game runs (a corner note shows the
