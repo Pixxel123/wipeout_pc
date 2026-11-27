@@ -27,6 +27,8 @@ struct CompilePolicy {
     std::atomic<u32> flip_loads{0};
     std::atomic<bool> loading{true};     ///< no scene yet since the start or the last load
     std::atomic<bool> load_grace{false}; ///< set by the pipeline cache: the longer wait is in use
+    /// The draw count when the GPU command thread last decoded a flip (FlipDecoded).
+    std::atomic<u64> decoded_flip_draws{0};
 
     static u64 Now() {
         return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -67,14 +69,40 @@ struct CompilePolicy {
                (loading.load(std::memory_order_relaxed) ||
                 now_ns < long_grace_until_ns.load(std::memory_order_relaxed));
     }
+
+    /// GPU command thread, where it decodes a flip, in draw order (the flip packet, or a flip
+    /// submitted without one): `draws` counts every draw so far.
+    void FlipDecoded(u64 draws) {
+        decoded_flip_draws.store(draws, std::memory_order_relaxed);
+    }
+
+    /// GPU command thread, at each draw: `draws` counts every draw so far, this one included.
+    /// True when the frame being drawn reaches scene_draws draws since the last flip decoded:
+    /// a scene frame, before its flip is requested. Unlike Flipped, nothing here waits for the
+    /// present thread to take a flip.
+    bool SceneFrameReached(u64 draws) const {
+        const u64 flip = decoded_flip_draws.load(std::memory_order_relaxed);
+        return draws >= flip && draws - flip >= scene_draws;
+    }
 };
 
 inline CompilePolicy g_compile_policy;
 
+/// gow3: the start of the process as the start-up log lines count it: when the statics are set
+/// up, before the game's code runs.
+inline const std::chrono::steady_clock::time_point g_process_start =
+    std::chrono::steady_clock::now();
+
+inline unsigned long long MsSinceStart() {
+    return static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - g_process_start)
+                                               .count());
+}
+
 /// gow3 (GOW3_PRECOMPILE_BOOT): set on a compile worker while it builds a pipeline the start-up
 /// pipeline pass handed over. Its compile leaves the policy alone (CreateCachedGraphicsPipeline):
-/// the pass builds the list's pipelines before the game runs, which is no sign of a draw's
-/// pipelines coming now.
+/// the pass builds the list's pipelines before the game draws them, which is no sign of a
+/// draw's pipelines coming now.
 inline thread_local bool t_pass_build = false;
 
 } // namespace Vulkan

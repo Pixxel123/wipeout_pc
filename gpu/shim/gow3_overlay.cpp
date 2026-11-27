@@ -76,6 +76,7 @@ std::atomic<bool> loading{false};
 std::atomic<u32> loading_done{0}, loading_total{0};
 std::atomic<LoadingKind> loading_kind{LoadingKind::ShaderCache};
 std::atomic<u32> background_done{0}, background_total{0};
+std::atomic<LoadingKind> background_kind{LoadingKind::ShaderCache};
 // A short message in a corner (saved screenshot), shown until notice_until.
 std::mutex notice_mutex;
 std::string notice_text;
@@ -1017,7 +1018,12 @@ void BackgroundLoading() {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::TextDisabled("Loading shader cache %u%%", u32(u64(done) * 100 / total));
+    const u32 percent = u32(u64(done) * 100 / total);
+    if (background_kind == LoadingKind::PrepareShaders) {
+        ImGui::TextDisabled("Preparing shaders %u%%", percent);
+    } else {
+        ImGui::TextDisabled("Loading shader cache %u%%", percent);
+    }
     ImGui::End();
 }
 
@@ -1393,7 +1399,8 @@ void ConfirmRestart() {
     std::puts("Settings: graphics options confirmed after restart");
 }
 
-void SetBackgroundLoading(u32 done, u32 total) {
+void SetBackgroundLoading(u32 done, u32 total, LoadingKind kind) {
+    background_kind = kind;
     background_done = done;
     background_total = total;
 }

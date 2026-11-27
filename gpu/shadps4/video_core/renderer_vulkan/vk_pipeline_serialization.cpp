@@ -1197,6 +1197,11 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
         IndexDiskShaders();
         // The pass's selections read programs from the store (DiskShadersActive).
         disk_shaders = true;
+        // By default the pass runs behind the game's first screens and saves the key and the
+        // marker when it ends (EndPrecompilePass).
+        if (StartPrecompilePass(driver_key)) {
+            return;
+        }
         BuildPrecompilePipelines(progress);
     }
     // gow3: the build counts as done only once its pipeline pass has ended: the driver's key
@@ -1205,8 +1210,20 @@ void PipelineCache::RebuildDiskShaders(const std::vector<u8>& marker,
     // time. Also when there was no list or the rebuild could not run (its crash marker not
     // written), else every start would drop the store again. A later start with another key
     // builds again (DiskShaderStartOf).
+    SaveDiskShaderBuild(driver_key);
+}
+
+void PipelineCache::SaveDiskShaderBuild(const std::vector<u8>& driver_key) {
+    auto& db = Storage::DataBase::Instance();
     if (!driver_key.empty()) {
         db.Save(Storage::BlobType::ShaderProfile, "driver_key", std::vector<u8>{driver_key});
+    }
+    // Only a background pass can end after a draw: ReportDiskShaders has reset the marker
+    // when disk shaders were switched off live, and this session numbers permutations by
+    // first use since.
+    if (disk_store_untrusted) {
+        std::printf("Precompile boot: the store is not marked: disk shaders were switched off\n");
+        return;
     }
     db.Save(Storage::BlobType::ShaderProfile, "disk_shaders", DiskShaderMarker());
 }

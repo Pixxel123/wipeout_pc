@@ -22,6 +22,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_compile_policy.h"
 #include "video_core/renderer_vulkan/vk_depth_stencil_state.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -1006,7 +1007,18 @@ bool Rasterizer::FilterDrawPasses() const {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
-    Gow3Stats::draws.fetch_add(1, std::memory_order_relaxed);
+    const u64 draws = Gow3Stats::draws.fetch_add(1, std::memory_order_relaxed) + 1;
+    // gow3 (GOW3_PRECOMPILE_BACKGROUND): the start-up rebuild's pipeline pass ends at the
+    // 500th draw of the first scene frame, before its flip is requested; the recording thread
+    // is idle for it, as at a submission. No frame is flipped meanwhile: the screen keeps
+    // showing the last one.
+    if (pipeline_cache.PrecompilePassPending() &&
+        g_compile_policy.SceneFrameReached(draws)) [[unlikely]] {
+        const u64 frame_draws =
+            draws - g_compile_policy.decoded_flip_draws.load(std::memory_order_relaxed);
+        DrainDrawPipe(DrawPipe::ReasonDraw);
+        pipeline_cache.FinishPrecompilePassAtScene(frame_draws);
+    }
 
     // gow3: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
@@ -1621,6 +1633,7 @@ void Rasterizer::OnSubmit() {
     // gow3: the draw recording thread is idle now, so published pipelines may change handles.
     pipeline_cache.SwapRebuiltPipelines();
     pipeline_cache.ReportPrecompile();
+    pipeline_cache.PumpPrecompilePass();
     if (fault_process_pending) {
         fault_process_pending = false;
         buffer_cache.ProcessFaultBuffer();

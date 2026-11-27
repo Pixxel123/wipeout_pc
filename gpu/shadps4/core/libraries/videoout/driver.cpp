@@ -321,8 +321,9 @@ void VideoOutDriver::Flip(const Request& req) {
     if (Vulkan::g_compile_policy.Flipped(Vulkan::CompilePolicy::Now(),
                                          Gow3Stats::draws.load(std::memory_order_relaxed),
                                          runtime_music_loads())) {
-        std::printf("Pipelines: first scene after a load; new pipelines may wait longer for "
-                    "%llu s more (GOW3_LOAD_GRACE=0: no)\n",
+        std::printf("Pipelines: first scene after a load at %llu ms since the start; new "
+                    "pipelines may wait longer for %llu s more (GOW3_LOAD_GRACE=0: no)\n",
+                    Vulkan::MsSinceStart(),
                     static_cast<unsigned long long>(Vulkan::CompilePolicy::after_load_ns /
                                                     1'000'000'000));
     }
@@ -669,7 +670,11 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
     Gow3PerfStats::game_frames.fetch_add(1, std::memory_order_relaxed);
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
+        // gow3: there the frame ends in draw order (CompilePolicy::FlipDecoded).
+        liverpool->SendCommand([=, this]() {
+            Vulkan::g_compile_policy.FlipDecoded(Gow3Stats::draws.load(std::memory_order_relaxed));
+            SubmitFlipInternal(port, index, flip_arg, is_eop);
+        });
     } else {
         SubmitFlipInternal(port, index, flip_arg, is_eop);
     }

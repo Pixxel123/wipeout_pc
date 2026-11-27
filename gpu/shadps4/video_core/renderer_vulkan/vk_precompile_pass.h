@@ -56,6 +56,27 @@ struct BootProgress {
     return {files_read + translated + pipelines_done, files + 2 * entries};
 }
 
+/// The same while the pipeline pass runs behind the game's first screens: the loading screen
+/// counts the files and the rebuild's entries only.
+[[nodiscard]] constexpr BootProgress BootTranslationProgressOf(u32 files, u32 entries,
+                                                               u32 files_read, u32 translated) {
+    return {files_read + translated, files + entries};
+}
+
+/// GOW3_PRECOMPILE_BACKGROUND (`value`, null when unset): the pipeline pass runs in the
+/// background unless it is 0, which keeps the blocking pass behind the loading screen.
+[[nodiscard]] constexpr bool BackgroundPassOn(const char* value) {
+    return !(value && value[0] == '0' && value[1] == '\0');
+}
+
+/// The background pass's slice per submission: no entry's selection starts after it.
+constexpr u64 PassSliceNs = 4'000'000;
+
+/// Whole tenths of the pipeline pass taken: `done` of `entries` (none: all of it).
+[[nodiscard]] constexpr u32 PassTenths(u32 done, u32 entries) {
+    return entries == 0 ? 10 : u32(u64(done) * 10 / entries);
+}
+
 /// Permutations a program takes: IndexDiskShaders reads indices below it.
 constexpr size_t MaxPermutations = 64;
 
