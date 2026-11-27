@@ -56,6 +56,14 @@ constexpr DiskShaderStart DiskShaderStartOf(bool marker_equal, bool key_recorded
                                                     : DiskShaderStart::IndexOnly;
 }
 
+/// gow3 (GOW3_PRECOMPILE_BOOT): whether a rebuild start skips the pipeline pass, as
+/// GOW3_PRECOMPILE_BOOT_PIPELINES=0 does. `unfinished`: the passes in a row that started and
+/// did not end (ShaderProfile/pass_attempts, 0 when absent). One unfinished pass (a quit) builds
+/// again; at two, a pass that crashes the game would crash every start, so the start skips it.
+constexpr bool SkipsPipelinePass(std::uint32_t unfinished) {
+    return unfinished >= 2;
+}
+
 /// gow3: whether the background warm-up leaves a saved stage alone because the game is
 /// translating a permutation of its program (`pending`). With first-use numbering that
 /// translation takes the next index, which may be the stage's. With the store's numbering it
