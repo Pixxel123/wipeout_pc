@@ -2164,6 +2164,9 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
     tracker.UpdatePageWatchers<false>(addr, size);
 }
 
+// diag: evictions at any memory level and the reserved pool's free space, for the 5 s line below.
+static u64 diag_evictions = 0, diag_evictions_total = 0, diag_pool_free = 0;
+
 void TextureCache::GarbageCollectImages() {
     Gow3Stats::Timer gc_timer{Gow3Stats::t_gc};
     if (instance.CanReportMemoryUsage()) {
@@ -2171,11 +2174,18 @@ void TextureCache::GarbageCollectImages() {
         // gow3: the driver counts the memory held at start for images (vk_memory_reserve.h) as
         // used in full, and an image freed in it frees nothing the driver sees. Its free part
         // counts as free here, so the marks below see the same use as without it.
+        // diag: GOW3_GC_POOL_FREE=0 counts the pool in full, as without this correction.
+        static const bool pool_free_as_free = [] {
+            const char* env = std::getenv("GOW3_GC_POOL_FREE");
+            return !env || env[0] != '0';
+        }();
         if (Vulkan::image_reserve_pool) {
             VmaStatistics pool{};
             vmaGetPoolStatistics(instance.GetAllocator(), Vulkan::image_reserve_pool, &pool);
-            total_used_memory -=
-                std::min<u64>(total_used_memory, pool.blockBytes - pool.allocationBytes);
+            diag_pool_free = pool.blockBytes - pool.allocationBytes;
+            if (pool_free_as_free) {
+                total_used_memory -= std::min<u64>(total_used_memory, diag_pool_free);
+            }
         }
         // gow3: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
         // much more than images (buffers backing guest memory), and the startup budget left
@@ -2280,6 +2290,24 @@ void TextureCache::GarbageCollectImages() {
             }
         }
     }
+    // diag: every 5 s with GOW3_FRAME_STATS, whether or not the pressure mark is reached.
+    if (Gow3Stats::enabled) {
+        static auto diag_time = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - diag_time >= std::chrono::seconds(5)) {
+            diag_evictions_total += diag_evictions;
+            std::printf("Texture cache: collector, used %llu MiB (start %llu, pressure %llu), "
+                        "pool free %llu MiB, %llu images evicted in 5 s, %llu since start\n",
+                        (unsigned long long)(total_used_memory >> 20),
+                        (unsigned long long)(trigger_gc_memory >> 20),
+                        (unsigned long long)(pressure_gc_memory >> 20),
+                        (unsigned long long)(diag_pool_free >> 20),
+                        (unsigned long long)diag_evictions,
+                        (unsigned long long)diag_evictions_total);
+            diag_time = now;
+            diag_evictions = 0;
+        }
+    }
     if (total_used_memory < trigger_gc_memory) {
         return;
     }
@@ -2329,6 +2357,7 @@ void TextureCache::GarbageCollectImages() {
             ++gc_downloads;
         }
         ++gc_evictions;
+        ++diag_evictions;
         FreeImage(image_id);
         if (total_used_memory < critical_gc_memory) {
             if (aggresive) {
