@@ -16,26 +16,26 @@ namespace Precompile {
 
 /// The pass hands a pipeline to the compile workers only while fewer tasks than this wait in
 /// their queue (64, shared with the shader translations): the rest stays for the draws.
-constexpr size_t LoadQueueDepth = 48;
+constexpr size_t PassQueueDepth = 48;
 
 /// What became of a built entry's pipeline.
 enum class PipelineStep {
     Have,    ///< built or being built already
     Queued,  ///< handed to the compile workers
-    Full,    ///< the workers' queue holds LoadQueueDepth tasks, or time is up: again later
+    Full,    ///< the workers' queue holds PassQueueDepth tasks, or time is up: again later
     Dropped, ///< not selected: a program or permutation is missing, or a read faulted
 };
 
 /// What a pass selection found of a stage's variant (permutation) it missed in its program.
-enum class LoadVariant : u8 {
+enum class PassVariant : u8 {
     Missing, ///< the program is in use or saved, without it
     Pending, ///< the program is in use and the game is translating a variant of it
 };
 
 /// Whether the pass translates a missing variant into the program and selects again: not
 /// while the game translates one (that takes the next index).
-[[nodiscard]] constexpr bool AddsVariant(LoadVariant found) {
-    return found == LoadVariant::Missing;
+[[nodiscard]] constexpr bool AddsVariant(PassVariant found) {
+    return found == PassVariant::Missing;
 }
 
 /// The pass's variants of programs in use or saved, added to them.

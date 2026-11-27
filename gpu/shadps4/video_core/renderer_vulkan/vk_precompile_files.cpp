@@ -11,7 +11,8 @@
 #include "video_core/renderer_vulkan/vk_precompile_files.h"
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
 
-// The gpu target links miniz (zlib's API under mz_ names); host tests link zlib itself.
+// The gpu target and the files test link miniz (zlib's API under mz_ names); a host build without
+// miniz.h on the include path links zlib itself.
 #if __has_include(<miniz.h>)
 #include <miniz.h>
 #else

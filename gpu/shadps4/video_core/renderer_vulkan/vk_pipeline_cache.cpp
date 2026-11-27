@@ -81,7 +81,7 @@ struct AsyncGraphicsCompilation {
     bool failure_logged = false;
     /// gow3 (GOW3_PRECOMPILE_BOOT): handed over by the pipeline pass, not by a draw: the compile
     /// leaves the compile policy alone, and a failed build leaves pending_graphics.
-    bool loader = false;
+    bool pass = false;
     // gow3: a fast first build is rebuilt optimised from the same snapshot (StartRebuilds).
     GraphicsPipeline* published = nullptr;
     AsyncJob<bool> rebuild;
@@ -686,19 +686,19 @@ void PipelineCache::PublishGraphics(bool wait) {
                           std::hash<GraphicsPipelineKey>{}(it.key()), build->job.Error());
                 build->failure_logged = true;
             }
-            if (build->job.Failed() && build->loader) {
+            if (build->job.Failed() && build->pass) {
                 // gow3 (GOW3_PRECOMPILE_BOOT): dropped, so a draw builds this pipeline itself.
-                ++load_builds_failed;
+                ++pass_builds_failed;
                 it = pending_graphics.erase(it);
                 continue;
             }
             ++it;
             continue;
         }
-        if (build->loader && !build->pipeline->Handle()) {
+        if (build->pass && !build->pipeline->Handle()) {
             // gow3 (GOW3_PRECOMPILE_BOOT): the driver refused it (logged when built): dropped,
             // so a draw builds this pipeline itself.
-            ++load_builds_failed;
+            ++pass_builds_failed;
             it = pending_graphics.erase(it);
             continue;
         }
@@ -717,7 +717,7 @@ void PipelineCache::PublishGraphics(bool wait) {
             ++g_gow3_fast_builds;
         }
         ++num_new_pipelines;
-        load_builds_published += build->loader;
+        pass_builds_published += build->pass;
         it = pending_graphics.erase(it);
     }
 }
@@ -982,13 +982,13 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
 
 std::shared_ptr<AsyncGraphicsCompilation> PipelineCache::StartGraphicsBuild(
     const PipelineSelection& sel, const std::array<const Shader::Info*, MaxShaderStages>& live,
-    bool loader) {
+    bool pass) {
     auto build = std::make_shared<AsyncGraphicsCompilation>();
     build->selection = sel;
     build->selection.regs = nullptr;
     build->selection.worker = nullptr;
     build->live_infos = live;
-    build->loader = loader;
+    build->pass = pass;
     for (u32 i = 0; i < MaxShaderStages; ++i) {
         if (sel.infos[i]) {
             build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
@@ -1002,9 +1002,9 @@ std::shared_ptr<AsyncGraphicsCompilation> PipelineCache::StartGraphicsBuild(
         // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
         Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
         PhaseTimer compile{g_gow3_async_ns};
-        t_loader_build = build->loader;
+        t_pass_build = build->pass;
         SCOPE_EXIT {
-            t_loader_build = false;
+            t_pass_build = false;
         };
         auto& s = build->selection;
         build->pipeline = std::make_unique<GraphicsPipeline>(
@@ -1021,7 +1021,7 @@ std::shared_ptr<AsyncGraphicsCompilation> PipelineCache::StartGraphicsBuild(
     return build;
 }
 
-Precompile::PipelineStep PipelineCache::StartLoadPipeline(const PipelineSelection& selection,
+Precompile::PipelineStep PipelineCache::StartPassPipeline(const PipelineSelection& selection,
                                                           const PrepWorker& worker,
                                                           const char** why) {
     using Precompile::PipelineStep;
@@ -1057,9 +1057,9 @@ Precompile::PipelineStep PipelineCache::StartLoadPipeline(const PipelineSelectio
     return StartGraphicsBuild(selection, live, true) ? PipelineStep::Queued : PipelineStep::Full;
 }
 
-bool PipelineCache::WaitLoadBuilds(u64 until_ns) {
+bool PipelineCache::WaitPassBuilds(u64 until_ns) {
     for (const auto& [_, build] : pending_graphics) {
-        if (!build->loader || !build->job.Pending()) {
+        if (!build->pass || !build->job.Pending()) {
             continue; // a draw's, or published or failed already
         }
         const u64 now = CompilePolicy::Now();
@@ -1070,9 +1070,9 @@ bool PipelineCache::WaitLoadBuilds(u64 until_ns) {
     return true;
 }
 
-size_t PipelineCache::LoadBuildsRunning() const {
+size_t PipelineCache::PassBuildsRunning() const {
     return std::ranges::count_if(pending_graphics, [](const auto& item) {
-        return item.second->loader && item.second->job.Pending();
+        return item.second->pass && item.second->job.Pending();
     });
 }
 

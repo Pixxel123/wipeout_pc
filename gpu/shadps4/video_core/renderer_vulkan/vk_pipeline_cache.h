@@ -18,7 +18,7 @@
 #include "shader_recompiler/specialization.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
-#include "video_core/renderer_vulkan/vk_precompile_load.h"
+#include "video_core/renderer_vulkan/vk_precompile_pass.h"
 #include "video_core/renderer_vulkan/vk_precompile_record.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
@@ -282,30 +282,30 @@ private:
     /// nothing, returns true and sets `inserted_out` false. GPU command thread, or at start the
     /// thread of StartOnDemand or PrecompileBootBeforeWarmUp (the rebuild's pipeline pass,
     /// before the game runs).
-    bool InsertLoadVariant(u64 hash, std::vector<u32>&& spv, Shader::StageSpecialization&& spec,
+    bool InsertPassVariant(u64 hash, std::vector<u32>&& spv, Shader::StageSpecialization&& spec,
                            bool& inserted_out);
     /// gow3: hands the pipeline `sel` selected to the compile workers, as a draw's background
     /// build; null when their queue is full. `live`: the Infos the published pipeline binds,
-    /// `loader`: a build the pipeline pass handed over (AsyncGraphicsCompilation::loader).
+    /// `pass`: a build the pipeline pass handed over (AsyncGraphicsCompilation::pass).
     std::shared_ptr<AsyncGraphicsCompilation> StartGraphicsBuild(
         const PipelineSelection& sel, const std::array<const Shader::Info*, MaxShaderStages>& live,
-        bool loader);
+        bool pass);
     /// gow3 (GOW3_PRECOMPILE_BOOT): the pipeline a pass selection (`worker`, `from_store`)
     /// found, handed to the compile workers unless it is built or being built. GPU command
     /// thread, or at start the thread of StartOnDemand or PrecompileBootBeforeWarmUp (the
     /// rebuild's pipeline pass), while the selection's shadow copy is mapped: the build's
     /// snapshot reads it.
     /// `why`, when set, gets why it was dropped.
-    Precompile::PipelineStep StartLoadPipeline(const PipelineSelection& selection,
+    Precompile::PipelineStep StartPassPipeline(const PipelineSelection& selection,
                                                const PrepWorker& worker,
                                                const char** why = nullptr);
     /// gow3 (GOW3_PRECOMPILE_BOOT): whether every build the pass handed over is done by
     /// `until_ns` (CompilePolicy::Now), waiting for them until then. GPU command thread, or at
     /// start the thread of StartOnDemand or PrecompileBootBeforeWarmUp (the rebuild's pipeline
     /// pass).
-    bool WaitLoadBuilds(u64 until_ns);
+    bool WaitPassBuilds(u64 until_ns);
     /// gow3 (GOW3_PRECOMPILE_BOOT): builds the pass handed over that are not published yet.
-    [[nodiscard]] size_t LoadBuildsRunning() const;
+    [[nodiscard]] size_t PassBuildsRunning() const;
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
@@ -408,7 +408,7 @@ private:
     /// gow3: the start-up rebuild until its pipeline pass ends, null otherwise.
     PrecompileBootPtr precompile_boot;
     /// gow3 (GOW3_PRECOMPILE_BOOT): the pass's builds published and failed (PublishGraphics).
-    u64 load_builds_published = 0, load_builds_failed = 0;
+    u64 pass_builds_published = 0, pass_builds_failed = 0;
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

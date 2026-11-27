@@ -13,7 +13,11 @@
 #include <set>
 #include <string>
 #include <vector>
+#if __has_include(<miniz.h>)
+#include <miniz.h>
+#else
 #include <zlib.h>
+#endif
 #include "video_core/renderer_vulkan/vk_precompile_files.h"
 
 using namespace Vulkan::Precompile;

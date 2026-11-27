@@ -86,7 +86,7 @@
 #include "video_core/renderer_vulkan/vk_precompile_files.h"
 #include "video_core/renderer_vulkan/vk_precompile_guard.h"
 #include "video_core/renderer_vulkan/vk_precompile_list.h"
-#include "video_core/renderer_vulkan/vk_precompile_load.h"
+#include "video_core/renderer_vulkan/vk_precompile_pass.h"
 #include "video_core/renderer_vulkan/vk_precompile_shadow.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 
@@ -616,7 +616,7 @@ std::optional<Reject> PrecompileBoot::Select(const RecordedKey& key, Shadow& sha
 /// `trace`, when set, gets why it was dropped.
 PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                                       PipelineTrace* trace) {
-    if (cache.compiler->Depth() >= LoadQueueDepth) {
+    if (cache.compiler->Depth() >= PassQueueDepth) {
         return PipelineStep::Full;
     }
     Shadow shadow;
@@ -661,7 +661,7 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                         why = "read outside the recorded words";
                         break;
                     }
-                    step = cache.StartLoadPipeline(selection, worker, &why);
+                    step = cache.StartPassPipeline(selection, worker, &why);
                     break;
                 }
                 why = worker.failed && worker.failure ? worker.failure : "selection failed";
@@ -680,7 +680,7 @@ PipelineStep PrecompileBoot::Pipeline(const RecordedKey& key, u64 until_ns,
                 const auto& spec = *worker.missing_spec;
                 const u64 hash = spec.info->pgm_hash;
                 const auto& program = *cache.program_cache.at(hash);
-                const auto found = program.pending ? LoadVariant::Pending : LoadVariant::Missing;
+                const auto found = program.pending ? PassVariant::Pending : PassVariant::Missing;
                 if (!AddsVariant(found)) {
                     why = "variant left to the game: the game's translation pending";
                     break;
@@ -919,7 +919,7 @@ std::optional<std::vector<u32>> PrecompileBoot::TranslateChecked(
 /// variant `worker`'s selection missed in a program in use or saved, translated from what that
 /// lookup read (the copy's code and its user data, led into the copy as Registers leads them),
 /// checked as an entry's translation is, then inserted into the program and saved at the index
-/// the game would give it (InsertLoadVariant). Null when added or already there (`present`);
+/// the game would give it (InsertPassVariant). Null when added or already there (`present`);
 /// else why it was left (VariantLeft), when a check failed or the program did not take it; the
 /// entry does not stop. Nothing of the rebuild's own is touched: programs, permutations.
 const char* PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) {
@@ -949,7 +949,7 @@ const char* PrecompileBoot::AddVariant(const PrepWorker& worker, bool& present) 
         return VariantLeft(stopped.value_or(Reject::Faulted));
     }
     bool inserted = false;
-    if (!cache.InsertLoadVariant(params.hash, std::move(*spv), std::move(spec), inserted)) {
+    if (!cache.InsertPassVariant(params.hash, std::move(*spv), std::move(spec), inserted)) {
         return "variant left to the game: the program did not take it";
     }
     present = !inserted;
@@ -1189,7 +1189,7 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
     }
     auto& boot = run->boot;
     const u32 entries = u32(boot.built.size());
-    const u64 published_before = load_builds_published, failed_before = load_builds_failed;
+    const u64 published_before = pass_builds_published, failed_before = pass_builds_failed;
     // One per fast first build published; nothing takes them while the pass runs.
     const size_t rebuilds_before = rebuilds.size();
     constexpr u64 no_limit = std::numeric_limits<u64>::max();
@@ -1224,7 +1224,7 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
     };
     // A build counts as running until PublishGraphics takes it: wait, then publish.
     const auto wait_and_publish = [this] {
-        WaitLoadBuilds(CompilePolicy::Now() + PipelineWaitNs);
+        WaitPassBuilds(CompilePolicy::Now() + PipelineWaitNs);
         PublishGraphics();
     };
     for (u32 done = 0; done < entries; ++done) {
@@ -1254,10 +1254,10 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
         report();
         progress([&] {
             std::printf("Precompile boot: pipelines: waiting for %zu builds\n",
-                        LoadBuildsRunning());
+                        PassBuildsRunning());
         });
         wait_and_publish();
-    } while (LoadBuildsRunning() > 0);
+    } while (PassBuildsRunning() > 0);
     passed = count;
     report();
     const auto now = std::chrono::steady_clock::now();
@@ -1269,8 +1269,8 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
                 "their optimised rebuild, in %lld ms (translation %llu ms), %lld ms since the "
                 "rebuild began\n",
                 entries,
-                static_cast<unsigned long long>(load_builds_published - published_before), had,
-                dropped, static_cast<unsigned long long>(load_builds_failed - failed_before),
+                static_cast<unsigned long long>(pass_builds_published - published_before), had,
+                dropped, static_cast<unsigned long long>(pass_builds_failed - failed_before),
                 boot.variants.added, rebuilds.size() - rebuilds_before,
                 static_cast<long long>(ms), static_cast<unsigned long long>(boot.run_ms),
                 static_cast<long long>(total_ms));

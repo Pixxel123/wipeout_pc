@@ -75,6 +75,6 @@ inline CompilePolicy g_compile_policy;
 /// pipeline pass handed over. Its compile leaves the policy alone (CreateCachedGraphicsPipeline):
 /// the pass builds the list's pipelines before the game runs, which is no sign of a draw's
 /// pipelines coming now.
-inline thread_local bool t_loader_build = false;
+inline thread_local bool t_pass_build = false;
 
 } // namespace Vulkan

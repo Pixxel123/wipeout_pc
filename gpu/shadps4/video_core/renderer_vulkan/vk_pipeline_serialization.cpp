@@ -359,7 +359,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                                                               : create(nullptr, used_info, false);
     };
     const auto compiled = [&] {
-        if (counted && !t_loader_build) {
+        if (counted && !t_pass_build) {
             g_compile_policy.Compiled(CompilePolicy::Now());
         }
     };
@@ -1688,7 +1688,7 @@ vk::ShaderModule PipelineCache::TryCreateShaderModule(std::span<const u32> spv) 
 // gow3 (GOW3_PRECOMPILE_BOOT): as a merge into a program the game already uses, at the index the
 // game's own translation would take, so the store's names and pipeline keys stay those the game
 // would write; the SPIR-V before the meta, as the shader compiler writes them.
-bool PipelineCache::InsertLoadVariant(u64 hash, std::vector<u32>&& spv,
+bool PipelineCache::InsertPassVariant(u64 hash, std::vector<u32>&& spv,
                                       Shader::StageSpecialization&& spec,
                                       bool& inserted_out) {
     const auto it_pgm = program_cache.find(hash);

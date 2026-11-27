@@ -1,16 +1,16 @@
-// Shared decisions of the start-up rebuild's pipeline pass (vk_precompile_load.h): when a
+// Shared decisions of the start-up rebuild's pipeline pass (vk_precompile_pass.h): when a
 // selection adds a missing variant, and the loading screen's count.
 #include <cassert>
-#include "video_core/renderer_vulkan/vk_precompile_load.h"
+#include "video_core/renderer_vulkan/vk_precompile_pass.h"
 
 using namespace Vulkan::Precompile;
 
 namespace {
 
 void TestVariantStepsAsideWhileTheGameTranslates() {
-    assert(AddsVariant(LoadVariant::Missing));
+    assert(AddsVariant(PassVariant::Missing));
     // The game's translation takes the next index.
-    assert(!AddsVariant(LoadVariant::Pending));
+    assert(!AddsVariant(PassVariant::Pending));
 }
 
 void TestTheStartUpBuildCountsBothHalvesInOneBar() {
