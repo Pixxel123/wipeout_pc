@@ -1287,7 +1287,7 @@ bool PipelineCache::RunPrecompileList(const std::function<void(u32, u32)>& progr
 /// (PrecompileBoot::Pipeline, the variant step included) and handed to the compile workers;
 /// while their queue is full (Full) this waits for them, publishes and tries the entry again.
 /// No time limit: the whole pass runs before the game does. Optimised rebuilds of fast first
-/// builds are not waited for; they run later on the low lane, as any other's do.
+/// builds are not waited for; they start later (StartRebuilds), as any other's do.
 void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>& on_screen) {
     // Released when this returns, also with the pass off.
     const PrecompileBootPtr run = std::move(precompile_boot);
@@ -1305,7 +1305,7 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
     const u32 entries = u32(boot.built.size());
     const u64 published_before = load_builds_published, failed_before = load_builds_failed;
     // One per fast first build published; nothing takes them while the pass runs.
-    const size_t rebuilds_before = waiting_rebuilds.size();
+    const size_t rebuilds_before = rebuilds.size();
     constexpr u64 no_limit = std::numeric_limits<u64>::max();
     u32 had = 0, dropped = 0;
     const auto started = std::chrono::steady_clock::now();
@@ -1385,7 +1385,7 @@ void PipelineCache::BuildPrecompilePipelines(const std::function<void(u32, u32)>
                 entries,
                 static_cast<unsigned long long>(load_builds_published - published_before), had,
                 dropped, static_cast<unsigned long long>(load_builds_failed - failed_before),
-                boot.variants.added, waiting_rebuilds.size() - rebuilds_before,
+                boot.variants.added, rebuilds.size() - rebuilds_before,
                 static_cast<long long>(ms), static_cast<unsigned long long>(boot.run_ms),
                 static_cast<long long>(total_ms));
 }

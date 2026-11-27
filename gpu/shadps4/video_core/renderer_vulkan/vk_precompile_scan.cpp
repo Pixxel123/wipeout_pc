@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // gow3 (vk_precompile_scan.h): the memory reads of the shader scan, and the diagnostic
-// GOW3_PRECOMPILE_SCAN=1, which runs it while loading (CompilePolicy::NoSceneFor) and logs each
+// GOW3_PRECOMPILE_SCAN=1, which runs it while loading (CompilePolicy::loading) and logs each
 // pass. With GOW3_PRECOMPILE_LIST=<file> it also logs how many of the list's programs the game
 // used since the load began (their first use in this launch) and how many of those the scan had
 // found before the load's first scene frame: every 5 s outside a load, and once more as the
@@ -305,7 +305,7 @@ void ScanFlipped(u64 now_ns, bool first_scene) {
         return;
     }
     auto& d = *diagnostic;
-    const bool loading = g_compile_policy.NoSceneFor(now_ns);
+    const bool loading = g_compile_policy.loading.load(std::memory_order_relaxed);
     d.scan.SetLoading(loading);
     if (d.list_programs.empty()) {
         return;

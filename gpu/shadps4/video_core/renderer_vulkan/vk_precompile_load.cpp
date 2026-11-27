@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // gow3 diagnostic GOW3_PRECOMPILE_LOAD=1 with GOW3_PRECOMPILE_LIST=<file> (vk_precompile_load.h):
-// while loading (CompilePolicy::NoSceneFor) a shader scan of the loader's own finds each
+// while loading (CompilePolicy::loading) a shader scan of the loader's own finds each
 // program's code in the game's memory. The loader copies each list program's code out of it
 // and keeps the copy only when its header and its body (the header's crc32) check out: the game
 // may be writing or reusing that memory, and the copy is what gets translated, so nothing the
@@ -562,7 +562,7 @@ bool PrecompileLoad::Checked(u32 index) const {
 /// used, starts its counts and drops the last load's pipelines not handed over; one that ends
 /// (its first scene frame) merges and prints its line.
 bool PrecompileLoad::Loading() {
-    const bool now_loading = g_compile_policy.NoSceneFor(CompilePolicy::Now());
+    const bool now_loading = g_compile_policy.loading.load(std::memory_order_relaxed);
     scan.SetLoading(now_loading);
     if (now_loading == loading) {
         return loading;
