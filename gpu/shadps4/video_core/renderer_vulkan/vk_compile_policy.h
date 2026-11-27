@@ -63,20 +63,9 @@ struct CompilePolicy {
     /// a scene, or the first seconds of a scene. Covers the first scene frame too, which is
     /// drawn before its flip and needs the most new pipelines.
     bool LongGrace(u64 now_ns) const {
-<<<<<<< ours
         return load_grace.load(std::memory_order_relaxed) &&
                (loading.load(std::memory_order_relaxed) ||
                 now_ns < long_grace_until_ns.load(std::memory_order_relaxed));
-=======
-        return NoSceneFor(now_ns) || now_ns < long_grace_until_ns.load(std::memory_order_relaxed);
-    }
-
-    /// No scene yet, or none for no_scene_ns. Another thread may have stored a scene flip
-    /// slightly after `now_ns` was read.
-    bool NoSceneFor(u64 now_ns) const {
-        const u64 last = last_scene_ns.load(std::memory_order_relaxed);
-        return last == 0 || (now_ns > last && now_ns - last >= no_scene_ns);
->>>>>>> theirs
     }
 };
 

@@ -318,27 +318,18 @@ void VideoOutDriver::Flip(const Request& req) {
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
-<<<<<<< ours
     // gow3: after the game loads a race or the menus, new pipelines may wait longer until a
     // few seconds into the scene (vk_compile_policy.h); the log line marks its first frame.
-    if (Vulkan::g_compile_policy.Flipped(Vulkan::CompilePolicy::Now(),
-                                         Gow3Stats::draws.load(std::memory_order_relaxed),
-                                         runtime_music_loads())) {
-        std::printf("Pipelines: first scene after a load; new pipelines may wait longer for "
-                    "%llu s more (GOW3_LOAD_GRACE=0: no)\n",
-=======
-    // gow3: after a loading screen, new pipelines may wait longer for a few seconds
-    // (vk_compile_policy.h); the log line marks where that window starts.
     const u64 flip_ns = Vulkan::CompilePolicy::Now();
     const u64 flip_draws = Gow3Stats::draws.load(std::memory_order_relaxed);
-    const bool first_scene = Vulkan::g_compile_policy.Flipped(flip_ns, flip_draws);
+    const bool first_scene =
+        Vulkan::g_compile_policy.Flipped(flip_ns, flip_draws, runtime_music_loads());
     Vulkan::Precompile::ScanFlipped(flip_ns, first_scene); // gow3 diagnostic, GOW3_PRECOMPILE_SCAN
     // gow3 diagnostic, GOW3_PRECOMPILE_LOAD_TRACE: a line for a frame with skipped draws.
     Vulkan::Precompile::LoadTraceFlipped(flip_ns, flip_draws);
     if (first_scene) {
-        std::printf("Pipelines: first scene after a loading screen; new pipelines may wait "
-                    "longer for %llu s (GOW3_LOAD_GRACE=0: no)\n",
->>>>>>> theirs
+        std::printf("Pipelines: first scene after a load; new pipelines may wait longer for "
+                    "%llu s more (GOW3_LOAD_GRACE=0: no)\n",
                     static_cast<unsigned long long>(Vulkan::CompilePolicy::after_load_ns /
                                                     1'000'000'000));
     }

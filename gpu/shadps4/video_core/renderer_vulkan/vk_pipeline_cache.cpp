@@ -80,14 +80,10 @@ struct AsyncGraphicsCompilation {
     GraphicsPipeline::SerializationSupport data;
     std::unique_ptr<GraphicsPipeline> pipeline;
     bool failure_logged = false;
-<<<<<<< ours
-    // gow3: a fast first build is rebuilt optimised from the same snapshot (StartRebuilds).
-=======
     /// gow3 (GOW3_PRECOMPILE_LOAD): handed over by the loader, not by a draw: the compile
     /// leaves the compile policy alone, and a failed build leaves pending_graphics.
     bool loader = false;
-    // gow3: a fast first build is rebuilt optimised from the same snapshot (QueueRebuilds).
->>>>>>> theirs
+    // gow3: a fast first build is rebuilt optimised from the same snapshot (StartRebuilds).
     GraphicsPipeline* published = nullptr;
     AsyncJob<bool> rebuild;
     std::unique_ptr<GraphicsPipeline> optimized;
