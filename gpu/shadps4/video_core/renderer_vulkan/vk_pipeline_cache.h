@@ -346,9 +346,14 @@ private:
     BackgroundWarmup* background = nullptr;
     tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> pending_graphics;
     /// gow3: published fast builds until their optimised rebuild is swapped in or dropped. A
-    /// rebuild starts once the cold burst is over (StartRebuilds), `rebuild_limit` at a time.
+    /// rebuild starts once the cold burst is over (StartRebuilds), `rebuild_limit` at a time
+    /// once a scene shows.
     std::vector<std::shared_ptr<AsyncGraphicsCompilation>> rebuilds;
     size_t rebuild_limit = 1;
+    /// gow3: the limit instead while no scene has shown since the start or the last load
+    /// (g_compile_policy.loading): every compile worker. A first build that arrives then may
+    /// wait for one rebuild to end.
+    size_t rebuild_limit_loading = 1;
     bool fast_first_builds = false; ///< gow3: first builds on the workers skip optimisations
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     std::vector<Program*> pending_programs;
